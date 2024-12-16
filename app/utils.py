@@ -384,10 +384,16 @@ def microblog_content_to_title(html: str) -> str:
     title = ''
     if '<p>' in html:
         soup = BeautifulSoup(html, 'html.parser')
-        for tag in soup.find_all('p'):
-            title = tag.get_text(separator=" ")
-            if title and title.strip() != '' and len(title.strip()) >= 5:
+        p_tags = soup.find_all('p')
+        for p_tag in p_tags:
+            for a_tag in p_tag.find_all('a'):
+                a_tag.extract()
+            potential_title = p_tag.get_text(separator=" ").strip()
+            if potential_title:
+                title = potential_title
                 break
+        if not title:
+            title = html_to_text(html)
     else:
         title = html_to_text(html)
 
@@ -402,11 +408,11 @@ def microblog_content_to_title(html: str) -> str:
 
     # there's no recognised punctuation
     if end_index == float('inf'):
-        if len(title) >= 10:
+        if len(title) >= 3:
             title = title.replace(' @ ', '').replace(' # ', '')
             title = shorten_string(title, 197)
         else:
-            title = '(content in post body)'
+            title = '(no title)'
         return title.strip()
 
     if end_index != -1:
