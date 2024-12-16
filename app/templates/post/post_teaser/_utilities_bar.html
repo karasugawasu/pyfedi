@@ -19,6 +19,11 @@
                 <a rel="nofollow" aria-label="{{ _('Cross-post') }}" href="{{ url_for('post.post_cross_post', post_id=post.id) }}"><span class="fe fe-cross-post"></span></a>
             </div>
         {% endif -%}
+        {% if post.ap_id -%}
+            <div class="post_cross_post_link">
+                <a href="{{ post.ap_id }}" rel="nofollow"><span class="fe fe-external" title="{{ _('View original on %(domain)s', domain=post.instance.domain) }}"></span></a>
+            </div>
+        {% endif -%}
         <div class="post_options_link">
           <a href="{{ url_for('post.post_options', post_id=post.id) }}" rel="nofollow" aria-label="{{ _('Options') }}"><span class="fe fe-options" title="Options"> </span></a>
         </div>
