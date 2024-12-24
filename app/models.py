@@ -710,6 +710,7 @@ class User(UserMixin, db.Model):
     cover = db.relationship('File', lazy='joined', foreign_keys=[cover_id], single_parent=True, cascade="all, delete-orphan")
     instance = db.relationship('Instance', lazy='joined', foreign_keys=[instance_id])
     conversations = db.relationship('Conversation', lazy='dynamic', secondary=conversation_member, backref=db.backref('members', lazy='joined'))
+    user_notes = db.relationship('UserNote', lazy='dynamic', foreign_keys="UserNote.target_id")
 
     ap_id = db.Column(db.String(255), index=True)           # e.g. username@server
     ap_profile_id = db.Column(db.String(255), index=True, unique=True)   # e.g. https://server/u/username
@@ -726,6 +727,7 @@ class User(UserMixin, db.Model):
     activity = db.relationship('ActivityLog', backref='account', lazy='dynamic', cascade="all, delete-orphan")
     posts = db.relationship('Post', lazy='dynamic', cascade="all, delete-orphan")
     post_replies = db.relationship('PostReply', lazy='dynamic', cascade="all, delete-orphan")
+    extra_fields = db.relationship('UserExtraField', lazy='dynamic', cascade="all, delete-orphan")
 
     roles = db.relationship('Role', secondary=user_role, lazy='dynamic', cascade="all, delete")
 
@@ -1022,6 +1024,7 @@ class User(UserMixin, db.Model):
         db.session.query(PostBookmark).filter(PostBookmark.user_id == self.id).delete()
         db.session.query(PostReplyBookmark).filter(PostReplyBookmark.user_id == self.id).delete()
         db.session.query(ModLog).filter(ModLog.user_id == self.id).delete()
+        db.session.query(UserNote).filter(or_(UserNote.user_id == self.id, UserNote.target_id == self.id)).delete()
 
     def purge_content(self, soft=True):
         files = File.query.join(Post).filter(Post.user_id == self.id).all()
@@ -1077,7 +1080,14 @@ class User(UserMixin, db.Model):
     # returns true if the post has been read, false if not
     def has_read_post(self, post):
         return self.read_post.filter(read_posts.c.read_post_id == post.id).count() > 0
-    
+
+    @cache.memoize(timeout=500)
+    def get_note(self, by_user):
+        user_note = self.user_notes.filter(UserNote.target_id == self.id, UserNote.user_id == by_user.id).first()
+        if user_note:
+            return user_note.body
+        else:
+            return None
 
 
 class ActivityLog(db.Model):
@@ -1364,7 +1374,7 @@ class Post(db.Model):
                     i += 1
                 db.session.commit()
 
-            if post.image_id:
+            if post.image_id and not post.type == constants.POST_TYPE_VIDEO:
                 make_image_sizes(post.image_id, 170, 512, 'posts',
                                  community.low_quality)  # the 512 sized image is for masonry view
 
@@ -2042,6 +2052,13 @@ class UserNote(db.Model):
     target_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
     body = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=utcnow)
+
+
+class UserExtraField(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
+    label = db.Column(db.String(50))
+    text = db.Column(db.String(256))
 
 
 class UserBlock(db.Model):

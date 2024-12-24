@@ -27,7 +27,7 @@ from app.models import Settings, BannedInstances, Interest, Role, User, RolePerm
 from app.post.routes import post_delete_post
 from app.utils import file_get_contents, retrieve_block_list, blocked_domains, retrieve_peertube_block_list, \
     shorten_string, get_request, html_to_text, blocked_communities, ap_datetime, gibberish, get_request_instance, \
-    instance_banned
+    instance_banned, recently_upvoted_post_replies, recently_upvoted_posts, jaccard_similarity
 
 
 def register(app):
@@ -98,7 +98,7 @@ def register(app):
                                 'threads.net', 'noauthority.social', 'pieville.net', 'links.hackliberty.org',
                                 'poa.st', 'freespeechextremist.com', 'bae.st', 'nicecrew.digital', 'detroitriotcity.com',
                                 'pawoo.net', 'shitposter.club', 'spinster.xyz', 'catgirl.life', 'gameliberty.club',
-                                'yggdrasil.social', 'beefyboys.win', 'brighteon.social', 'cum.salon']
+                                'yggdrasil.social', 'beefyboys.win', 'brighteon.social', 'cum.salon', 'wizard.casa']
             for bi in banned_instances:
                 db.session.add(BannedInstances(domain=bi))
                 print("Added banned instance", bi)
@@ -203,6 +203,13 @@ def register(app):
                 post.delete_dependencies()
                 db.session.delete(post)
             db.session.commit()
+
+            # Ensure accurate community stats
+            for community in Community.query.filter(Community.banned == False).all():
+                community.subscriptions_count = CommunityMember.query.filter(CommunityMember.community_id == community.id).count()
+                community.post_count = community.posts.filter(Post.deleted == False).count()
+                community.post_reply_count = community.replies.filter(PostReply.deleted == False).count()
+                db.session.commit()
 
             # Delete voting data after 6 months
             db.session.execute(text('DELETE FROM "post_vote" WHERE created_at < :cutoff'), {'cutoff': utcnow() - timedelta(days=28 * 6)})
@@ -463,6 +470,26 @@ def register(app):
         with app.app_context():
             db.session.query(ActivityPubLog).filter(ActivityPubLog.created_at < utcnow() - timedelta(days=3)).delete()
             db.session.commit()
+
+    @app.cli.command("detect_vote_manipulation")
+    def detect_vote_manipulation():
+        with app.app_context():
+            print('Getting user ids...')
+            all_user_ids = [user.id for user in User.query.filter(User.last_seen > datetime.utcnow() - timedelta(days=7))]
+            print('Checking...')
+            for i, first_user_id in enumerate(all_user_ids):
+                current_user_upvoted_posts = ['post/' + str(id) for id in recently_upvoted_posts(first_user_id)]
+                current_user_upvoted_replies = ['reply/' + str(id) for id in recently_upvoted_post_replies(first_user_id)]
+
+                current_user_upvotes = set(current_user_upvoted_posts + current_user_upvoted_replies)
+                if len(current_user_upvotes) > 12:
+                    print(i)
+                    for j in range(i + 1, len(all_user_ids)):
+                        other_user_id = all_user_ids[j]
+                        if jaccard_similarity(current_user_upvotes, other_user_id) >= 95:
+                            first_user = User.query.get(first_user_id)
+                            other_user = User.query.get(other_user_id)
+                            print(f'{first_user.link()} votes the same as {other_user.link()}')
 
     @app.cli.command("migrate_community_notifs")
     def migrate_community_notifs():
