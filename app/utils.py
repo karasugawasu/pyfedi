@@ -345,9 +345,13 @@ def allowlist_html(html: str, a_target='_blank') -> str:
 # use this for Markdown irrespective of origin, as it can deal with both soft break newlines ('\n' used by PieFed) and hard break newlines ('  \n' or ' \\n')
 # ' \\n' will create <br /><br /> instead of just <br />, but hopefully that's acceptable.
 def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
+    # Lemmyの改行の仕方と揃える
+    # on_newlineをFalseにして、スペース2つを見つけたらバックスラッシュを入れてあげる
+    re_breaks = re.compile(r'(\S)  ((\r?\n)|(\r\n?))')
+    markdown_text = re_breaks.sub(r'\1\\\2', markdown_text)
     if markdown_text:
         raw_html = markdown2.markdown(markdown_text,
-                    extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True, 'breaks': {'on_newline': True, 'on_backslash': True}})
+                    extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True, 'breaks': {'on_newline': False, 'on_backslash': True}})
         return allowlist_html(raw_html, a_target='_blank' if anchors_new_tab else '')
     else:
         return ''
@@ -362,9 +366,10 @@ def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
 #    c. raw 'https' strings in code blocks are being converted into <a> links for HTML that Lemmy then converts back into []()
 def piefed_markdown_to_lemmy_markdown(piefed_markdown: str):
     # only difference is newlines for soft breaks.
-    re_breaks = re.compile(r'(\S)(\r\n)')
-    lemmy_markdown = re_breaks.sub(r'\1  \2', piefed_markdown)
-    return lemmy_markdown
+    # markdown_to_htmlの変更によりこちらは不要
+    #re_breaks = re.compile(r'(\S)(\r\n)')
+    #lemmy_markdown = re_breaks.sub(r'\1  \2', piefed_markdown)
+    return piefed_markdown
 
 
 def markdown_to_text(markdown_text) -> str:
