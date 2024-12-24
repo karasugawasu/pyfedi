@@ -16,10 +16,11 @@ from app.constants import *
 from app.email import send_verification_email
 from app.models import Post, Community, CommunityMember, User, PostReply, PostVote, Notification, utcnow, File, Site, \
     Instance, Report, UserBlock, CommunityBan, CommunityJoinRequest, CommunityBlock, Filter, Domain, DomainBlock, \
-    InstanceBlock, NotificationSubscription, PostBookmark, PostReplyBookmark, read_posts, Topic
+    InstanceBlock, NotificationSubscription, PostBookmark, PostReplyBookmark, read_posts, Topic, UserNote, \
+    UserExtraField
 from app.user import bp
 from app.user.forms import ProfileForm, SettingsForm, DeleteAccountForm, ReportUserForm, \
-    FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm
+    FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm, UserNoteForm
 from app.user.utils import purge_user_then_delete, unsubscribe_from_community
 from app.utils import get_setting, render_template, markdown_to_html, user_access, markdown_to_text, shorten_string, \
     is_image_url, ensure_directory_exists, gibberish, file_get_contents, community_membership, user_filters_home, \
@@ -129,6 +130,15 @@ def edit_profile(actor):
         current_user.about = piefed_markdown_to_lemmy_markdown(form.about.data)
         current_user.about_html = markdown_to_html(form.about.data)
         current_user.matrix_user_id = form.matrixuserid.data
+        current_user.extra_fields = []
+        if form.extra_label_1.data.strip() != '' and form.extra_text_1.data.strip() != '':
+            current_user.extra_fields.append(UserExtraField(label=form.extra_label_1.data.strip(), text=form.extra_text_1.data.strip()))
+        if form.extra_label_2.data.strip() != '' and form.extra_text_2.data.strip() != '':
+            current_user.extra_fields.append(UserExtraField(label=form.extra_label_2.data.strip(), text=form.extra_text_2.data.strip()))
+        if form.extra_label_3.data.strip() != '' and form.extra_text_3.data.strip() != '':
+            current_user.extra_fields.append(UserExtraField(label=form.extra_label_3.data.strip(), text=form.extra_text_3.data.strip()))
+        if form.extra_label_4.data.strip() != '' and form.extra_text_4.data.strip() != '':
+            current_user.extra_fields.append(UserExtraField(label=form.extra_label_4.data.strip(), text=form.extra_text_4.data.strip()))
         current_user.bot = form.bot.data
         profile_file = request.files['profile_file']
         if profile_file and profile_file.filename != '':
@@ -169,7 +179,13 @@ def edit_profile(actor):
         form.title.data = current_user.title
         form.email.data = current_user.email
         form.about.data = current_user.about
+        i = 1
+        for extra_field in current_user.extra_fields:
+            getattr(form, f"extra_label_{i}").data = extra_field.label
+            getattr(form, f"extra_text_{i}").data = extra_field.text
+            i += 1
         form.matrixuserid.data = current_user.matrix_user_id
+        form.bot.data = current_user.bot
         form.password_field.data = ''
 
     return render_template('user/edit_profile.html', title=_('Edit profile'), form=form, user=current_user,
@@ -1330,3 +1346,44 @@ def user_read_posts_delete():
     db.session.commit()
     flash(_('Reading history has been deleted'))
     return redirect(url_for('user.user_read_posts'))
+
+
+@bp.route('/u/<actor>/note', methods=['GET', 'POST'])
+@login_required
+def edit_user_note(actor):
+    actor = actor.strip()
+    if '@' in actor:
+        user: User = User.query.filter_by(ap_id=actor, deleted=False).first()
+    else:
+        user: User = User.query.filter_by(user_name=actor, deleted=False, ap_id=None).first()
+    if user is None:
+        abort(404)
+    form = UserNoteForm()
+    if form.validate_on_submit() and not current_user.banned:
+        text = form.note.data.strip()
+        usernote = UserNote.query.filter(UserNote.target_id == user.id, UserNote.user_id == current_user.id).first()
+        if usernote:
+            usernote.body = text
+        else:
+            usernote = UserNote(target_id=user.id, user_id=current_user.id, body=text)
+            db.session.add(usernote)
+        db.session.commit()
+        cache.delete_memoized(User.get_note, user, current_user)
+
+        flash(_('Your changes have been saved.'), 'success')
+        goto = request.args.get('redirect') if 'redirect' in request.args else f'/u/{actor}'
+        return redirect(goto)
+
+    elif request.method == 'GET':
+        form.note.data = user.get_note(current_user)
+
+    return render_template('user/edit_note.html', title=_('Edit note'), form=form, user=user,
+                           menu_topics=menu_topics(), site=g.site)
+
+
+@bp.route('/user/<int:user_id>/preview')
+def user_preview(user_id):
+    user = User.query.get_or_404(user_id)
+    if (user.deleted or user.banned) and current_user.is_anonymous:
+        abort(404)
+    return render_template('user/user_preview.html', user=user)
