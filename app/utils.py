@@ -271,14 +271,27 @@ def allowlist_html(html: str, a_target='_blank') -> str:
             tag.extract()
 
     # Filter tags, leaving only safe ones
+    # スキップ対象タグのリストを明確化
     for tag in soup.find_all():
+        # footnoteに対応
+        class_attr = tag.attrs.get('class', '')
+        if isinstance(class_attr, list):  # class 属性がリストの場合に対応
+            class_attr = ' '.join(class_attr)
+        if (
+            (tag.name == 'sup' and 'footnote-ref' in class_attr) or
+            (tag.name == 'a' and 'footnoteBackLink' in class_attr) or
+            (tag.name == 'div' and 'footnotes' in class_attr) or
+            (tag.name == 'a' and tag.find_parent('sup', class_='footnote-ref'))
+        ):
+            continue
+
         # If the tag is not in the allowed_tags list, remove it and its contents
         if tag.name not in allowed_tags:
             tag.extract()
         else:
             # Filter and sanitize attributes
             for attr in list(tag.attrs):
-                if attr not in ['href', 'src', 'alt', 'class']:
+                if attr not in ['href', 'src', 'alt', 'class', 'id', 'title']:
                     del tag[attr]
             # Remove some mastodon guff - spans with class "invisible"
             if tag.name == 'span' and 'class' in tag.attrs and 'invisible' in tag.attrs['class']:
@@ -347,7 +360,7 @@ def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
     markdown_text = re_breaks.sub(r'\1\\\2', markdown_text)
     if markdown_text:
         raw_html = markdown2.markdown(markdown_text,
-                    extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True, 'breaks': {'on_newline': False, 'on_backslash': True}})
+                    extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True, 'breaks': {'on_newline': False, 'on_backslash': True}, 'footnotes': True})
         return allowlist_html(raw_html, a_target='_blank' if anchors_new_tab else '')
     else:
         return ''
