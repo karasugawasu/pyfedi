@@ -988,9 +988,6 @@ time {
 .post_utilities_bar div .dropdown-item:active {
   line-height: 26px;
 }
-.post_utilities_bar .notify_toggle {
-  margin-left: auto; /* pull right */
-}
 
 .post_full .post_utilities_bar .voting_buttons_new {
   margin-left: -15px;
@@ -1388,7 +1385,6 @@ time {
   line-height: 44px;
 }
 .comment .comment_actions .notify_toggle {
-  margin-left: auto; /* pull right */
   font-size: 87%;
 }
 .comment .comment_actions .dropdown-item {
@@ -1496,6 +1492,12 @@ fieldset legend {
   display: block;
   width: 100%;
   overflow-x: auto;
+}
+.post_body ol li, .post_body ul li, .comment_body ol li, .comment_body ul li {
+  margin-bottom: 7px;
+}
+.post_body ol li > p, .post_body ul li > p, .comment_body ol li > p, .comment_body ul li > p {
+  margin-bottom: 0;
 }
 
 .skip-link:focus {
@@ -1841,6 +1843,10 @@ form h5 {
   text-align: right;
 }
 
+.pull-right {
+  margin-left: auto;
+}
+
 #timeSpent {
   cursor: wait;
 }
@@ -1983,6 +1989,13 @@ form h5 {
   .render_username .user_preview .card .preview_avatar_image img {
     max-width: 100%;
   }
+}
+
+#preview:has(p, a, h1, h2, h3, ul, ol) {
+  border: solid 1px #ddd;
+  border-radius: 5px;
+  padding: 5px 10px;
+  margin-bottom: 15px;
 }
 
 /* high contrast */

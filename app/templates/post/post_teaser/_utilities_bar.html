@@ -24,7 +24,7 @@
                 <a href="{{ post.ap_id }}" rel="nofollow"><span class="fe fe-external" title="{{ _('View original on %(domain)s', domain=post.instance.domain) }}"></span></a>
             </div>
         {% endif -%}
-        <div class="post_options_link">
+        <div class="post_options_link pull-right">
             <div class="dropdown">
                 <a href="{{ url_for('post.post_options', post_id=post.id) if low_bandwidth else '#' }}"
                    data-bs-toggle="dropdown"

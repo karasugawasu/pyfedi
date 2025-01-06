@@ -21,7 +21,7 @@ from app.utils import render_template, get_setting, request_etag_matches, return
     ap_datetime, shorten_string, markdown_to_text, user_filters_home, \
     joined_communities, moderating_communities, markdown_to_html, allowlist_html, \
     blocked_instances, communities_banned_from, topic_tree, recently_upvoted_posts, recently_downvoted_posts, \
-    blocked_users, menu_topics, blocked_communities, get_request
+    blocked_users, menu_topics, blocked_communities, get_request, mastodon_extra_field_link
 from app.models import Community, CommunityMember, Post, Site, User, utcnow, Topic, Instance, \
     Notification, Language, community_language, ModLog, read_posts
 
@@ -330,6 +330,7 @@ def list_subscribed_communities():
 
 
 @bp.route('/communities/notsubscribed', methods=['GET'])
+@login_required
 def list_not_subscribed_communities():
     verification_warning()
     search_param = request.args.get('search', '')
@@ -385,6 +386,7 @@ def list_not_subscribed_communities():
                            topics=topics, languages=languages, topic_id=topic_id, language_id=language_id, sort_by=sort_by,
                            low_bandwidth=low_bandwidth, moderating_communities=moderating_communities(current_user.get_id()),
                            menu_topics=menu_topics(), site=g.site)
+
 
 @bp.route('/modlog', methods=['GET'])
 def modlog():

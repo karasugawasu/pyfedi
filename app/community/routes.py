@@ -690,8 +690,13 @@ def add_post(actor, type):
                         img.thumbnail((2000, 2000))
                         img.save(final_place)
 
-                request_json['object']['attachment'] = [{'type': 'Image', 'url': f'https://{current_app.config["SERVER_NAME"]}/{final_place.replace("app/", "")}',
-                                                        'name': form.image_alt_text.data}]
+                request_json['object']['attachment'] = [{
+                    'type': 'Image', 
+                    'url': f'https://{current_app.config["SERVER_NAME"]}/{final_place.replace("app/", "")}',
+                    'name': form.image_alt_text.data,
+                    'file_path': final_place
+                }]
+        
         elif type == 'video':
             request_json['object']['attachment'] = [{'type': 'Document', 'url': form.video_url.data}]
         elif type == 'poll':
@@ -730,7 +735,12 @@ def add_post(actor, type):
             if not community.local_only:
                 federate_post(community, post)
 
-        return redirect(f"/post/{post.id}")
+        resp = make_response(redirect(f"/post/{post.id}"))
+        # remove cookies used to maintain state when switching post type
+        resp.delete_cookie('post_title')
+        resp.delete_cookie('post_description')
+        resp.delete_cookie('post_tags')
+        return resp
     else: # GET
         form.communities.data = community.id
         form.notify_author.data = True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 from datetime import timedelta, datetime, timezone
 from random import randint
 from typing import Union, Tuple, List
@@ -32,7 +33,8 @@ from app.utils import get_request, allowlist_html, get_setting, ap_datetime, mar
     microblog_content_to_title, is_video_url, \
     notification_subscribers, communities_banned_from, actor_contains_blocked_words, \
     html_to_text, add_to_modlog_activitypub, joined_communities, \
-    moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse
+    moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse, instance_banned, \
+    mastodon_extra_field_link
 
 from sqlalchemy import or_
 
@@ -237,17 +239,6 @@ def banned_user_agents():
 
 
 @cache.memoize(150)
-def instance_blocked(host: str) -> bool:        # see also utils.instance_banned()
-    if host is None or host == '':
-        return True
-    host = host.lower()
-    if 'https://' in host or 'http://' in host:
-        host = urlparse(host).hostname
-    instance = BannedInstances.query.filter_by(domain=host.strip()).first()
-    return instance is not None
-
-
-@cache.memoize(150)
 def instance_allowed(host: str) -> bool:
     if host is None or host == '':
         return True
@@ -282,7 +273,7 @@ def find_actor_or_create(actor: str, create_if_not_found=True, community_only=Fa
             if not instance_allowed(server):
                 return None
         else:
-            if instance_blocked(server):
+            if instance_banned(server):
                 return None
         if actor_contains_blocked_words(actor):
             return None
@@ -527,6 +518,8 @@ def refresh_user_profile_task(user_id):
                 user.extra_fields = []
                 for field_data in activity_json['attachment']:
                     if field_data['type'] == 'PropertyValue':
+                        if '<a ' in field_data['value']:
+                            field_data['value'] = mastodon_extra_field_link(field_data['value'])
                         user.extra_fields.append(UserExtraField(label=field_data['name'].strip(), text=field_data['value'].strip()))
             if 'type' in activity_json:
                 user.bot = True if activity_json['type'] == 'Service' else False
@@ -562,11 +555,8 @@ def refresh_user_profile_task(user_id):
             session.commit()
             if user.avatar_id and avatar_changed:
                 make_image_sizes(user.avatar_id, 40, 250, 'users')
-                cache.delete_memoized(User.avatar_image, user)
-                cache.delete_memoized(User.avatar_thumbnail, user)
             if user.cover_id and cover_changed:
                 make_image_sizes(user.cover_id, 700, 1600, 'users')
-                cache.delete_memoized(User.cover_image, user)
             session.close()
 
 
@@ -779,6 +769,8 @@ def actor_json_to_model(activity_json, address, server):
             user.extra_fields = []
             for field_data in activity_json['attachment']:
                 if field_data['type'] == 'PropertyValue':
+                    if '<a ' in field_data['value']:
+                        field_data['value'] = mastodon_extra_field_link(field_data['value'])
                     user.extra_fields.append(UserExtraField(label=field_data['name'].strip(), text=field_data['value'].strip()))
         try:
             db.session.add(user)
