@@ -42,12 +42,18 @@ class BannedInstances(db.Model):
     reason = db.Column(db.String(256))
     initiator = db.Column(db.String(256))
     created_at = db.Column(db.DateTime, default=utcnow)
+    subscription_id = db.Column(db.Integer, db.ForeignKey('defederation_subscription.id'), index=True) # is None when the ban was done by a local admin
 
 
 class AllowedInstances(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     domain = db.Column(db.String(256), index=True)
     created_at = db.Column(db.DateTime, default=utcnow)
+
+
+class DefederationSubscription(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    domain = db.Column(db.String(256), index=True)
 
 
 class Instance(db.Model):
@@ -322,7 +328,6 @@ class File(db.Model):
 
         if purge_from_cache:
             flush_cdn_cache(purge_from_cache)
-
 
     def filesize(self):
         size = 0
@@ -765,7 +770,6 @@ class User(UserMixin, db.Model):
         else:
             return '[deleted]'
 
-    @cache.memoize(timeout=500)
     def avatar_thumbnail(self) -> str:
         if self.avatar_id is not None:
             if self.avatar.thumbnail_path is not None:
@@ -777,7 +781,6 @@ class User(UserMixin, db.Model):
                 return self.avatar_image()
         return ''
 
-    @cache.memoize(timeout=500)
     def avatar_image(self) -> str:
         if self.avatar_id is not None:
             if self.avatar.file_path is not None:
@@ -792,7 +795,6 @@ class User(UserMixin, db.Model):
                     return self.avatar.source_url
         return ''
 
-    @cache.memoize(timeout=500)
     def cover_image(self) -> str:
         if self.cover_id is not None:
             if self.cover.thumbnail_path is not None:
@@ -1240,6 +1242,7 @@ class Post(db.Model):
                 if blocked_phrase in post.body:
                     return None
 
+        file_path = None
         if ('attachment' in request_json['object'] and
             isinstance(request_json['object']['attachment'], list) and
             len(request_json['object']['attachment']) > 0 and
@@ -1252,9 +1255,10 @@ class Post(db.Model):
                 if 'name' in request_json['object']['attachment'][0]:
                     alt_text = request_json['object']['attachment'][0]['name']
             if request_json['object']['attachment'][0]['type'] == 'Image':
-                post.url = request_json['object']['attachment'][0]['url']  # PixelFed, PieFed, Lemmy >= 0.19.4
-                if 'name' in request_json['object']['attachment'][0]:
-                    alt_text = request_json['object']['attachment'][0]['name']
+                attachment = request_json['object']['attachment'][0]
+                post.url = attachment['url']  # PixelFed, PieFed, Lemmy >= 0.19.4
+                alt_text = attachment.get("name")
+                file_path = attachment.get("file_path")
 
         if 'attachment' in request_json['object'] and isinstance(request_json['object']['attachment'], dict):  # a.gup.pe (Mastodon)
             alt_text = None
@@ -1266,6 +1270,8 @@ class Post(db.Model):
                 image = File(source_url=post.url)
                 if alt_text:
                     image.alt_text = alt_text
+                if file_path:
+                    image.file_path = file_path
                 db.session.add(image)
                 post.image = image
             elif is_video_url(post.url):  # youtube is detected later
@@ -2058,7 +2064,7 @@ class UserExtraField(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
     label = db.Column(db.String(50))
-    text = db.Column(db.String(256))
+    text = db.Column(db.String(1024))
 
 
 class UserBlock(db.Model):
