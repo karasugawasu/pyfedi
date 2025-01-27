@@ -10,8 +10,8 @@ from wtforms import SelectField, RadioField
 
 from app import db, constants, cache, celery
 from app.activitypub.signature import HttpSignature, post_request, default_context, post_request_in_background
-from app.activitypub.util import notify_about_post_reply, inform_followers_of_post_update, update_post_from_activity
-from app.community.util import save_post, send_to_remote_instance
+from app.activitypub.util import notify_about_post_reply, update_post_from_activity
+from app.community.util import send_to_remote_instance
 from app.inoculation import inoculation
 from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm
 from app.community.forms import CreateLinkForm, CreateImageForm, CreateDiscussionForm, CreateVideoForm, CreatePollForm, EditImageForm
@@ -25,6 +25,7 @@ from app.models import Post, PostReply, \
     Topic, User, Instance, NotificationSubscription, UserFollower, Poll, PollChoice, PollChoiceVote, PostBookmark, \
     PostReplyBookmark, CommunityBlock, File
 from app.post import bp
+from app.shared.tasks import task_selector
 from app.utils import get_setting, render_template, allowlist_html, markdown_to_html, validation_required, \
     shorten_string, markdown_to_text, gibberish, ap_datetime, return_304, \
     request_etag_matches, ip_address, user_ip_banned, instance_banned, \
@@ -32,7 +33,9 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     blocked_instances, blocked_domains, community_moderators, blocked_phrases, show_ban_message, recently_upvoted_posts, \
     recently_downvoted_posts, recently_upvoted_post_replies, recently_downvoted_post_replies, reply_is_stupid, \
     languages_for_form, menu_topics, add_to_modlog, blocked_communities, piefed_markdown_to_lemmy_markdown, \
-    permission_required, blocked_users, get_request, is_local_image_url, is_video_url
+    permission_required, blocked_users, get_request, is_local_image_url, is_video_url, can_upvote, can_downvote
+from app.shared.reply import make_reply, edit_reply
+from app.shared.post import edit_post
 
 
 def show_post(post_id: int):
@@ -43,7 +46,10 @@ def show_post(post_id: int):
         if current_user.is_anonymous or not (current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff())):
             abort(404)
         else:
-            flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
+            if post.deleted_by == post.user_id:
+                flash(_('This post has been deleted by the author and is only visible to staff and admins.'), 'warning')
+            else:
+                flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
 
     sort = request.args.get('sort', 'hot')
 
@@ -70,102 +76,10 @@ def show_post(post_id: int):
     if current_user.is_authenticated and current_user.verified and form.validate_on_submit():
 
         try:
-            reply = PostReply.new(current_user, post, in_reply_to=None, body=piefed_markdown_to_lemmy_markdown(form.body.data),
-                                  body_html=markdown_to_html(form.body.data), notify_author=form.notify_author.data,
-                                  language_id=form.language_id.data)
+            reply = make_reply(form, post, None, 1)
         except Exception as ex:
             flash(_('Your reply was not accepted because %(reason)s', reason=str(ex)), 'error')
             return redirect(url_for('activitypub.post_ap', post_id=post_id))
-
-        current_user.language_id = form.language_id.data
-        reply.ap_id = reply.profile_id()
-        db.session.commit()
-        form.body.data = ''
-        flash('Your comment has been added.')
-
-        # federation
-        reply_json = {
-            'type': 'Note',
-            'id': reply.public_url(),
-            'attributedTo': current_user.public_url(),
-            'to': [
-                'https://www.w3.org/ns/activitystreams#Public'
-            ],
-            'cc': [
-                community.public_url(), post.author.public_url()
-            ],
-            'content': reply.body_html,
-            'inReplyTo': post.profile_id(),
-            'mediaType': 'text/html',
-            'source': {'content': reply.body, 'mediaType': 'text/markdown'},
-            'published': ap_datetime(utcnow()),
-            'distinguished': False,
-            'audience': community.public_url(),
-            'tag': [{
-                'href': post.author.public_url(),
-                'name': post.author.mention_tag(),
-                'type': 'Mention'
-            }],
-            'language': {
-                'identifier': reply.language_code(),
-                'name': reply.language_name()
-            },
-            'contentMap': {
-                reply.language_code(): reply.body_html
-            }
-        }
-        create_json = {
-            'type': 'Create',
-            'actor': current_user.public_url(),
-            'audience': community.public_url(),
-            'to': [
-                'https://www.w3.org/ns/activitystreams#Public'
-            ],
-            'cc': [
-                community.public_url(), post.author.public_url()
-            ],
-            'object': reply_json,
-            'id': f"https://{current_app.config['SERVER_NAME']}/activities/create/{gibberish(15)}",
-            'tag': [{
-                'href': post.author.public_url(),
-                'name': post.author.mention_tag(),
-                'type': 'Mention'
-            }]
-        }
-        if not community.is_local():    # this is a remote community, send it to the instance that hosts it
-            success = post_request_in_background(community.ap_inbox_url, create_json, current_user.private_key,
-                                                 current_user.public_url() + '#main-key', timeout=10)
-            if success is False or isinstance(success, str):
-                flash('Failed to send to remote instance', 'error')
-        else:                       # local community - send it to followers on remote instances
-            announce = {
-                "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
-                "type": 'Announce',
-                "to": [
-                    "https://www.w3.org/ns/activitystreams#Public"
-                ],
-                "actor": community.public_url(),
-                "cc": [
-                    community.ap_followers_url
-                ],
-                '@context': default_context(),
-                'object': create_json
-            }
-
-            for instance in community.following_instances():
-                if instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                    send_to_remote_instance(instance.id, community.id, announce)
-
-        # send copy of Note to post author (who won't otherwise get it if no-one else on their instance is subscribed to the community)
-        if not post.author.is_local() and post.author.ap_domain != community.ap_domain:
-            if not community.is_local() or (community.is_local and not community.has_followers_from_domain(post.author.ap_domain)):
-                success = post_request_in_background(post.author.ap_inbox_url, create_json, current_user.private_key,
-                                                     current_user.public_url() + '#main-key', timeout=10)
-                if success is False or isinstance(success, str):
-                    # sending to shared inbox is good enough for Mastodon, but Lemmy will reject it the local community has no followers
-                    personal_inbox = post.author.public_url() + '/inbox'
-                    post_request_in_background(personal_inbox, create_json, current_user.private_key,
-                                               current_user.public_url() + '#main-key', timeout=10)
 
         return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{reply.id}'))
     else:
@@ -252,9 +166,13 @@ def show_post(post_id: int):
 
     # for logged in users who have the 'hide read posts' function enabled
     # mark this post as read
-    if current_user.is_authenticated and current_user.hide_read_posts:
-        current_user.mark_post_as_read(post)
-        db.session.commit()
+    if current_user.is_authenticated:
+        user = current_user
+        if current_user.hide_read_posts:
+            current_user.mark_post_as_read(post)
+            db.session.commit()
+    else:
+        user = None
 
     response = render_template('post/post.html', title=post.title, post=post, is_moderator=is_moderator, is_owner=community.is_owner(),
                            community=post.community,
@@ -268,6 +186,8 @@ def show_post(post_id: int):
                            recently_upvoted_replies=recently_upvoted_replies, recently_downvoted_replies=recently_downvoted_replies,
                            reply_collapse_threshold=reply_collapse_threshold,
                            etag=f"{post.id}{sort}_{hash(post.last_active)}", markdown_editor=current_user.is_authenticated and current_user.markdown_editor,
+                           can_upvote_here=can_upvote(user, community),
+                           can_downvote_here=can_downvote(user, community, g.site),
                            low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
@@ -440,7 +360,8 @@ def poll_vote(post_id):
         poll_votes = PollChoice.query.join(PollChoiceVote, PollChoiceVote.choice_id == PollChoice.id).filter(PollChoiceVote.post_id == post.id, PollChoiceVote.user_id == current_user.id).all()
         for pv in poll_votes:
             if post.author.is_local():
-                inform_followers_of_post_update(post.id, 1)
+                from app.shared.tasks import task_selector
+                task_selector('edit_post', user_id=current_user.id, post_id=post.id)
             else:
                 pollvote_json = {
                   '@context': default_context(),
@@ -475,7 +396,10 @@ def continue_discussion(post_id, comment_id):
         if current_user.is_anonymous or not (current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff())):
             abort(404)
         else:
-            flash(_('This comment has been deleted and is only visible to staff and admins.'), 'warning')
+            if post.deleted_by == post.user_id:
+                flash(_('This post has been deleted by the author and is only visible to staff and admins.'), 'warning')
+            else:
+                flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
 
     mods = post.community.moderators()
     is_moderator = current_user.is_authenticated and any(mod.user_id == current_user.id for mod in mods)
@@ -501,6 +425,7 @@ def continue_discussion(post_id, comment_id):
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/reply', methods=['GET', 'POST'])
 @login_required
 def add_reply(post_id: int, comment_id: int):
+    # this route is used when JS is disabled
     if current_user.banned or current_user.ban_comments:
         return show_ban_message()
     post = Post.query.get_or_404(post_id)
@@ -525,145 +450,17 @@ def add_reply(post_id: int, comment_id: int):
     form = NewReplyForm()
     form.language_id.choices = languages_for_form()
     if form.validate_on_submit():
-        if reply_already_exists(user_id=current_user.id, post_id=post.id, parent_id=in_reply_to.id, body=form.body.data):
-            if in_reply_to.depth <= constants.THREAD_CUTOFF_DEPTH:
-                return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{in_reply_to.id}'))
-            else:
-                return redirect(url_for('post.continue_discussion', post_id=post_id, comment_id=in_reply_to.parent_id))
-
-        if reply_is_just_link_to_gif_reaction(form.body.data):
-            current_user.reputation -= 1
-            flash(_('This type of comment is not accepted, sorry.'), 'error')
-            if in_reply_to.depth <= constants.THREAD_CUTOFF_DEPTH:
-                return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{in_reply_to.id}'))
-            else:
-                return redirect(url_for('post.continue_discussion', post_id=post_id, comment_id=in_reply_to.parent_id))
-
-        if reply_is_stupid(form.body.data):
-            existing_vote = PostReplyVote.query.filter_by(user_id=current_user.id, post_reply_id=in_reply_to.id).first()
-            if existing_vote is None:
-                flash(_('We have upvoted the comment for you.'), 'warning')
-                comment_vote(in_reply_to.id, 'upvote')
-            else:
-                flash(_('You have already upvoted the comment, you do not need to say "this" also.'), 'error')
-            if in_reply_to.depth <= constants.THREAD_CUTOFF_DEPTH:
-                return redirect(url_for('activitypub.post_ap', post_id=post_id))
-            else:
-                return redirect(url_for('post.continue_discussion', post_id=post_id, comment_id=in_reply_to.parent_id))
-
         current_user.last_seen = utcnow()
         current_user.ip_address = ip_address()
-        current_user.language_id = form.language_id.data
 
         try:
-            reply = PostReply.new(current_user, post, in_reply_to,
-                                  body=piefed_markdown_to_lemmy_markdown(form.body.data),
-                                  body_html=markdown_to_html(form.body.data),
-                                  notify_author=form.notify_author.data,
-                                  language_id=form.language_id.data)
+            reply = make_reply(form, post, in_reply_to.id, 1)
         except Exception as ex:
             flash(_('Your reply was not accepted because %(reason)s', reason=str(ex)), 'error')
             if in_reply_to.depth <= constants.THREAD_CUTOFF_DEPTH:
                 return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{in_reply_to.id}'))
             else:
                 return redirect(url_for('post.continue_discussion', post_id=post_id, comment_id=in_reply_to.parent_id))
-
-        form.body.data = ''
-        flash('Your comment has been added.')
-
-        # federation
-        if not post.community.local_only:
-            reply_json = {
-                'type': 'Note',
-                'id': reply.public_url(),
-                'attributedTo': current_user.public_url(),
-                'to': [
-                    'https://www.w3.org/ns/activitystreams#Public'
-                ],
-                'cc': [
-                    post.community.public_url(),
-                    in_reply_to.author.public_url()
-                ],
-                'content': reply.body_html,
-                'inReplyTo': in_reply_to.profile_id(),
-                'url': reply.profile_id(),
-                'mediaType': 'text/html',
-                'source': {'content': reply.body, 'mediaType': 'text/markdown'},
-                'published': ap_datetime(utcnow()),
-                'distinguished': False,
-                'audience': post.community.public_url(),
-                'language': {
-                    'identifier': reply.language_code(),
-                    'name': reply.language_name()
-                },
-                'contentMap': {
-                    'en': reply.body_html
-                }
-            }
-            create_json = {
-                '@context': default_context(),
-                'type': 'Create',
-                'actor': current_user.public_url(),
-                'audience': post.community.public_url(),
-                'to': [
-                    'https://www.w3.org/ns/activitystreams#Public'
-                ],
-                'cc': [
-                    post.community.public_url(),
-                    in_reply_to.author.public_url()
-                ],
-                'object': reply_json,
-                'id': f"https://{current_app.config['SERVER_NAME']}/activities/create/{gibberish(15)}"
-            }
-            if in_reply_to.notify_author and in_reply_to.author.ap_id is not None:
-                reply_json['tag'] = [
-                    {
-                        'href': in_reply_to.author.public_url(),
-                        'name': in_reply_to.author.mention_tag(),
-                        'type': 'Mention'
-                    }
-                ]
-                create_json['tag'] = [
-                    {
-                        'href': in_reply_to.author.public_url(),
-                        'name': in_reply_to.author.mention_tag(),
-                        'type': 'Mention'
-                    }
-                ]
-            if not post.community.is_local():    # this is a remote community, send it to the instance that hosts it
-                success = post_request(post.community.ap_inbox_url, create_json, current_user.private_key,
-                                                           current_user.public_url() + '#main-key')
-                if success is False or isinstance(success, str):
-                    flash('Failed to send reply', 'error')
-            else:                       # local community - send it to followers on remote instances
-                announce = {
-                    "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
-                    "type": 'Announce',
-                    "to": [
-                        "https://www.w3.org/ns/activitystreams#Public"
-                    ],
-                    "actor": post.community.public_url(),
-                    "cc": [
-                        post.community.ap_followers_url
-                    ],
-                    '@context': default_context(),
-                    'object': create_json
-                }
-
-                for instance in post.community.following_instances():
-                    if instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                        send_to_remote_instance(instance.id, post.community.id, announce)
-
-            # send copy of Note to comment author (who won't otherwise get it if no-one else on their instance is subscribed to the community)
-            if not in_reply_to.author.is_local() and in_reply_to.author.ap_domain != reply.community.ap_domain:
-                if not post.community.is_local() or (post.community.is_local and not post.community.has_followers_from_domain(in_reply_to.author.ap_domain)):
-                    success = post_request(in_reply_to.author.ap_inbox_url, create_json, current_user.private_key,
-                                                           current_user.public_url() + '#main-key')
-                    if success is False or isinstance(success, str):
-                        # sending to shared inbox is good enough for Mastodon, but Lemmy will reject it the local community has no followers
-                        personal_inbox = in_reply_to.author.public_url() + '/inbox'
-                        post_request(personal_inbox, create_json, current_user.private_key,
-                                                       current_user.public_url() + '#main-key')
 
         if reply.depth <= constants.THREAD_CUTOFF_DEPTH:
             return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{reply.id}'))
@@ -678,6 +475,45 @@ def add_reply(post_id: int, comment_id: int):
                                joined_communities = joined_communities(current_user.id), community=post.community,
                                SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                                inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
+
+
+@bp.route('/post/<int:post_id>/comment/<int:comment_id>/reply_inline', methods=['GET', 'POST'])
+@login_required
+def add_reply_inline(post_id: int, comment_id: int):
+    # this route is called by htmx and returns a html fragment representing a form that can be submitted to make a new reply
+    # it also accepts the POST from that form and makes the reply
+    if current_user.banned or current_user.ban_comments:
+        return _('You have been banned.')
+    post = Post.query.get_or_404(post_id)
+
+    if not post.comments_enabled:
+        return _('Comments have been disabled.')
+
+    in_reply_to = PostReply.query.get_or_404(comment_id)
+
+    if in_reply_to.author.has_blocked_user(current_user.id):
+        return _('You cannot reply to %(name)s', name=in_reply_to.author.display_name())
+
+    if request.method == 'GET':
+        return render_template('post/add_reply_inline.html', post_id=post_id, comment_id=comment_id, languages=languages_for_form())
+    else:
+        content = request.form.get('body', '').strip()
+        language_id = int(request.form.get('language_id'))
+
+        if content == '':
+            return f'<div id="reply_to_{comment_id}" class="hidable"></div>' # do nothing, just hide the form
+        reply = PostReply.new(current_user, post, in_reply_to=in_reply_to, body=piefed_markdown_to_lemmy_markdown(content),
+                              body_html=markdown_to_html(content), notify_author=True,
+                              language_id=language_id)
+
+        current_user.language_id = language_id
+        reply.ap_id = reply.profile_id()
+        db.session.commit()
+
+        # Federate the reply
+        task_selector('make_reply', user_id=current_user.id, reply_id=reply.id, parent_id=in_reply_to.id)
+
+        return render_template('post/add_reply_inline_result.html', post_reply=reply)
 
 
 @bp.route('/post/<int:post_id>/options_menu', methods=['GET'])
@@ -753,7 +589,7 @@ def post_edit(post_id: int):
         del form.finish_in
     else:
         abort(404)
-    
+
     del form.communities
 
     mods = post.community.moderators()
@@ -773,43 +609,16 @@ def post_edit(post_id: int):
             form.nsfl.data = True
             form.nsfw.render_kw = {'disabled': True}
 
-        old_url = post.url
-
         form.language_id.choices = languages_for_form()
 
         if form.validate_on_submit():
-            save_post(form, post, post_type)
-            post.community.last_active = utcnow()
-            post.edited_at = utcnow()
-
-            if post.url != old_url:
-                if post.cross_posts is not None:
-                    old_cross_posts = Post.query.filter(Post.id.in_(post.cross_posts)).all()
-                    post.cross_posts.clear()
-                    for ocp in old_cross_posts:
-                        if ocp.cross_posts is not None:
-                            ocp.cross_posts.remove(post.id)
-
-                new_cross_posts = Post.query.filter(Post.id != post.id, Post.url == post.url, Post.deleted == False,
-                                                Post.posted_at > post.edited_at - timedelta(days=6)).all()
-                for ncp in new_cross_posts:
-                    if ncp.cross_posts is None:
-                        ncp.cross_posts = [post.id]
-                    else:
-                        ncp.cross_posts.append(post.id)
-                    if post.cross_posts is None:
-                        post.cross_posts = [ncp.id]
-                    else:
-                        post.cross_posts.append(ncp.id)
-
-            db.session.commit()
-
-            flash(_('Your changes have been saved.'), 'success')
-
-            # federate edit
-            if not post.community.local_only:
-                federate_post_update(post)
-            federate_post_edit_to_user_followers(post)
+            try:
+                uploaded_file = request.files['image_file'] if post_type == POST_TYPE_IMAGE else None
+                edit_post(form, post, post_type, 1, uploaded_file=uploaded_file)
+                flash(_('Your changes have been saved.'), 'success')
+            except Exception as ex:
+                flash(_('Your edit was not accepted because %(reason)s', reason=str(ex)), 'error')
+                abort(401)
 
             return redirect(url_for('activitypub.post_ap', post_id=post.id))
         else:
@@ -834,7 +643,7 @@ def post_edit(post_id: int):
                     )
                 with open(path, "rb")as file:
                     form.image_file.data = file.read()
-            
+
             elif post_type == POST_TYPE_VIDEO:
                 form.video_url.data = post.url
             elif post_type == POST_TYPE_POLL:
@@ -861,186 +670,6 @@ def post_edit(post_id: int):
         abort(401)
 
 
-def federate_post_update(post):
-    page_json = {
-        'type': 'Page',
-        'id': post.ap_id,
-        'attributedTo': current_user.public_url(),
-        'to': [
-            post.community.public_url(),
-            'https://www.w3.org/ns/activitystreams#Public'
-        ],
-        'name': post.title,
-        'cc': [],
-        'content': post.body_html if post.body_html else '',
-        'mediaType': 'text/html',
-        'source': {'content': post.body if post.body else '', 'mediaType': 'text/markdown'},
-        'attachment': [],
-        'commentsEnabled': post.comments_enabled,
-        'sensitive': post.nsfw,
-        'nsfl': post.nsfl,
-        'stickied': post.sticky,
-        'published': ap_datetime(post.posted_at),
-        'updated': ap_datetime(post.edited_at),
-        'audience': post.community.public_url(),
-        'language': {
-            'identifier': post.language_code(),
-            'name': post.language_name()
-        },
-        'tag': post.tags_for_activitypub()
-    }
-    update_json = {
-        'id': f"https://{current_app.config['SERVER_NAME']}/activities/update/{gibberish(15)}",
-        'type': 'Update',
-        'actor': current_user.public_url(),
-        'audience': post.community.public_url(),
-        'to': [post.community.public_url(), 'https://www.w3.org/ns/activitystreams#Public'],
-        'published': ap_datetime(utcnow()),
-        'cc': [
-            current_user.followers_url()
-        ],
-        'object': page_json,
-    }
-    if post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO:
-        page_json['attachment'] = [{'href': post.url, 'type': 'Link'}]
-    elif post.image_id:
-        if post.image.file_path:
-            image_url = post.image.file_path.replace('app/static/',
-                                                     f"https://{current_app.config['SERVER_NAME']}/static/")
-        elif post.image.thumbnail_path:
-            image_url = post.image.thumbnail_path.replace('app/static/',
-                                                          f"https://{current_app.config['SERVER_NAME']}/static/")
-        else:
-            image_url = post.image.source_url
-        # NB image is a dict while attachment is a list of dicts (usually just one dict in the list)
-        page_json['image'] = {'type': 'Image', 'url': image_url}
-        if post.type == POST_TYPE_IMAGE:
-            page_json['attachment'] = [{'type': 'Image',
-                                        'url': post.image.source_url,  # source_url is always a https link, no need for .replace() as done above
-                                        'name': post.image.alt_text}]
-    if post.type == POST_TYPE_POLL:
-        poll = Poll.query.filter_by(post_id=post.id).first()
-        page_json['type'] = 'Question'
-        page_json['endTime'] = ap_datetime(poll.end_poll)
-        page_json['votersCount'] = 0
-        choices = []
-        for choice in PollChoice.query.filter_by(post_id=post.id).all():
-            choices.append({
-                "type": "Note",
-                "name": choice.choice_text,
-                "replies": {
-                  "type": "Collection",
-                  "totalItems": 0
-                }
-            })
-        page_json['oneOf' if poll.mode == 'single' else 'anyOf'] = choices
-
-    if not post.community.is_local():  # this is a remote community, send it to the instance that hosts it
-        success = post_request(post.community.ap_inbox_url, update_json, current_user.private_key,
-                               current_user.public_url() + '#main-key')
-        if success is False or isinstance(success, str):
-            flash('Failed to send edit to remote server', 'error')
-    else:  # local community - send it to followers on remote instances
-        announce = {
-            "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
-            "type": 'Announce',
-            "to": [
-                "https://www.w3.org/ns/activitystreams#Public"
-            ],
-            "actor": post.community.ap_profile_id,
-            "cc": [
-                post.community.ap_followers_url
-            ],
-            '@context': default_context(),
-            'object': update_json
-        }
-
-        for instance in post.community.following_instances():
-            if instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(
-                    instance.domain):
-                send_to_remote_instance(instance.id, post.community.id, announce)
-
-
-def federate_post_edit_to_user_followers(post):
-    followers = UserFollower.query.filter_by(local_user_id=post.user_id)
-    if not followers:
-        return
-
-    note = {
-        'type': 'Note',
-        'id': post.ap_id,
-        'inReplyTo': None,
-        'attributedTo': current_user.public_url(),
-        'to': [
-            'https://www.w3.org/ns/activitystreams#Public'
-        ],
-        'cc': [
-            current_user.followers_url()
-        ],
-        'content': '',
-        'mediaType': 'text/html',
-        'source': {'content': post.body if post.body else '', 'mediaType': 'text/markdown'},
-        'attachment': [],
-        'commentsEnabled': post.comments_enabled,
-        'sensitive': post.nsfw,
-        'nsfl': post.nsfl,
-        'stickied': post.sticky,
-        'published': ap_datetime(utcnow()),
-        'updated': ap_datetime(post.edited_at),
-        'language': {
-            'identifier': post.language_code(),
-            'name': post.language_name()
-        },
-        'tag': post.tags_for_activitypub()
-    }
-    update = {
-        "id": f"https://{current_app.config['SERVER_NAME']}/activities/create/{gibberish(15)}",
-        "actor": current_user.public_url(),
-        "to": [
-            "https://www.w3.org/ns/activitystreams#Public"
-        ],
-        "cc": [
-            current_user.followers_url()
-        ],
-        "type": "Update",
-        "object": note,
-        '@context': default_context()
-    }
-    if post.type == POST_TYPE_ARTICLE:
-        note['content'] = '<p>' + post.title + '</p>'
-    elif post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO:
-        note['content'] = '<p><a href=' + post.url + '>' + post.title + '</a></p>'
-    elif post.type == POST_TYPE_IMAGE:
-        note['content'] = '<p>' + post.title + '</p>'
-        if post.image_id and post.image.source_url:
-            note['attachment'] = [{'type': 'Image', 'url': post.image.source_url, 'name': post.image.alt_text}]
-    elif post.type == POST_TYPE_POLL:
-        poll = Poll.query.filter_by(post_id=post.id).first()
-        note['type'] = 'Question'
-        note['endTime'] = ap_datetime(poll.end_poll)
-        note['votersCount'] = 0
-        choices = []
-        for choice in PollChoice.query.filter_by(post_id=post.id).all():
-            choices.append({
-                "type": "Note",
-                "name": choice.choice_text,
-                "replies": {
-                    "type": "Collection",
-                    "totalItems": 0
-                }
-            })
-        note['oneOf' if poll.mode == 'single' else 'anyOf'] = choices
-
-    if post.body_html:
-        note['content'] = note['content'] + '<p>' + post.body_html + '</p>'
-
-    instances = Instance.query.join(User, User.instance_id == Instance.id).join(UserFollower, UserFollower.remote_user_id == User.id)
-    instances = instances.filter(UserFollower.local_user_id == post.user_id)
-    for instance in instances:
-        if instance.inbox and not instance_banned(instance.domain):
-            post_request_in_background(instance.inbox, update, current_user.private_key, current_user.public_url() + '#main-key')
-
-
 @bp.route('/post/<int:post_id>/delete', methods=['GET', 'POST'])
 @login_required
 def post_delete(post_id: int):
@@ -1054,12 +683,7 @@ def post_delete(post_id: int):
 def post_delete_post(community: Community, post: Post, user_id: int, federate_all_communities=True):
     user: User = User.query.get(user_id)
     if post.url:
-        if post.cross_posts is not None:
-            old_cross_posts = Post.query.filter(Post.id.in_(post.cross_posts)).all()
-            post.cross_posts.clear()
-            for ocp in old_cross_posts:
-                if ocp.cross_posts is not None and post.id in ocp.cross_posts:
-                    ocp.cross_posts.remove(post.id)
+        post.calculate_cross_posts(delete_only=True)
     post.deleted = True
     post.deleted_by = user_id
     post.author.post_count -= 1
@@ -1543,114 +1167,7 @@ def post_reply_edit(post_id: int, comment_id: int):
     form.language_id.choices = languages_for_form()
     if post_reply.user_id == current_user.id or post.community.is_moderator():
         if form.validate_on_submit():
-            post_reply.body = piefed_markdown_to_lemmy_markdown(form.body.data)
-            post_reply.body_html = markdown_to_html(form.body.data)
-            post_reply.notify_author = form.notify_author.data
-            post.community.last_active = utcnow()
-            post_reply.edited_at = utcnow()
-            post_reply.language_id = form.language_id.data
-            db.session.commit()
-            flash(_('Your changes have been saved.'), 'success')
-
-            if post_reply.parent_id:
-                in_reply_to = PostReply.query.get(post_reply.parent_id)
-            else:
-                in_reply_to = post
-            # federate edit
-            if not post.community.local_only:
-                reply_json = {
-                    'type': 'Note',
-                    'id': post_reply.public_url(),
-                    'attributedTo': current_user.public_url(),
-                    'to': [
-                        'https://www.w3.org/ns/activitystreams#Public'
-                    ],
-                    'cc': [
-                        post.community.public_url(),
-                        in_reply_to.author.public_url()
-                    ],
-                    'content': post_reply.body_html,
-                    'inReplyTo': in_reply_to.profile_id(),
-                    'url': post_reply.public_url(),
-                    'mediaType': 'text/html',
-                    'source': {'content': post_reply.body, 'mediaType': 'text/markdown'},
-                    'published': ap_datetime(post_reply.posted_at),
-                    'updated': ap_datetime(post_reply.edited_at),
-                    'distinguished': False,
-                    'audience': post.community.public_url(),
-                    'contentMap': {
-                        'en': post_reply.body_html
-                    },
-                    'language': {
-                        'identifier': post_reply.language_code(),
-                        'name': post_reply.language_name()
-                    }
-                }
-                update_json = {
-                    '@context': default_context(),
-                    'type': 'Update',
-                    'actor': current_user.public_url(),
-                    'audience': post.community.public_url(),
-                    'to': [
-                        'https://www.w3.org/ns/activitystreams#Public'
-                    ],
-                    'cc': [
-                        post.community.public_url(),
-                        in_reply_to.author.public_url()
-                    ],
-                    'object': reply_json,
-                    'id': f"https://{current_app.config['SERVER_NAME']}/activities/update/{gibberish(15)}"
-                }
-                if in_reply_to.notify_author and in_reply_to.author.ap_id is not None:
-                    reply_json['tag'] = [
-                        {
-                            'href': in_reply_to.author.public_url(),
-                            'name': in_reply_to.author.mention_tag(),
-                            'type': 'Mention'
-                        }
-                    ]
-                    update_json['tag'] = [
-                        {
-                            'href': in_reply_to.author.public_url(),
-                            'name': in_reply_to.author.mention_tag(),
-                            'type': 'Mention'
-                        }
-                    ]
-                if not post.community.is_local():    # this is a remote community, send it to the instance that hosts it
-                    success = post_request(post.community.ap_inbox_url, update_json, current_user.private_key,
-                                                               current_user.public_url() + '#main-key')
-                    if success is False or isinstance(success, str):
-                        flash('Failed to send send edit to remote server', 'error')
-                else:                       # local community - send it to followers on remote instances
-                    announce = {
-                        "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
-                        "type": 'Announce',
-                        "to": [
-                            "https://www.w3.org/ns/activitystreams#Public"
-                        ],
-                        "actor": post.community.public_url(),
-                        "cc": [
-                            post.community.ap_followers_url
-                        ],
-                        '@context': default_context(),
-                        'object': update_json
-                    }
-
-                    for instance in post.community.following_instances():
-                        if instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                            send_to_remote_instance(instance.id, post.community.id, announce)
-
-                # send copy of Note to post author (who won't otherwise get it if no-one else on their instance is subscribed to the community)
-                if not in_reply_to.author.is_local() and in_reply_to.author.ap_domain != post_reply.community.ap_domain:
-                    if not post.community.is_local() or (post.community.is_local and not post.community.has_followers_from_domain(in_reply_to.author.ap_domain)):
-                        success = post_request(in_reply_to.author.ap_inbox_url, update_json, current_user.private_key,
-                                                               current_user.public_url() + '#main-key')
-                        if success is False or isinstance(success, str):
-                            # sending to shared inbox is good enough for Mastodon, but Lemmy will reject it the local community has no followers
-                            personal_inbox = in_reply_to.author.public_url() + '/inbox'
-                            post_request(personal_inbox, update_json, current_user.private_key,
-                                                           current_user.public_url() + '#main-key')
-
+            edit_reply(form, post_reply, post, 1)
             return redirect(url_for('activitypub.post_ap', post_id=post.id))
         else:
             form.body.data = post_reply.body
@@ -1875,8 +1392,8 @@ def post_reply_notification(post_reply_id: int):
 @bp.route('/post/<int:post_id>/cross_posts', methods=['GET'])
 def post_cross_posts(post_id: int):
     post = Post.query.get_or_404(post_id)
-    cross_posts = Post.query.filter(Post.id.in_(post.cross_posts)).all()
-    return render_template('post/post_cross_posts.html', post=post, cross_posts=cross_posts)
+    cross_posts = Post.query.filter(Post.id.in_(post.cross_posts))
+    return render_template('post/post_cross_posts.html', cross_posts=cross_posts)
 
 
 @bp.route('/post/<int:post_id>/voting_activity', methods=['GET'])

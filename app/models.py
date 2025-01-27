@@ -75,7 +75,7 @@ class Instance(db.Model):
     start_trying_again = db.Column(db.DateTime)             # When to start trying again. Should grow exponentially with each failure.
     gone_forever = db.Column(db.Boolean, default=False)     # True once this instance is considered offline forever - never start trying again
     ip_address = db.Column(db.String(50))
-    trusted = db.Column(db.Boolean, default=False)
+    trusted = db.Column(db.Boolean, default=False, index=True)
     posting_warning = db.Column(db.String(512))
     nodeinfo_href = db.Column(db.String(100))
 
@@ -438,6 +438,7 @@ class Community(db.Model):
     topic_id = db.Column(db.Integer, db.ForeignKey('topic.id'), index=True)
     default_layout = db.Column(db.String(15))
     posting_warning = db.Column(db.String(512))
+    downvote_accept_mode = db.Column(db.Integer, default=0) # 0 = All, 2 = Community members, 4 = This instance, 6 = Trusted instances
 
     ap_id = db.Column(db.String(255), index=True)
     ap_profile_id = db.Column(db.String(255), index=True, unique=True)
@@ -687,7 +688,7 @@ class User(UserMixin, db.Model):
     bounces = db.Column(db.SmallInteger, default=0)
     timezone = db.Column(db.String(20))
     reputation = db.Column(db.Float, default=0.0)
-    attitude = db.Column(db.Float, default=1.0)  # (upvotes cast - downvotes cast) / (upvotes + downvotes). A number between 1 and -1 is the ratio between up and down votes they cast
+    attitude = db.Column(db.Float, default=None)  # (upvotes cast - downvotes cast) / (upvotes + downvotes). A number between 1 and -1 is the ratio between up and down votes they cast
     post_count = db.Column(db.Integer, default=0)
     post_reply_count = db.Column(db.Integer, default=0)
     stripe_customer_id = db.Column(db.String(50))
@@ -934,13 +935,20 @@ class User(UserMixin, db.Model):
         total_upvotes = upvotes + comment_upvotes
         total_downvotes = downvotes + comment_downvotes
 
-        if total_downvotes == 0:    # guard against division by zero
-            self.attitude = 1.0
+        if total_upvotes + total_downvotes > 2:  # Only calculate attitude if they've done 3 or more votes as anything less than this could be an outlier and not representative of their overall attitude (also guard against division by zero)
+            self.attitude = (total_upvotes - total_downvotes) / (total_upvotes + total_downvotes)
         else:
-            if total_upvotes + total_downvotes > 2:  # Only calculate attitude if they've done 3 or more votes as anything less than this could be an outlier and not representative of their overall attitude
-                self.attitude = (total_upvotes - total_downvotes) / (total_upvotes + total_downvotes)
-            else:
-                self.attitude = 1.0
+            self.attitude = None
+
+    def get_num_upvotes(self):
+        post_votes = db.session.execute(text('SELECT COUNT(*) FROM "post_vote" WHERE user_id = :user_id AND effect > 0'), {'user_id': self.id}).scalar()
+        post_reply_votes = db.session.execute(text('SELECT COUNT(*) FROM "post_reply_vote" WHERE user_id = :user_id AND effect > 0'), {'user_id': self.id}).scalar()
+        return post_votes + post_reply_votes
+
+    def get_num_downvotes(self):
+        post_votes = db.session.execute(text('SELECT COUNT(*) FROM "post_vote" WHERE user_id = :user_id AND effect < 0'), {'user_id': self.id}).scalar()
+        post_reply_votes = db.session.execute(text('SELECT COUNT(*) FROM "post_reply_vote" WHERE user_id = :user_id AND effect < 0'), {'user_id': self.id}).scalar()
+        return post_votes + post_reply_votes
 
     def recalculate_post_stats(self, posts=True, replies=True):
         if posts:
@@ -1089,7 +1097,7 @@ class User(UserMixin, db.Model):
         if user_note:
             return user_note.body
         else:
-            return None
+            return ''
 
 
 class ActivityLog(db.Model):
@@ -1174,7 +1182,7 @@ class Post(db.Model):
             find_licence_or_create, make_image_sizes, notify_about_post
         from app.utils import allowlist_html, markdown_to_html, html_to_text, microblog_content_to_title, blocked_phrases, \
             is_image_url, is_video_url, domain_from_url, opengraph_parse, shorten_string, remove_tracking_from_link, \
-            is_video_hosting_site, communities_banned_from
+            is_video_hosting_site, communities_banned_from, recently_upvoted_posts, blocked_users
 
         microblog = False
         if 'name' not in request_json['object']:  # Microblog posts
@@ -1203,7 +1211,10 @@ class Post(db.Model):
                     microblog=microblog,
                     posted_at=utcnow()
                     )
-
+        if community.nsfw:
+            post.nsfw = True    # old Lemmy instances ( < 0.19.8 ) allow nsfw content in nsfw communities to be flagged as sfw which makes no sense
+        if community.nsfl:
+            post.nsfl = True
         if 'content' in request_json['object'] and request_json['object']['content'] is not None:
             if 'mediaType' in request_json['object'] and request_json['object']['mediaType'] == 'text/html':
                 post.body_html = allowlist_html(request_json['object']['content'])
@@ -1365,6 +1376,24 @@ class Post(db.Model):
                 db.session.rollback()
                 return Post.query.filter_by(ap_id=request_json['object']['id'].lower()).one()
 
+            # Mentions also need a post_id
+            if 'tag' in request_json['object'] and isinstance(request_json['object']['tag'], list):
+                for json_tag in request_json['object']['tag']:
+                    if 'type' in json_tag and json_tag['type'] == 'Mention':
+                        profile_id = json_tag['href'] if 'href' in json_tag else None
+                        if profile_id and isinstance(profile_id, str) and profile_id.startswith('https://' + current_app.config['SERVER_NAME']):
+                            profile_id = profile_id.lower()
+                            recipient = User.query.filter_by(ap_profile_id=profile_id, ap_id=None).first()
+                            if recipient:
+                                blocked_senders = blocked_users(recipient.id)
+                                if post.user_id not in blocked_senders:
+                                    notification = Notification(user_id=recipient.id, title=_(f"You have been mentioned in post {post.id}"),
+                                                                url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
+                                                                author_id=post.user_id)
+                                    recipient.unread_notifications += 1
+                                    db.session.add(notification)
+                                    db.session.commit()
+
             # Polls need to be processed quite late because they need a post_id to refer to
             if request_json['object']['type'] == 'Question':
                 post.type = constants.POST_TYPE_POLL
@@ -1386,27 +1415,21 @@ class Post(db.Model):
 
             # Update list of cross posts
             if post.url:
-                other_posts = Post.query.filter(Post.id != post.id, Post.url == post.url, Post.deleted == False,
-                                                Post.posted_at > post.posted_at - timedelta(days=6)).all()
-                for op in other_posts:
-                    if op.cross_posts is None:
-                        op.cross_posts = [post.id]
-                    else:
-                        op.cross_posts.append(post.id)
-                    if post.cross_posts is None:
-                        post.cross_posts = [op.id]
-                    else:
-                        post.cross_posts.append(op.id)
-                db.session.commit()
+                post.calculate_cross_posts()
 
             if post.community_id not in communities_banned_from(user.id):
                 notify_about_post(post)
 
+            # attach initial upvote to author
+            vote = PostVote(user_id=user.id, post_id=post.id, author_id=user.id, effect=1)
+            db.session.add(vote)
+            if user.is_local():
+                cache.delete_memoized(recently_upvoted_posts, user.id)
             if user.reputation > 100:
                 post.up_votes += 1
                 post.score += 1
                 post.ranking = post.post_ranking(post.score, post.posted_at)
-                db.session.commit()
+            db.session.commit()
 
         return post
 
@@ -1417,6 +1440,44 @@ class Post(db.Model):
     def epoch_seconds(self, date):
         td = date - self.epoch
         return td.days * 86400 + td.seconds + (float(td.microseconds) / 1000000)
+
+    def calculate_cross_posts(self, delete_only=False, url_changed=False):
+        if not self.url and not delete_only:
+            return
+
+        if self.cross_posts and (url_changed or delete_only):
+            old_cross_posts = Post.query.filter(Post.id.in_(self.cross_posts)).all()
+            self.cross_posts.clear()
+            for ocp in old_cross_posts:
+                if ocp.cross_posts and self.id in ocp.cross_posts:
+                    ocp.cross_posts.remove(self.id)
+
+            db.session.commit()
+        if delete_only:
+            return
+
+        if self.url.count('/') < 3 or (self.url.count('/') == 3 and self.url.endswith('/')):
+            # reject if url is just a domain without a path
+            return
+
+        if self.community.ap_profile_id == 'https://lemmy.zip/c/dailygames':
+            # daily posts to this community (e.g. to https://travle.earth/usa or https://www.nytimes.com/games/wordle/index.html) shouldn't be treated as cross-posts
+            return
+
+        limit = 9
+        new_cross_posts = Post.query.filter(Post.id != self.id, Post.url == self.url, Post.deleted == False).order_by(desc(Post.id)).limit(limit)
+
+        # other posts: update their cross_posts field with this post.id if they have less than the limit
+        for ncp in new_cross_posts:
+            if ncp.cross_posts is None:
+                ncp.cross_posts = [self.id]
+            elif len(ncp.cross_posts) < limit:
+                ncp.cross_posts.append(self.id)
+
+        # this post: set the cross_posts field to the limited list of ids from the most recent other posts
+        if new_cross_posts.count() > 0:
+            self.cross_posts = [ncp.id for ncp in new_cross_posts]
+        db.session.commit()
 
     def delete_dependencies(self):
         db.session.query(PostBookmark).filter(PostBookmark.post_id == self.id).delete()
@@ -1568,22 +1629,26 @@ class Post(db.Model):
             if existing_vote.effect > 0:  # previous vote was up
                 if vote_direction == 'upvote':  # new vote is also up, so remove it
                     db.session.delete(existing_vote)
+                    db.session.commit()
                     self.up_votes -= 1
                     self.score -= existing_vote.effect              # score - (+1) = score-1
                     undo = 'Like'
                 else:  # new vote is down while previous vote was up, so reverse their previous vote
                     existing_vote.effect = -1
+                    db.session.commit()
                     self.up_votes -= 1
                     self.down_votes += 1
                     self.score += existing_vote.effect * 2          # score + (-2) = score-2
             else:  # previous vote was down
                 if vote_direction == 'downvote':  # new vote is also down, so remove it
                     db.session.delete(existing_vote)
+                    db.session.commit()
                     self.down_votes -= 1
                     self.score -= existing_vote.effect              # score - (-1) = score+1
                     undo = 'Dislike'
                 else:  # new vote is up while previous vote was down, so reverse their previous vote
                     existing_vote.effect = 1
+                    db.session.commit()
                     self.up_votes += 1
                     self.down_votes -= 1
                     self.score += existing_vote.effect * 2          # score + (+2) = score+2
@@ -1903,22 +1968,26 @@ class PostReply(db.Model):
             if existing_vote.effect > 0:  # previous vote was up
                 if vote_direction == 'upvote':  # new vote is also up, so remove it
                     db.session.delete(existing_vote)
+                    db.session.commit()
                     self.up_votes -= 1
                     self.score -= 1
                     undo = 'Like'
                 else:  # new vote is down while previous vote was up, so reverse their previous vote
                     existing_vote.effect = -1
+                    db.session.commit()
                     self.up_votes -= 1
                     self.down_votes += 1
                     self.score -= 2
             else:  # previous vote was down
                 if vote_direction == 'downvote':  # new vote is also down, so remove it
                     db.session.delete(existing_vote)
+                    db.session.commit()
                     self.down_votes -= 1
                     self.score += 1
                     undo = 'Dislike'
                 else:  # new vote is up while previous vote was down, so reverse their previous vote
                     existing_vote.effect = 1
+                    db.session.commit()
                     self.up_votes += 1
                     self.down_votes -= 1
                     self.score += 2
@@ -2063,7 +2132,7 @@ class UserNote(db.Model):
 class UserExtraField(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
-    label = db.Column(db.String(50))
+    label = db.Column(db.String(1024))
     text = db.Column(db.String(1024))
 
 

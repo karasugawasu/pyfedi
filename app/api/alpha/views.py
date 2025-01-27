@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app import cache, db
 from app.constants import *
-from app.models import Community, CommunityMember, Instance, Post, PostReply, PostVote, User
+from app.models import ChatMessage, Community, CommunityMember, Instance, Post, PostReply, PostVote, User
 from app.utils import blocked_communities
 
 from sqlalchemy import text
@@ -173,7 +173,8 @@ def cached_community_view_variant_1(community: Community, stub=False):
                'actor_id': community.public_url(),
                'local': community.is_local(),
                'hidden': not community.show_all,
-               'instance_id': community.instance_id if community.instance_id else 1})
+               'instance_id': community.instance_id if community.instance_id else 1,
+               'ap_domain': community.ap_domain})
     if community.description and not stub:
         v1['description'] = community.description
     if community.icon_id:
@@ -261,7 +262,7 @@ def calculate_if_has_children(reply):    # result used as True / False
     return db.session.execute(text('SELECT COUNT(id) AS c FROM "post_reply" WHERE parent_id = :id'), {'id': reply.id}).scalar()
 
 
-def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0):
+def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0, read=False):
     if isinstance(reply, int):
         reply = PostReply.query.filter_by(id=reply).one()
 
@@ -329,6 +330,38 @@ def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0):
 
         return v4
 
+    # Variant 5 - views/comment_reply_view.dart - /user/replies api endpoint
+    if variant == 5:
+        bookmarked = db.session.execute(text('SELECT user_id FROM "post_reply_bookmark" WHERE post_reply_id = :post_reply_id and user_id = :user_id'), {'post_reply_id': reply.id, 'user_id': user_id}).scalar()
+        reply_sub = db.session.execute(text('SELECT user_id FROM "notification_subscription" WHERE type = :type and entity_id = :entity_id and user_id = :user_id'), {'type': NOTIF_REPLY, 'entity_id': reply.id, 'user_id': user_id}).scalar()
+        banned = db.session.execute(text('SELECT user_id FROM "community_ban" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': reply.user_id, 'community_id': reply.community_id}).scalar()
+        moderator = db.session.execute(text('SELECT is_moderator FROM "community_member" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': reply.user_id, 'community_id': reply.community_id}).scalar()
+        admin = db.session.execute(text('SELECT user_id FROM "user_role" WHERE user_id = :user_id and role_id = 4'), {'user_id': reply.user_id}).scalar()
+
+        saved = True if bookmarked else False
+        activity_alert = True if reply_sub else False
+        creator_banned_from_community = True if banned else False
+        creator_is_moderator = True if moderator else False
+        creator_is_admin = True if admin else False
+
+        v5 = {'comment_reply': {'id': reply.id, 'recipient_id': user_id, 'comment_id': reply.id, 'read': read, 'published': reply.posted_at.isoformat() + 'Z'},
+              'comment': reply_view(reply=reply, variant=1),
+              'creator': user_view(user=reply.author, variant=1),
+              'post': post_view(post=reply.post, variant=1),
+              'community': community_view(community=reply.community, variant=1),
+              'recipient': user_view(user=user_id, variant=1),
+              'counts': {'comment_id': reply.id, 'score': reply.score, 'upvotes': reply.up_votes, 'downvotes': reply.down_votes, 'published': reply.posted_at.isoformat() + 'Z', 'child_count': 0},
+              'activity_alert': activity_alert,
+              'creator_banned_from_community': creator_banned_from_community,
+              'creator_is_moderator': creator_is_moderator,
+              'creator_is_admin': creator_is_admin,
+              'subscribed': 'NotSubscribed',
+              'saved': saved,
+              'creator_blocked': False
+             }
+
+        return v5
+
 
 def reply_report_view(report, reply_id, user_id):
     # views/comment_report_view.dart - /comment/report api endpoint
@@ -372,6 +405,47 @@ def reply_report_view(report, reply_id, user_id):
     return v1
 
 
+def post_report_view(report, post_id, user_id):
+    # views/post_report_view.dart - /post/report api endpoint
+    post_json = post_view(post=post_id, variant=2, user_id=user_id)
+    community_json = community_view(community=post_json['post']['community_id'], variant=1, stub=True)
+
+    banned = db.session.execute(text('SELECT user_id FROM "community_ban" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': report.reporter_id, 'community_id': community_json['id']}).scalar()
+    moderator = db.session.execute(text('SELECT is_moderator FROM "community_member" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': report.reporter_id, 'community_id': community_json['id']}).scalar()
+    admin = db.session.execute(text('SELECT user_id FROM "user_role" WHERE user_id = :user_id and role_id = 4'), {'user_id': report.reporter_id}).scalar()
+
+    creator_banned_from_community = True if banned else False
+    creator_is_moderator = True if moderator else False
+    creator_is_admin = True if admin else False
+
+    v1 = {
+      'post_report_view': {
+        'post_report': {
+          'id': report.id,
+          'creator_id': report.reporter_id,
+          'post_id': report.suspect_post_id,
+          'original_post_name': post_json['post']['title'],
+          'original_post_body': '',
+          'reason': report.reasons,
+          'resolved': report.status == 3,
+          'published': report.created_at.isoformat() + 'Z'
+        },
+        'post': post_json['post'],
+        'community': community_json,
+        'creator': user_view(user=user_id, variant=1, stub=True),
+        'post_creator': user_view(user=report.suspect_user_id, variant=1, stub=True),
+        'counts': post_json['counts'],
+        'creator_banned_from_community': creator_banned_from_community,
+        'creator_is_moderator': creator_is_moderator,
+        'creator_is_admin': creator_is_admin,
+        'creator_blocked': False,
+        'subscribed': post_json['subscribed'],
+        'saved': post_json['saved']
+      }
+    }
+    return v1
+
+
 def search_view(type):
     v1 = {
       'type_': type,
@@ -395,6 +469,30 @@ def instance_view(instance: Instance | int, variant):
         v1.update({'published': instance.created_at.isoformat() + 'Z', 'updated': instance.updated_at.isoformat() + 'Z'})
 
         return v1
+
+
+def private_message_view(cm: ChatMessage, user_id, ap_id):
+    creator = user_view(cm.sender_id, variant=1)
+    recipient = user_view(cm.recipient_id, variant=1)
+    is_local = creator['instance_id'] == 1
+
+    v1 = {
+      'private_message': {
+        'id': cm.id,
+        'creator_id': cm.sender_id,
+        'recipient_id': user_id,
+        'content': cm.body,
+        'deleted': False,
+        'read': cm.read,
+        'published': cm.created_at.isoformat() + 'Z',
+        'ap_id': ap_id,
+        'local': is_local
+      },
+      'creator': creator,
+      'recipient': recipient
+    }
+
+    return v1
 
 
 @cache.memoize(timeout=86400)

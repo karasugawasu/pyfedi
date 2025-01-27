@@ -205,7 +205,8 @@ def register(app):
 
             # Ensure accurate community stats
             for community in Community.query.filter(Community.banned == False).all():
-                community.subscriptions_count = CommunityMember.query.filter(CommunityMember.community_id == community.id).count()
+                community.subscriptions_count = db.session.execute(text('SELECT COUNT(user_id) as c FROM community_member WHERE community_id = :community_id AND is_banned = false'),
+                                                          {'community_id': community.id}).scalar()
                 community.post_count = db.session.execute(text('SELECT COUNT(id) as c FROM post WHERE deleted is false and community_id = :community_id'),
                                                           {'community_id': community.id}).scalar()
                 community.post_reply_count = db.session.execute(text('SELECT COUNT(id) as c FROM post_reply WHERE deleted is false and community_id = :community_id'),
@@ -231,7 +232,7 @@ def register(app):
             try:
                 # Check for dormant or dead instances
                 instances = Instance.query.filter(Instance.gone_forever == False, Instance.id != 1).all()
-                HEADERS = {'User-Agent': 'PieFed/1.0', 'Accept': 'application/activity+json'}
+                HEADERS = {'Accept': 'application/activity+json'}
 
                 for instance in instances:
                     if instance_banned(instance.domain) or instance.domain == 'flipboard.com':
@@ -263,7 +264,6 @@ def register(app):
                                 current_app.logger.info(f"{instance.domain} has no well-known/nodeinfo response")
                         except Exception as e:
                             db.session.rollback()
-                            current_app.logger.error(f"Error processing instance {instance.domain}: {e}")
                             instance.failures += 1
                         finally:
                             nodeinfo.close()
@@ -283,7 +283,7 @@ def register(app):
                                 instance.nodeinfo_href = None
                         except Exception as e:
                             db.session.rollback()
-                            current_app.logger.error(f"Error processing nodeinfo for {instance.domain}: {e}")
+                            instance.failures += 1
                         finally:
                             node.close()
                         db.session.commit()
@@ -313,7 +313,7 @@ def register(app):
                                            InstanceRole.role == 'admin').delete()
                         except Exception as e:
                             db.session.rollback()
-                            current_app.logger.error(f"Error updating admins for {instance.domain}: {e}")
+                            instance.failures += 1
                         finally:
                             if response:
                                 response.close()

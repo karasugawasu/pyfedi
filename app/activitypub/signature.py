@@ -135,11 +135,7 @@ def post_request(uri: str, body: dict | None, private_key: str, key_id: str, con
 
 def signed_get_request(uri: str, private_key: str, key_id: str, content_type: str = "application/activity+json",
         method: Literal["get", "post"] = "get", timeout: int = 5,):
-    try:
-        result = HttpSignature.signed_request(uri, None, private_key, key_id, content_type, method, timeout)
-    except Exception as e:
-        current_app.logger.error(f'Exception while sending post to {uri}')
-
+    result = HttpSignature.signed_request(uri, None, private_key, key_id, content_type, method, timeout)
     return result
 
 
@@ -387,7 +383,7 @@ class HttpSignature:
             }
         )
 
-        headers["User-Agent"] = 'PieFed/1.0'
+        headers["User-Agent"] = f'PieFed/1.0; +https://{current_app.config["SERVER_NAME"]}'
 
         # Send the request with all those headers except the pseudo one
         del headers["(request-target)"]

@@ -22,7 +22,7 @@ class Config(object):
     RECAPTCHA_PUBLIC_KEY = os.environ.get("RECAPTCHA_PUBLIC_KEY") or None
     RECAPTCHA_PRIVATE_KEY = os.environ.get("RECAPTCHA_PRIVATE_KEY") or None
     MODE = os.environ.get('MODE') or 'development'
-    LANGUAGES = ['ca', 'de', 'en', 'fr', 'ja']
+    LANGUAGES = ['ca', 'de', 'en', 'fr', 'ja', 'zh']
     FULL_AP_CONTEXT = bool(int(os.environ.get('FULL_AP_CONTEXT', 0)))
     CACHE_TYPE = os.environ.get('CACHE_TYPE') or 'FileSystemCache'
     CACHE_REDIS_URL = os.environ.get('CACHE_REDIS_URL') or 'redis://localhost:6379/1'
@@ -58,3 +58,6 @@ class Config(object):
     SPICY_UNDER_60 = float(os.environ.get('SPICY_UNDER_60', 1.0))
 
     IPINFO_TOKEN = os.environ.get('IPINFO_TOKEN') or ''
+
+    DB_POOL_SIZE = os.environ.get('DB_POOL_SIZE') or 10
+    DB_MAX_OVERFLOW = os.environ.get('DB_MAX_OVERFLOW') or 30
