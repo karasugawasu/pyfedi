@@ -290,10 +290,13 @@ def list_subscribed_communities():
     all_communities = Community.query.filter_by(banned=False)
     # get the user's joined communities
     user_joined_communities = joined_communities(current_user.id)
+    user_moderating_communities = moderating_communities(current_user.id)
     # get the joined community ids list
     joined_ids = []
     for jc in user_joined_communities:
         joined_ids.append(jc.id)
+    for mc in user_moderating_communities:
+        joined_ids.append(mc.id)
     # filter down to just the joined communities
     communities = all_communities.filter(Community.id.in_(joined_ids))
 
@@ -462,14 +465,8 @@ def robots():
 @bp.route('/sitemap.xml')
 @cache.cached(timeout=6000)
 def sitemap():
-    posts = Post.query.filter(Post.from_bot == False, Post.deleted == False)
-    posts = posts.join(Community, Community.id == Post.community_id)
-    posts = posts.filter(Community.show_all == True, Community.ap_id == None)   # sitemap.xml only includes local posts
-    if not g.site.enable_nsfw:
-        posts = posts.filter(Community.nsfw == False)
-    if not g.site.enable_nsfl:
-        posts = posts.filter(Community.nsfl == False)
-    posts = posts.order_by(desc(Post.posted_at))
+    posts = Post.query.filter(Post.from_bot == False, Post.deleted == False, Post.instance_id == 1, Post.indexable == True)
+    posts = posts.order_by(desc(Post.posted_at)).limit(500)
 
     resp = make_response(render_template('sitemap.xml', posts=posts, current_app=current_app))
     resp.mimetype = 'text/xml'
@@ -651,7 +648,7 @@ def activitypub_application():
         'summary': g.site.name + ' - ' + g.site.description,
         'published': ap_datetime(g.site.created_at),
         'updated': ap_datetime(g.site.updated),
-        'inbox': f"https://{current_app.config['SERVER_NAME']}/site_inbox",
+        'inbox': f"https://{current_app.config['SERVER_NAME']}/inbox",
         'outbox': f"https://{current_app.config['SERVER_NAME']}/site_outbox",
         'icon': {
           'type': 'Image',
@@ -687,7 +684,7 @@ def instance_actor():
           'publicKeyPem': g.site.public_key
         },
         'endpoints': {
-          'sharedInbox': f"https://{current_app.config['SERVER_NAME']}/site_inbox",
+          'sharedInbox': f"https://{current_app.config['SERVER_NAME']}/inbox",
         }
     }
     resp = jsonify(application_data)

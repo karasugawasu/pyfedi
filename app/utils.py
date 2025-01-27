@@ -19,6 +19,8 @@ from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 import warnings
 import jwt
 
+from app.constants import DOWNVOTE_ACCEPT_ALL, DOWNVOTE_ACCEPT_TRUSTED, DOWNVOTE_ACCEPT_INSTANCE, \
+    DOWNVOTE_ACCEPT_MEMBERS
 
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 import os
@@ -83,9 +85,9 @@ def getmtime(filename):
 def get_request(uri, params=None, headers=None) -> httpx.Response:
     timeout = 15 if 'washingtonpost.com' in uri else 5  # Washington Post is really slow on og:image for some reason
     if headers is None:
-        headers = {'User-Agent': 'PieFed/1.0'}
+        headers = {'User-Agent': f'PieFed/1.0; +https://{current_app.config["SERVER_NAME"]}'}
     else:
-        headers.update({'User-Agent': 'PieFed/1.0'})
+        headers.update({'User-Agent': f'PieFed/1.0; +https://{current_app.config["SERVER_NAME"]}'})
     if params and '/webfinger' in uri:
         payload_str = urllib.parse.urlencode(params, safe=':@')
     else:
@@ -127,9 +129,9 @@ def get_request_instance(uri, instance: Instance, params=None, headers=None) -> 
 # do a HEAD request to a uri, return the result
 def head_request(uri, params=None, headers=None) -> httpx.Response:
     if headers is None:
-        headers = {'User-Agent': 'PieFed/1.0'}
+        headers = {'User-Agent': f'PieFed/1.0; +https://{current_app.config["SERVER_NAME"]}'}
     else:
-        headers.update({'User-Agent': 'PieFed/1.0'})
+        headers.update({'User-Agent': f'PieFed/1.0; +https://{current_app.config["SERVER_NAME"]}'})
     try:
         response = httpx_client.head(uri, params=params, headers=headers, timeout=5, allow_redirects=True)
     except httpx.HTTPError as er:
@@ -480,6 +482,13 @@ def community_link_to_href(link: str) -> str:
     return re.sub(pattern, server + r'\g<1>/\g<2>>' + r'!\g<1>@\g<2></a>', link)
 
 
+def person_link_to_href(link: str) -> str:
+    pattern = r"@([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b"
+    server = f'https://{current_app.config["SERVER_NAME"]}/user/lookup/'
+    replacement = (r'<a href="' + server + r'\g<1>/\g<2>" rel="nofollow noindex">@\g<1>@\g<2></a>')
+    return re.sub(pattern, replacement, link)
+
+
 def domain_from_url(url: str, create=True) -> Domain:
     parsed_url = urlparse(url.lower().replace('www.', ''))
     if parsed_url and parsed_url.hostname:
@@ -507,7 +516,10 @@ def shorten_string(input_str, max_length=50):
 
 
 def shorten_url(input: str, max_length=20):
-    return shorten_string(input.replace('https://', '').replace('http://', ''))
+    if input:
+        return shorten_string(input.replace('https://', '').replace('http://', ''))
+    else:
+        ''
 
 
 # the number of digits in a number. e.g. 1000 would be 4
@@ -572,7 +584,14 @@ def blocked_users(user_id) -> List[int]:
 def blocked_phrases() -> List[str]:
     site = Site.query.get(1)
     if site.blocked_phrases:
-        return [phrase for phrase in site.blocked_phrases.split('\n') if phrase != '']
+        blocked_phrases = []
+        for phrase in site.blocked_phrases.split('\n'):
+            if phrase != '':
+                if phrase.endswith('\r'):
+                    blocked_phrases.append(phrase[:-1])
+                else:
+                    blocked_phrases.append(phrase)
+        return blocked_phrases
     else:
         return []
 
@@ -730,8 +749,22 @@ def can_downvote(user, community: Community, site=None) -> bool:
     if community.local_only and not user.is_local():
         return False
 
-    if user.attitude < -0.40 or user.reputation < -10:  # this should exclude about 3.7% of users.
+    if (user.attitude and user.attitude < -0.40) or user.reputation < -10:  # this should exclude about 3.7% of users.
         return False
+
+    if community.downvote_accept_mode != DOWNVOTE_ACCEPT_ALL:
+        if community.downvote_accept_mode == DOWNVOTE_ACCEPT_MEMBERS:
+            if not community.is_member(user):
+                return False
+        elif community.downvote_accept_mode == DOWNVOTE_ACCEPT_INSTANCE:
+            if user.instance_id != community.instance_id:
+                return False
+        elif community.downvote_accept_mode == DOWNVOTE_ACCEPT_TRUSTED:
+            if community.instance_id == user.instance_id:
+                pass
+            else:
+                if user.instance_id not in trusted_instance_ids():
+                    return False
 
     if community.id in communities_banned_from(user.id):
         return False
@@ -828,6 +861,11 @@ def reply_is_stupid(body) -> bool:
     if lower_body == 'this' or lower_body == 'this.' or lower_body == 'this!':
         return True
     return False
+
+
+@cache.memoize(timeout=10)
+def trusted_instance_ids() -> List[int]:
+    return [instance.id for instance in Instance.query.filter(Instance.trusted == True)]
 
 
 def inbox_domain(inbox: str) -> str:
@@ -1092,8 +1130,6 @@ def theme_list():
         for dir in dirs:
             if os.path.exists(f'app/templates/themes/{dir}/{dir}.json'):
                 theme_settings = json.loads(file_get_contents(f'app/templates/themes/{dir}/{dir}.json'))
-                if 'debug' in theme_settings and theme_settings['debug'] == True and not current_app.debug:
-                  continue
                 result.append((dir, theme_settings['name']))
     return result
 
@@ -1139,7 +1175,7 @@ def remove_tracking_from_link(url):
 
 
 def show_ban_message():
-    flash('You have been banned.', 'error')
+    flash(_('You have been banned.'), 'error')
     logout_user()
     resp = make_response(redirect(url_for('main.index')))
     resp.set_cookie('sesion', '17489047567495', expires=datetime(year=2099, month=12, day=30))

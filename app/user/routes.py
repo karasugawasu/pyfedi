@@ -21,7 +21,7 @@ from app.models import Post, Community, CommunityMember, User, PostReply, PostVo
 from app.user import bp
 from app.user.forms import ProfileForm, SettingsForm, DeleteAccountForm, ReportUserForm, \
     FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm, UserNoteForm
-from app.user.utils import purge_user_then_delete, unsubscribe_from_community
+from app.user.utils import purge_user_then_delete, unsubscribe_from_community, search_for_user
 from app.utils import get_setting, render_template, markdown_to_html, user_access, markdown_to_text, shorten_string, \
     is_image_url, ensure_directory_exists, gibberish, file_get_contents, community_membership, user_filters_home, \
     user_filters_posts, user_filters_replies, moderating_communities, joined_communities, theme_list, blocked_instances, \
@@ -375,6 +375,7 @@ def user_settings():
     form.interface_language.choices = [
         ('', _l('Auto-detect')),
         ('ca', _l('Catalan')),
+        ('zh', _l('Chinese')),
         ('en', _l('English')),
         ('fr', _l('French')),
         ('de', _l('German')),
@@ -1346,6 +1347,9 @@ def user_read_posts_delete():
 @login_required
 def edit_user_note(actor):
     actor = actor.strip()
+    return_to = request.args.get('return_to', '').strip()
+    if return_to.startswith('http'):
+        abort(401)
     if '@' in actor:
         user: User = User.query.filter_by(ap_id=actor, deleted=False).first()
     else:
@@ -1365,19 +1369,59 @@ def edit_user_note(actor):
         cache.delete_memoized(User.get_note, user, current_user)
 
         flash(_('Your changes have been saved.'), 'success')
-        goto = request.args.get('redirect') if 'redirect' in request.args else f'/u/{actor}'
-        return redirect(goto)
+        if return_to:
+            return redirect(return_to)
+        else:
+            return redirect(f'/u/{actor}')
 
     elif request.method == 'GET':
         form.note.data = user.get_note(current_user)
 
-    return render_template('user/edit_note.html', title=_('Edit note'), form=form, user=user,
+    return render_template('user/edit_note.html', title=_('Edit note'), form=form, user=user, return_to=return_to,
                            menu_topics=menu_topics(), site=g.site)
 
 
 @bp.route('/user/<int:user_id>/preview')
 def user_preview(user_id):
     user = User.query.get_or_404(user_id)
+    return_to = request.args.get('return_to')
     if (user.deleted or user.banned) and current_user.is_anonymous:
         abort(404)
-    return render_template('user/user_preview.html', user=user)
+    return render_template('user/user_preview.html', user=user, return_to=return_to)
+
+
+@bp.route('/user/lookup/<person>/<domain>')
+def lookup(person, domain):
+    if domain == current_app.config['SERVER_NAME']:
+        return redirect('/u/' + person)
+
+    exists = User.query.filter_by(user_name=person, ap_domain=domain).first()
+    if exists:
+        return redirect('/u/' + person + '@' + domain)
+    else:
+        address = '@' + person + '@' + domain
+        if current_user.is_authenticated:
+            new_person = None
+
+            try:
+                new_person = search_for_user(address)
+            except Exception as e:
+                if 'is blocked.' in str(e):
+                    flash(_('Sorry, that instance is blocked, check https://gui.fediseer.com/ for reasons.'), 'warning')
+            if not new_person or new_person.banned:
+                flash(_('That person could not be retreived or is banned from %(site)s.', site=g.site.name), 'warning')
+                referrer = request.headers.get('Referer', None)
+                if referrer is not None:
+                    return redirect(referrer)
+                else:
+                    return redirect('/')
+
+            return redirect('/u/' + new_person.ap_id)
+        else:
+            # send them back where they came from
+            flash('Searching for remote people requires login', 'error')
+            referrer = request.headers.get('Referer', None)
+            if referrer is not None:
+                return redirect(referrer)
+            else:
+                return redirect('/')

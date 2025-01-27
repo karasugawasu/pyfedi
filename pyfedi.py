@@ -6,14 +6,14 @@ from flask_babel import get_locale
 from flask_login import current_user
 
 from app import create_app, db, cli
-import os, arrow
+import arrow, os
 from flask import session, g, json, request, current_app
 from app.constants import POST_TYPE_LINK, POST_TYPE_IMAGE, POST_TYPE_ARTICLE, POST_TYPE_VIDEO, POST_TYPE_POLL, \
     SUBSCRIPTION_MODERATOR, SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_PENDING
 from app.models import Site
 from app.utils import getmtime, gibberish, shorten_string, shorten_url, digits, user_access, community_membership, \
     can_create_post, can_upvote, can_downvote, shorten_number, ap_datetime, current_theme, community_link_to_href, \
-    in_sorted_list, role_access, first_paragraph
+    in_sorted_list, role_access, first_paragraph, person_link_to_href
 
 app = create_app()
 cli.register(app)
@@ -54,6 +54,7 @@ with app.app_context():
     app.jinja_env.globals['file_exists'] = os.path.exists
     app.jinja_env.globals['first_paragraph'] = first_paragraph
     app.jinja_env.filters['community_links'] = community_link_to_href
+    app.jinja_env.filters['person_links'] = person_link_to_href
     app.jinja_env.filters['shorten'] = shorten_string
     app.jinja_env.filters['shorten_url'] = shorten_url
 
