@@ -6,11 +6,13 @@ from flask_babel import _
 from sqlalchemy import or_, desc
 
 from app import db, cache
+from app.constants import SRC_WEB
 from app.instance import bp
-from app.models import Instance, User, Post, read_posts, InstanceBlock
+from app.models import Instance, User, Post, read_posts
 from app.utils import render_template, moderating_communities, joined_communities, menu_topics, blocked_domains, \
     blocked_instances, blocked_communities, blocked_users, user_filters_home, recently_upvoted_posts, \
-    recently_downvoted_posts
+    recently_downvoted_posts, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds
+from app.shared.site import block_remote_instance, unblock_remote_instance
 
 
 @bp.route('/instances', methods=['GET'])
@@ -39,9 +41,7 @@ def list_instances():
             title = _('Gone forever instances')
 
     # Pagination
-    instances = instances.paginate(page=page,
-                                   per_page=250 if current_user.is_authenticated and not low_bandwidth else 50,
-                                   error_out=False)
+    instances = instances.paginate(page=page, per_page=50, error_out=False)
     next_url = url_for('instance.list_instances', page=instances.next_num) if instances.has_next else None
     prev_url = url_for('instance.list_instances', page=instances.prev_num) if instances.has_prev and page != 1 else None
 
@@ -51,7 +51,10 @@ def list_instances():
                            low_bandwidth=low_bandwidth,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site)
+                           menu_topics=menu_topics(), site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           )
 
 
 @bp.route('/instance/<instance_domain>', methods=['GET'])
@@ -66,7 +69,11 @@ def instance_overview(instance_domain):
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
                            menu_topics=menu_topics(), site=g.site,
-                           title=_('%(instance)s overview', instance=instance.domain))
+                           title=_('%(instance)s overview', instance=instance.domain),
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           )
 
 
 @bp.route('/instance/<instance_domain>/people', methods=['GET'])
@@ -94,7 +101,11 @@ def instance_people(instance_domain):
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
                            menu_topics=menu_topics(), site=g.site,
-                           title=_('People from %(instance)s', instance=instance.domain))
+                           title=_('People from %(instance)s', instance=instance.domain),
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           )
 
 
 @bp.route('/instance/<instance_domain>/posts', methods=['GET'])
@@ -178,20 +189,19 @@ def instance_posts(instance_domain):
                            content_filters=content_filters,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site,)
+                           menu_topics=menu_topics(), site=g.site,
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           )
 
 
 @bp.route('/instance/<int:instance_id>/block', methods=['GET'])
 @login_required
 def instance_block(instance_id):
     instance = Instance.query.get_or_404(instance_id)
-    existing_block = InstanceBlock.query.filter_by(user_id=current_user.id, instance_id=instance.id).first()
-    if not existing_block:
-        db.session.add(InstanceBlock(user_id=current_user.id, instance_id=instance.id))
-        db.session.commit()
-        cache.delete_memoized(blocked_instances, current_user.id)
-        flash(f'{instance.domain} has been blocked.')
-
+    block_remote_instance(instance_id, SRC_WEB)
+    flash(_('Content from %(instance_domain)s will be hidden.', instance_domain=instance.domain))
     goto = request.args.get('redirect') if 'redirect' in request.args else url_for('user.user_settings_filters')
     return redirect(goto)
 
@@ -200,12 +210,7 @@ def instance_block(instance_id):
 @login_required
 def instance_unblock(instance_id):
     instance = Instance.query.get_or_404(instance_id)
-    existing_block = InstanceBlock.query.filter_by(user_id=current_user.id, instance_id=instance.id).first()
-    if existing_block:
-        db.session.delete(existing_block)
-        db.session.commit()
-        cache.delete_memoized(blocked_instances, current_user.id)
-        flash(f'{instance.domain} has been unblocked.')
-
+    unblock_remote_instance(instance_id, SRC_WEB)
+    flash(_('%(instance_domain)s has been unblocked.', instance_domain=instance.domain))
     goto = request.args.get('redirect') if 'redirect' in request.args else url_for('user.user_settings_filters')
     return redirect(goto)

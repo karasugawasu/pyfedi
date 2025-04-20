@@ -6,10 +6,13 @@ from sqlalchemy import desc, or_, and_, text
 from app import db, celery
 from app.chat.forms import AddReply, ReportConversationForm
 from app.chat.util import send_message
-from app.models import Site, User, Report, ChatMessage, Notification, InstanceBlock, Conversation, conversation_member, CommunityBan, ModLog
+from app.constants import NOTIF_REPORT, SRC_WEB
+from app.models import Site, User, Report, ChatMessage, Notification, Conversation, conversation_member, CommunityBan, ModLog
 from app.user.forms import ReportUserForm
-from app.utils import render_template, moderating_communities, joined_communities, menu_topics
+from app.utils import render_template, moderating_communities, joined_communities, menu_topics, menu_instance_feeds, menu_my_feeds, \
+    menu_subscribed_feeds
 from app.chat import bp
+from app.shared.site import block_remote_instance
 
 
 @bp.route('/chat', methods=['GET', 'POST'])
@@ -18,8 +21,8 @@ from app.chat import bp
 def chat_home(conversation_id=None):
     form = AddReply()
     if form.validate_on_submit():
-        reply = send_message(form.message.data, conversation_id)
-        return redirect(url_for('chat.chat_home', conversation_id=conversation_id, _anchor=f'message_{reply.id}'))
+        send_message(form.message.data, conversation_id)
+        return redirect(url_for('chat.chat_home', conversation_id=conversation_id, _anchor=f'message'))
     else:
         conversations = Conversation.query.join(conversation_member,
                                                 conversation_member.c.conversation_id == Conversation.id). \
@@ -36,10 +39,13 @@ def chat_home(conversation_id=None):
                 abort(400)
             if conversations:
                 messages = conversation.messages.order_by(ChatMessage.created_at).all()
+                for message in messages:
+                    if message.recipient_id == current_user.id:
+                        message.read = True
             else:
                 messages = []
 
-            sql = f"UPDATE notification SET read = true WHERE url = '/chat/{conversation_id}' AND user_id = {current_user.id}"
+            sql = f"UPDATE notification SET read = true WHERE url LIKE '/chat/{conversation_id}%' AND user_id = {current_user.id}"
             db.session.execute(text(sql))
             db.session.commit()
             current_user.unread_notifications = Notification.query.filter_by(user_id=current_user.id, read=False).count()
@@ -52,7 +58,10 @@ def chat_home(conversation_id=None):
                                    moderating_communities=moderating_communities(current_user.get_id()),
                                    joined_communities=joined_communities(current_user.get_id()),
                                    menu_topics=menu_topics(),
-                                   site=g.site)
+                                   site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                                   menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                                   menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                                   )
 
 
 @bp.route('/chat/<int:to>/new', methods=['GET', 'POST'])
@@ -74,15 +83,18 @@ def new_message(to):
         conversation.members.append(current_user)
         db.session.add(conversation)
         db.session.commit()
-        reply = send_message(form.message.data, conversation.id)
-        return redirect(url_for('chat.chat_home', conversation_id=conversation.id, _anchor=f'message_{reply.id}'))
+        send_message(form.message.data, conversation.id)
+        return redirect(url_for('chat.chat_home', conversation_id=conversation.id, _anchor=f'message'))
     else:
         return render_template('chat/new_message.html', form=form, title=_('New message to "%(recipient_name)s"', recipient_name=recipient.link()),
                                recipient=recipient,
                                moderating_communities=moderating_communities(current_user.get_id()),
                                joined_communities=joined_communities(current_user.get_id()),
                                menu_topics=menu_topics(),
-                               site=g.site)
+                               site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                               menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                               menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                               )
 
 
 @bp.route('/chat/denied', methods=['GET'])
@@ -125,7 +137,9 @@ def chat_options(conversation_id):
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
                            menu_topics=menu_topics(),
-                           site=g.site
+                           site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
@@ -133,7 +147,7 @@ def chat_options(conversation_id):
 @login_required
 def chat_delete(conversation_id):
     conversation = Conversation.query.get_or_404(conversation_id)
-    if current_user.is_admin() or current_user.is_member(current_user):
+    if current_user.is_admin() or conversation.is_member(current_user):
         Report.query.filter(Report.suspect_conversation_id == conversation.id).delete()
         db.session.delete(conversation)
         db.session.commit()
@@ -144,10 +158,7 @@ def chat_delete(conversation_id):
 @bp.route('/chat/<int:instance_id>/block_instance', methods=['GET', 'POST'])
 @login_required
 def block_instance(instance_id):
-    existing = InstanceBlock.query.filter_by(user_id=current_user.id, instance_id=instance_id).first()
-    if not existing:
-        db.session.add(InstanceBlock(user_id=current_user.id, instance_id=instance_id))
-        db.session.commit()
+    block_remote_instance(instance_id, SRC_WEB)
     flash(_('Instance blocked.'))
     return redirect(url_for('chat.chat_home'))
 
@@ -156,7 +167,7 @@ def block_instance(instance_id):
 @login_required
 def chat_report(conversation_id):
     conversation = Conversation.query.get_or_404(conversation_id)
-    if current_user.is_admin() or current_user.is_member(current_user):
+    if current_user.is_admin() or conversation.is_member(current_user):
         form = ReportConversationForm()
 
         if form.validate_on_submit():
@@ -169,7 +180,7 @@ def chat_report(conversation_id):
             for admin in Site.admins():
                 if admin.id not in already_notified:
                     notify = Notification(title='Reported conversation with user', url='/admin/reports', user_id=admin.id,
-                                          author_id=current_user.id)
+                                          author_id=current_user.id, notif_type=NOTIF_REPORT)
                     db.session.add(notify)
                     admin.unread_notifications += 1
             db.session.commit()
@@ -187,5 +198,7 @@ def chat_report(conversation_id):
                                moderating_communities=moderating_communities(current_user.get_id()),
                                joined_communities=joined_communities(current_user.get_id()),
                                menu_topics=menu_topics(),
-                               site=g.site
+                               site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                               menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                               menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                                )

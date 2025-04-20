@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 from time import sleep
 from random import randint
@@ -10,32 +12,26 @@ from flask_login import current_user
 from pillow_heif import register_heif_opener
 
 from app import db, cache, celery
-from app.activitypub.signature import post_request, default_context, signed_get_request
+from app.activitypub.signature import post_request, default_context, send_post_request
 from app.activitypub.util import find_actor_or_create, actor_json_to_model, ensure_domains_match, \
     find_hashtag_or_create, create_post, remote_object_to_json
-from app.constants import POST_TYPE_ARTICLE, POST_TYPE_LINK, POST_TYPE_IMAGE, POST_TYPE_VIDEO, NOTIF_POST, \
-    POST_TYPE_POLL
 from app.models import Community, File, BannedInstances, PostReply, Post, utcnow, CommunityMember, Site, \
-    Instance, Notification, User, ActivityPubLog, NotificationSubscription, PollChoice, Poll, Tag
-from app.utils import get_request, gibberish, markdown_to_html, domain_from_url, \
-    is_image_url, ensure_directory_exists, shorten_string, \
-    remove_tracking_from_link, ap_datetime, instance_banned, blocked_phrases, url_to_thumbnail_file, opengraph_parse, \
-    piefed_markdown_to_lemmy_markdown, get_task_session
-from sqlalchemy import func, desc, text
+    Instance, User, Tag
+from app.utils import get_request, gibberish, ensure_directory_exists, ap_datetime, instance_banned, get_task_session, store_files_in_s3
+from sqlalchemy import func, desc
 import os
 
 
 allowed_extensions = ['.gif', '.jpg', '.jpeg', '.png', '.webp', '.heic', '.mpo', '.avif', '.svg']
 
 
-def search_for_community(address: str):
+def search_for_community(address: str) -> Community | None:
     if address.startswith('!'):
         name, server = address[1:].split('@')
 
         banned = BannedInstances.query.filter_by(domain=server).first()
         if banned:
-            reason = f" Reason: {banned.reason}" if banned.reason is not None else ''
-            raise Exception(f"{server} is blocked.{reason}")  # todo: create custom exception class hierarchy
+            return None
 
         if current_app.config['SERVER_NAME'] == server:
             already_exists = Community.query.filter_by(name=name, ap_id=None).first()
@@ -66,8 +62,12 @@ def search_for_community(address: str):
                     community_data = get_request(links['href'], headers={'Accept': type})
                     # to see the structure of the json contained in community_data, do a GET to https://lemmy.world/c/technology with header Accept: application/activity+json
                     if community_data.status_code == 200:
-                        community_json = community_data.json()
-                        community_data.close()
+                        try:
+                            community_json = community_data.json()
+                            community_data.close()
+                        except:
+                            community_data.close()
+                            return None
                         if community_json['type'] == 'Group':
                             community = actor_json_to_model(community_json, name, server)
                             if community:
@@ -94,25 +94,25 @@ def retrieve_mods_and_backfill(community_id: int, server, name, community_json=N
             is_guppe = True
 
         # get mods
-        if community_json and 'attributedTo' in community_json:
+        if community.ap_moderators_url:
+            mods_data = remote_object_to_json(community.ap_moderators_url)
+            if mods_data and mods_data['type'] == 'OrderedCollection' and 'orderedItems' in mods_data:
+                for actor in mods_data['orderedItems']:
+                    sleep(0.5)
+                    mod = find_actor_or_create(actor)
+                    if mod:
+                        existing_membership = CommunityMember.query.filter_by(community_id=community.id, user_id=mod.id).first()
+                        if existing_membership:
+                            existing_membership.is_moderator = True
+                        else:
+                            new_membership = CommunityMember(community_id=community.id, user_id=mod.id, is_moderator=True)
+                            db.session.add(new_membership)
+        elif community_json and 'attributedTo' in community_json:
             mods = community_json['attributedTo']
             if isinstance(mods, list):
                 for m in mods:
                     if 'type' in m and m['type'] == 'Person' and 'id' in m:
                         mod = find_actor_or_create(m['id'])
-                        if mod:
-                            existing_membership = CommunityMember.query.filter_by(community_id=community.id, user_id=mod.id).first()
-                            if existing_membership:
-                                existing_membership.is_moderator = True
-                            else:
-                                new_membership = CommunityMember(community_id=community.id, user_id=mod.id, is_moderator=True)
-                                db.session.add(new_membership)
-            elif community.ap_moderators_url:
-                mods_data = remote_object_to_json(community.ap_moderators_url)
-                if mods_data and mods_data['type'] == 'OrderedCollection' and 'orderedItems' in mods_data:
-                    for actor in mods_data['orderedItems']:
-                        sleep(0.5)
-                        mod = find_actor_or_create(actor)
                         if mod:
                             existing_membership = CommunityMember.query.filter_by(community_id=community.id, user_id=mod.id).first()
                             if existing_membership:
@@ -189,10 +189,9 @@ def retrieve_mods_and_backfill(community_id: int, server, name, community_json=N
             featured_data = remote_object_to_json(community.ap_featured_url)
             if featured_data and 'type' in featured_data and featured_data['type'] == 'OrderedCollection' and 'orderedItems' in featured_data:
                 for item in featured_data['orderedItems']:
-                    featured_id = item['id']
-                    p = Post.query.filter(Post.ap_id == featured_id).first()
-                    if p:
-                        p.sticky = True
+                    post = Post.get_by_ap_id(item['id'])
+                    if post:
+                        post.sticky = True
                         db.session.commit()
 
 
@@ -243,13 +242,15 @@ def tags_from_string_old(tags: str) -> List[Tag]:
     tags = tags.strip()
     if tags == '':
         return []
+    if tags[-1:] == ',':
+        tags = tags[:-1]
     tag_list = tags.split(',')
     tag_list = [tag.strip() for tag in tag_list]
     for tag in tag_list:
         if tag[0] == '#':
             tag = tag[1:]
         tag_to_append = find_hashtag_or_create(tag)
-        if tag_to_append:
+        if tag_to_append and tag_to_append not in return_value:
             return_value.append(tag_to_append)
     return return_value
 
@@ -284,8 +285,7 @@ def delete_post_from_community_task(post_id):
         }
 
         if not post.community.is_local():  # this is a remote community, send it to the instance that hosts it
-            success = post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
-                                   current_user.public_url() + '#main-key')
+            send_post_request(post.community.ap_inbox_url, delete_json, current_user.private_key, current_user.public_url() + '#main-key')
         else:  # local community - send it to followers on remote instances
             announce = {
                 "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
@@ -340,8 +340,7 @@ def delete_post_reply_from_community_task(post_reply_id):
             }
 
             if not post.community.is_local():  # this is a remote community, send it to the instance that hosts it
-                success = post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
-                                       current_user.public_url() + '#main-key')
+                send_post_request(post.community.ap_inbox_url, delete_json, current_user.private_key, current_user.public_url() + '#main-key')
 
             else:  # local community - send it to followers on remote instances
                 announce = {
@@ -377,12 +376,16 @@ def save_icon_file(icon_file, directory='communities') -> File:
     new_filename = gibberish(15)
 
     # set up the storage directory
-    directory = f'app/static/media/{directory}/' + new_filename[0:2] + '/' + new_filename[2:4]
-    ensure_directory_exists(directory)
+    if store_files_in_s3():
+        local_directory = 'app/static/tmp'
+    else:
+        local_directory = f'app/static/media/{directory}/{new_filename[0:2]}/{new_filename[2:4]}'
+    ensure_directory_exists(local_directory)
 
     # save the file
-    final_place = os.path.join(directory, new_filename + file_ext)
-    final_place_thumbnail = os.path.join(directory, new_filename + '_thumbnail.webp')
+    s3_directory = f'{directory}/{new_filename[0:2]}/{new_filename[2:4]}'
+    final_place = os.path.join(local_directory, new_filename + file_ext)
+    final_place_thumbnail = os.path.join(local_directory, new_filename + '_thumbnail.webp')
     icon_file.save(final_place)
 
     if file_ext.lower() == '.heic':
@@ -395,7 +398,25 @@ def save_icon_file(icon_file, directory='communities') -> File:
         if file_ext.lower() == '.svg':  # svgs don't need to be resized
             file = File(file_path=final_place, file_name=new_filename + file_ext, alt_text=f'{directory} icon',
                         thumbnail_path=final_place)
+            # Move uploaded file to S3 if needed
+            if store_files_in_s3():
+                import boto3
+                session = boto3.session.Session()
+                s3 = session.client(
+                    service_name='s3',
+                    region_name=current_app.config['S3_REGION'],
+                    endpoint_url=current_app.config['S3_ENDPOINT'],
+                    aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
+                    aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
+                )
+                s3_path = f'{s3_directory}/{new_filename}{file_ext}'
+                s3.upload_file(final_place, current_app.config['S3_BUCKET'], s3_path)
+                file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_path}"
+                file.thumbnail_path = file.file_path
+                s3.close()
+                os.unlink(final_place)
             db.session.add(file)
+                
             return file
         else:
             Image.MAX_IMAGE_PIXELS = 89478485
@@ -418,6 +439,32 @@ def save_icon_file(icon_file, directory='communities') -> File:
                         width=img_width, height=img_height, thumbnail_width=thumbnail_width,
                         thumbnail_height=thumbnail_height, thumbnail_path=final_place_thumbnail)
             db.session.add(file)
+            
+            # Move uploaded files to S3 if needed
+            if store_files_in_s3():
+                import boto3
+                session = boto3.session.Session()
+                s3 = session.client(
+                    service_name='s3',
+                    region_name=current_app.config['S3_REGION'],
+                    endpoint_url=current_app.config['S3_ENDPOINT'],
+                    aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
+                    aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
+                )
+                # Upload main image
+                s3_path = f'{s3_directory}/{new_filename}{file_ext}'
+                s3.upload_file(final_place, current_app.config['S3_BUCKET'], s3_path)
+                file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_path}"
+                
+                # Upload thumbnail
+                s3_thumbnail_path = f'{s3_directory}/{new_filename}_thumbnail.webp'
+                s3.upload_file(final_place_thumbnail, current_app.config['S3_BUCKET'], s3_thumbnail_path)
+                file.thumbnail_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_thumbnail_path}"
+                
+                s3.close()
+                os.unlink(final_place)
+                os.unlink(final_place_thumbnail)
+                
             return file
     else:
         abort(400)
@@ -431,12 +478,17 @@ def save_banner_file(banner_file, directory='communities') -> File:
     new_filename = gibberish(15)
 
     # set up the storage directory
-    directory = f'app/static/media/{directory}/' + new_filename[0:2] + '/' + new_filename[2:4]
-    ensure_directory_exists(directory)
+    if store_files_in_s3():
+        local_directory = 'app/static/tmp'
+        s3_directory = f'media/{directory}/{new_filename[0:2]}/{new_filename[2:4]}'
+    else:
+        local_directory = f'app/static/media/{directory}/{new_filename[0:2]}/{new_filename[2:4]}'
+        
+    ensure_directory_exists(local_directory)
 
     # save the file
-    final_place = os.path.join(directory, new_filename + file_ext)
-    final_place_thumbnail = os.path.join(directory, new_filename + '_thumbnail.webp')
+    final_place = os.path.join(local_directory, new_filename + file_ext)
+    final_place_thumbnail = os.path.join(local_directory, new_filename + '_thumbnail.webp')
     banner_file.save(final_place)
 
     if file_ext.lower() == '.heic':
@@ -467,6 +519,32 @@ def save_banner_file(banner_file, directory='communities') -> File:
                     width=img_width, height=img_height, thumbnail_path=final_place_thumbnail,
                     thumbnail_width=thumbnail_width, thumbnail_height=thumbnail_height)
         db.session.add(file)
+        
+        # Move uploaded files to S3 if needed
+        if store_files_in_s3():
+            import boto3
+            session = boto3.session.Session()
+            s3 = session.client(
+                service_name='s3',
+                region_name=current_app.config['S3_REGION'],
+                endpoint_url=current_app.config['S3_ENDPOINT'],
+                aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
+                aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
+            )
+            # Upload main image
+            s3_path = f'{s3_directory}/{new_filename}{file_ext}'
+            s3.upload_file(final_place, current_app.config['S3_BUCKET'], s3_path)
+            file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_path}"
+            
+            # Upload thumbnail
+            s3_thumbnail_path = f'{s3_directory}/{new_filename}_thumbnail.webp'
+            s3.upload_file(final_place_thumbnail, current_app.config['S3_BUCKET'], s3_thumbnail_path)
+            file.thumbnail_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_thumbnail_path}"
+            
+            s3.close()
+            os.unlink(final_place)
+            os.unlink(final_place_thumbnail)
+            
         return file
     else:
         abort(400)
@@ -487,16 +565,7 @@ def send_to_remote_instance_task(instance_id: int, community_id: int, payload):
     if community:
         instance: Instance = session.query(Instance).get(instance_id)
         if instance.inbox and instance.online() and not instance_banned(instance.domain):
-            if post_request(instance.inbox, payload, community.private_key, community.ap_profile_id + '#main-key', timeout=10) is True:
-                instance.last_successful_send = utcnow()
-                instance.failures = 0
-            else:
-                instance.failures += 1
-                instance.most_recent_attempt = utcnow()
-                instance.start_trying_again = utcnow() + timedelta(seconds=instance.failures ** 4)
-                if instance.failures > 10:
-                    instance.dormant = True
-            session.commit()
+            send_post_request(instance.inbox, payload, community.private_key, community.ap_profile_id + '#main-key', timeout=10)
     session.close()
 
 

@@ -1,4 +1,4 @@
-<aside id="side_pane" class="col-12 col-md-4 side_pane" role="complementary">
+<aside id="side_pane" class="col-12 {{ 'col-md-3 col-lg-2' if post_layout == 'masonry_wide' else 'col-md-4' }} side_pane" role="complementary">
 {% if community %}
     {% block community_actions %}
         <div class="card">
@@ -34,7 +34,9 @@
             <div class="card-body">
                 <p>{{ community.description_html|community_links|safe if community.description_html else '' }}</p>
                 <p>{{ community.rules_html|safe if community.rules_html else '' }}</p>
-                <p>{{ _('Members') if community.is_local() else _('Local members') }}: {{ community.subscriptions_count }}<br>
+                <p>{{ _('Members') if community.is_local() else _('Local members') }}: {{ community.subscriptions_count }}
+                    <a href="/community/{{ community.link() }}/invite" rel="nofollow noindex">{{ _('Invite people to join') }}</a>
+                    <br>
                     {{ _('Posts') }}: {{ community.post_count }}<br>
                     {{ _('Comments') }}: {{ community.post_reply_count }}
                 </p>
@@ -52,6 +54,9 @@
                 {% if rss_feed and not community.is_local() -%}
                     <ul>
                         <li><p><a href="{{ community.public_url() }}">{{ _('View community on original server') }}</a></p></li>
+                        {% if instance_domain -%}
+                        <li><p><a href="/community/{{ community.link() }}/move">{{ _('Move community to %(instance_domain)s', instance_domain=instance_domain) }}</a></p></li>
+                        {% endif -%}
                         <li><p><a href="{{ url_for('search.retrieve_remote_post') }}">{{ _('Retrieve a post from the original server') }}</a></p></li>
                     </ul>
                 {% endif -%}
@@ -90,6 +95,7 @@
                  <h2>{{ _('Community Settings') }}</h2>
             </div>
             <div class="card-body">
+                <p><a class="btn btn-primary" href="/community/{{ community.link() }}/invite" rel="nofollow noindex">{{ _('Invite people to join') }}</a></p>
                 {% if is_moderator or is_owner or is_admin -%}
                 <p><a href="/community/{{ community.link() }}/moderate" class="btn btn-primary">{{ _('Moderate') }}</a></p>
                 {% endif -%}

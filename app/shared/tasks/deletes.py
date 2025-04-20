@@ -1,6 +1,6 @@
 from app import celery
-from app.activitypub.signature import default_context, post_request
-from app.models import CommunityBan, Instance, Post, PostReply, User, UserFollower
+from app.activitypub.signature import default_context, post_request, send_post_request
+from app.models import Community, CommunityBan, Instance, Post, PostReply, User, UserFollower
 from app.utils import gibberish, instance_banned
 
 from flask import current_app
@@ -47,9 +47,24 @@ def restore_post(send_async, user_id, post_id, reason=None):
     delete_object(user_id, post, is_post=True, is_restore=True, reason=reason)
 
 
+@celery.task
+def delete_community(send_async, user_id, community_id):
+    community = Community.query.filter_by(id=community_id).one()
+    delete_object(user_id, community)
+
+
+@celery.task
+def restore_community(send_async, user_id, community_id):
+    community = Community.query.filter_by(id=community_id).one()
+    delete_object(user_id, community, is_restore=True)
+
+
 def delete_object(user_id, object, is_post=False, is_restore=False, reason=None):
     user = User.query.filter_by(id=user_id).one()
-    community = object.community
+    if isinstance(object, Community):
+        community = object
+    else:
+        community = object.community
 
     # local_only communities can also be used to send activity to User Followers (only applies to posts, not comments)
     # return now though, if there aren't any
@@ -123,11 +138,11 @@ def delete_object(user_id, object, is_post=False, is_restore=False, reason=None)
         }
         for instance in community.following_instances():
             if instance.inbox and instance.online() and not user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                post_request(instance.inbox, announce, community.private_key, community.public_url() + '#main-key')
+                send_post_request(instance.inbox, announce, community.private_key, community.public_url() + '#main-key')
                 domains_sent_to.append(instance.domain)
     else:
         payload = undo if is_restore else delete
-        post_request(community.ap_inbox_url, payload, user.private_key, user.public_url() + '#main-key')
+        send_post_request(community.ap_inbox_url, payload, user.private_key, user.public_url() + '#main-key')
         domains_sent_to.append(community.instance.domain)
 
     if reason:
@@ -143,7 +158,7 @@ def delete_object(user_id, object, is_post=False, is_restore=False, reason=None)
         instances = instances.filter(UserFollower.local_user_id == user.id).filter(Instance.gone_forever == False)
         for instance in instances:
             if instance.domain not in domains_sent_to:
-                post_request(instance.inbox, payload, user.private_key, user.public_url() + '#main-key')
+                send_post_request(instance.inbox, payload, user.private_key, user.public_url() + '#main-key')
 
 
 

@@ -5,12 +5,13 @@ from flask_login import current_user
 from sqlalchemy import desc, text, or_
 
 from app import db
-from app.models import PostReply, Post
-from app.utils import blocked_instances, blocked_users
+from app.models import PostReply, Post, Community
+from app.utils import blocked_instances, blocked_users, is_video_hosting_site
 
+from app.constants import POST_TYPE_LINK, POST_TYPE_IMAGE, POST_TYPE_ARTICLE, POST_TYPE_VIDEO
 
 # replies to a post, in a tree, sorted by a variety of methods
-def post_replies(post_id: int, sort_by: str, show_first: int = 0) -> List[PostReply]:
+def post_replies(community: Community, post_id: int, sort_by: str, show_first: int = 0) -> List[PostReply]:
     comments = PostReply.query.filter_by(post_id=post_id)
     if current_user.is_authenticated:
         instance_ids = blocked_instances(current_user.id)
@@ -21,8 +22,10 @@ def post_replies(post_id: int, sort_by: str, show_first: int = 0) -> List[PostRe
         blocked_accounts = blocked_users(current_user.id)
         if blocked_accounts:
             comments = comments.filter(PostReply.user_id.not_in(blocked_accounts))
-        if current_user.reply_hide_threshold:
+        if current_user.reply_hide_threshold and not (current_user.is_admin() or community.is_owner() or community.is_moderator()):
             comments = comments.filter(PostReply.score > current_user.reply_hide_threshold)
+        if current_user.read_language_ids and len(current_user.read_language_ids) > 0:
+            comments = comments.filter(or_(PostReply.language_id.in_(tuple(current_user.read_language_ids)), PostReply.language_id == None))
     else:
         comments.filter(PostReply.score > -20)
 
@@ -82,8 +85,8 @@ def get_post_reply_count(post_id) -> int:
 
 
 def tags_to_string(post: Post) -> str:
-    if post.tags.count() > 0:
-        return ', '.join([tag.name for tag in post.tags])
+    if len(post.tags) > 0:
+        return ', '.join([tag.display_as for tag in post.tags])
 
 
 def body_has_no_archive_link(body):
@@ -114,3 +117,15 @@ def url_needs_archive(url) -> bool:
 def generate_archive_link(url) -> bool:
     return 'https://archive.ph/' + url
 
+# Forms like the cross post form need the type for the url
+def post_type_to_form_url_type(post_type: int, post_url: str):
+    if post_type == POST_TYPE_LINK or is_video_hosting_site(post_url):
+        return 'link'
+    elif post_type == POST_TYPE_IMAGE:
+        return 'image'
+    elif post_type == POST_TYPE_VIDEO:
+        return 'video'
+    elif post_type == POST_TYPE_POLL:
+        return 'poll'
+    else:
+        return ''

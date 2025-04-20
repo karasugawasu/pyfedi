@@ -1,29 +1,25 @@
+import os
 from app import db, cache
-from app.activitypub.util import make_image_sizes
+from app.activitypub.util import make_image_sizes, notify_about_post
 from app.constants import *
 from app.community.util import tags_from_string_old, end_poll_date
-from app.models import File, Language, Notification, NotificationSubscription, Poll, PollChoice, Post, PostBookmark, PostVote, Report, Site, User, utcnow
+from app.models import File, Notification, NotificationSubscription, Poll, PollChoice, Post, PostBookmark, PostVote, Report, Site, User, utcnow
 from app.shared.tasks import task_selector
 from app.utils import render_template, authorise_api_user, shorten_string, gibberish, ensure_directory_exists, \
-                      piefed_markdown_to_lemmy_markdown, markdown_to_html, remove_tracking_from_link, domain_from_url, \
-                      opengraph_parse, url_to_thumbnail_file, can_create_post, is_video_hosting_site, recently_upvoted_posts, \
-                      is_image_url, is_video_hosting_site, add_to_modlog_activitypub
+    piefed_markdown_to_lemmy_markdown, markdown_to_html, fixup_url, domain_from_url, \
+    opengraph_parse, url_to_thumbnail_file, can_create_post, is_video_hosting_site, recently_upvoted_posts, \
+    is_image_url, add_to_modlog_activitypub, store_files_in_s3
 
 from flask import abort, flash, redirect, request, url_for, current_app, g
 from flask_babel import _
 from flask_login import current_user
-
+import boto3
 from pillow_heif import register_heif_opener
 from PIL import Image, ImageOps
 
 from sqlalchemy import text
 
-import os
 
-# would be in app/constants.py
-SRC_WEB = 1
-SRC_PUB = 2
-SRC_API = 3
 
 # function can be shared between WEB and API (only API calls it for now)
 # post_vote in app/post/routes would just need to do 'return vote_for_post(post_id, vote_direction, SRC_WEB)'
@@ -37,6 +33,9 @@ def vote_for_post(post_id: int, vote_direction, src, auth=None):
         user = current_user
 
     undo = post.vote(user, vote_direction)
+
+    # mark the post as read for the user
+    user.mark_post_as_read(post)
 
     task_selector('vote_for_post', user_id=user.id, post_id=post_id, vote_to_undo=undo, vote_direction=vote_direction)
 
@@ -55,84 +54,80 @@ def vote_for_post(post_id: int, vote_direction, src, auth=None):
                                recently_downvoted=recently_downvoted)
 
 
-# function can be shared between WEB and API (only API calls it for now)
-# post_bookmark in app/post/routes would just need to do 'return bookmark_the_post(post_id, SRC_WEB)'
-def bookmark_the_post(post_id: int, src, auth=None):
-    if src == SRC_API:
-        post = Post.query.filter_by(id=post_id, deleted=False).one()
-        user_id = authorise_api_user(auth)
-    else:
-        post = Post.query.get_or_404(post_id)
-        if post.deleted:
-            abort(404)
-        user_id = current_user.id
+def bookmark_post(post_id: int, src, auth=None):
+    Post.query.filter_by(id=post_id, deleted=False).one()
+    user_id = authorise_api_user(auth) if src == SRC_API else current_user.id
 
-    existing_bookmark = PostBookmark.query.filter(PostBookmark.post_id == post_id, PostBookmark.user_id == user_id).first()
+    existing_bookmark = PostBookmark.query.filter_by(post_id=post_id, user_id=user_id).first()
     if not existing_bookmark:
         db.session.add(PostBookmark(post_id=post_id, user_id=user_id))
         db.session.commit()
         if src == SRC_WEB:
             flash(_('Bookmark added.'))
     else:
-        if src == SRC_WEB:
-            flash(_('This post has already been bookmarked.'))
+        msg = 'This post has already been bookmarked.'
+        if src == SRC_API:
+            raise Exception(msg)
+        else:
+            flash(_(msg))
 
     if src == SRC_API:
         return user_id
-    else:
-        return redirect(url_for('activitypub.post_ap', post_id=post.id))
 
 
-# function can be shared between WEB and API (only API calls it for now)
-# post_remove_bookmark in app/post/routes would just need to do 'return remove_the_bookmark_from_post(post_id, SRC_WEB)'
-def remove_the_bookmark_from_post(post_id: int, src, auth=None):
-    if src == SRC_API:
-        post = Post.query.filter_by(id=post_id, deleted=False).one()
-        user_id = authorise_api_user(auth)
-    else:
-        post = Post.query.get_or_404(post_id)
-        if post.deleted:
-            abort(404)
-        user_id = current_user.id
+def remove_bookmark_post(post_id: int, src, auth=None):
+    Post.query.filter_by(id=post_id, deleted=False).one()
+    user_id = authorise_api_user(auth) if src == SRC_API else current_user.id
 
-    existing_bookmark = PostBookmark.query.filter(PostBookmark.post_id == post_id, PostBookmark.user_id == user_id).first()
+    existing_bookmark = PostBookmark.query.filter_by(post_id=post_id, user_id=user_id).first()
     if existing_bookmark:
         db.session.delete(existing_bookmark)
         db.session.commit()
         if src == SRC_WEB:
             flash(_('Bookmark has been removed.'))
+    else:
+        msg = 'This post was not bookmarked.'
+        if src == SRC_API:
+            raise Exception(msg)
+        else:
+            flash(_(msg))
 
     if src == SRC_API:
         return user_id
+
+
+def subscribe_post(post_id: int, subscribe, src, auth=None):
+    post = Post.query.filter_by(id=post_id, deleted=False).one()
+    user_id = authorise_api_user(auth) if src == SRC_API else current_user.id
+
+    if src == SRC_WEB:
+        subscribe = False if post.notify_new_replies(user_id) else True
+
+    existing_notification = NotificationSubscription.query.filter_by(entity_id=post_id, user_id=user_id,
+                                                                         type=NOTIF_POST).first()
+    if subscribe == False:
+        if existing_notification:
+            db.session.delete(existing_notification)
+            db.session.commit()
+        else:
+            msg = 'A subscription for this post did not exist.'
+            if src == SRC_API:
+                raise Exception(msg)
+            else:
+                flash(_(msg))
+
     else:
-        return redirect(url_for('activitypub.post_ap', post_id=post.id))
-
-
-
-# function can be shared between WEB and API (only API calls it for now)
-# post_notification in app/post/routes would just need to do 'return toggle_post_notification(post_id, SRC_WEB)'
-def toggle_post_notification(post_id: int, src, auth=None):
-    # Toggle whether the current user is subscribed to notifications about top-level replies to this post or not
-    if src == SRC_API:
-        post = Post.query.filter_by(id=post_id, deleted=False).one()
-        user_id = authorise_api_user(auth)
-    else:
-        post = Post.query.get_or_404(post_id)
-        if post.deleted:
-            abort(404)
-        user_id = current_user.id
-
-    existing_notification = NotificationSubscription.query.filter(NotificationSubscription.entity_id == post.id,
-                                                                  NotificationSubscription.user_id == user_id,
-                                                                  NotificationSubscription.type == NOTIF_POST).first()
-    if existing_notification:
-        db.session.delete(existing_notification)
-        db.session.commit()
-    else:  # no subscription yet, so make one
-        new_notification = NotificationSubscription(name=shorten_string(_('Replies to my post %(post_title)s', post_title=post.title)),
-                                                    user_id=user_id, entity_id=post.id, type=NOTIF_POST)
-        db.session.add(new_notification)
-        db.session.commit()
+        if existing_notification:
+            msg = 'A subscription for this post already existed.'
+            if src == SRC_API:
+                raise Exception(msg)
+            else:
+                flash(_(msg))
+        else:
+            new_notification = NotificationSubscription(name=shorten_string(_('Replies to my post %(post_title)s', post_title=post.title)),
+                                                        user_id=user_id, entity_id=post_id, type=NOTIF_POST)
+            db.session.add(new_notification)
+            db.session.commit()
 
     if src == SRC_API:
         return user_id
@@ -140,11 +135,19 @@ def toggle_post_notification(post_id: int, src, auth=None):
         return render_template('post/_post_notification_toggle.html', post=post)
 
 
+def extra_rate_limit_check(user):
+    """
+    The plan for this function is to do some extra limiting for an author who passes the rate limit for the route
+    but who's posts are really unpopular and are probably spam
+    """
+    return False
+
+
 def make_post(input, community, type, src, auth=None, uploaded_file=None):
     if src == SRC_API:
         user = authorise_api_user(auth, return_type='model')
-        #if not basic_rate_limit_check(user):
-        #    raise Exception('rate_limited')
+        if extra_rate_limit_check(user):
+            raise Exception('rate_limited')
         title = input['title']
         url = input['url']
         language_id = input['language_id']
@@ -191,6 +194,7 @@ def make_post(input, community, type, src, auth=None, uploaded_file=None):
     effect = user.instance.vote_weight
     post.score = post.up_votes * effect
     post.ranking = post.post_ranking(post.score, post.posted_at)
+    post.ranking_scaled = int(post.ranking + community.scale_by())
     cache.delete_memoized(recently_upvoted_posts, user.id)
 
     community.post_count += 1
@@ -203,6 +207,8 @@ def make_post(input, community, type, src, auth=None, uploaded_file=None):
     db.session.commit()
 
     post = edit_post(input, post, type, src, user, auth, uploaded_file, from_scratch=True)
+
+    notify_about_post(post)
 
     if src == SRC_API:
         return user.id, post
@@ -281,7 +287,7 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
                     domain.post_count -= 1
 
         # remove any old tags
-        db.session.execute(text('DELETE FROM "post_tag" WHERE post_id = :post_id'), {'post_id': post.id})
+        post.tags.clear()
 
         post.edited_at = utcnow()
 
@@ -296,7 +302,10 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
 
         new_filename = gibberish(15)
         # set up the storage directory
-        directory = 'app/static/media/posts/' + new_filename[0:2] + '/' + new_filename[2:4]
+        if store_files_in_s3():
+            directory = 'app/static/tmp'
+        else:
+            directory = 'app/static/media/posts/' + new_filename[0:2] + '/' + new_filename[2:4]
         ensure_directory_exists(directory)
 
         # save the file
@@ -319,10 +328,28 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
 
                 img.thumbnail((2000, 2000))
                 img.save(final_place)
-
-                url = f"https://{current_app.config['SERVER_NAME']}/{final_place.replace('app/', '')}"
             else:
                 raise Exception('filetype not allowed')
+
+        url = f"https://{current_app.config['SERVER_NAME']}/{final_place.replace('app/', '')}"
+
+        # Move uploaded file to S3
+        if store_files_in_s3():
+            session = boto3.session.Session()
+            s3 = session.client(
+                service_name='s3',
+                region_name=current_app.config['S3_REGION'],
+                endpoint_url=current_app.config['S3_ENDPOINT'],
+                aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
+                aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
+            )
+            s3.upload_file(final_place, current_app.config['S3_BUCKET'], 'posts/' +
+                           new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + file_ext)
+            url = f"https://{current_app.config['S3_PUBLIC_URL']}/posts/" + \
+                  new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + file_ext
+            s3.close()
+            os.unlink(final_place)
+
 
     if url and (from_scratch or url_changed):
         domain = domain_from_url(url)
@@ -335,14 +362,20 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
             if domain.notify_mods:
                 for community_member in post.community.moderators():
                     if community_member.is_local():
-                        notify = Notification(title='Suspicious content', url=post.ap_id, user_id=community_member.user_id, author_id=user.id)
+                        notify = Notification(title='Suspicious content', url=post.ap_id, 
+                                              user_id=community_member.user_id, author_id=user.id,
+                                              notif_type=NOTIF_REPORT)
                         db.session.add(notify)
                         already_notified.add(community_member.user_id)
             if domain.notify_admins:
                 for admin in Site.admins():
                     if admin.id not in already_notified:
-                        notify = Notification(title='Suspicious content', url=post.ap_id, user_id=admin.id, author_id=user.id)
+                        notify = Notification(title='Suspicious content', url=post.ap_id, 
+                                              user_id=admin.id, author_id=user.id,
+                                              notif_type=NOTIF_REPORT)
                         db.session.add(notify)
+
+        thumbnail_url, embed_url = fixup_url(url)
         if is_image_url(url):
             file = File(source_url=url)
             if uploaded_file and type == POST_TYPE_IMAGE:
@@ -355,7 +388,7 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
             post.url = url
             post.type = POST_TYPE_IMAGE
         else:
-            opengraph = opengraph_parse(url)
+            opengraph = opengraph_parse(thumbnail_url)
             if opengraph and (opengraph.get('og:image', '') != '' or opengraph.get('og:image:url', '') != ''):
                 filename = opengraph.get('og:image') or opengraph.get('og:image:url')
                 if not filename.startswith('/'):
@@ -365,14 +398,16 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
                         post.image = file
                         db.session.add(file)
 
-            post.url = remove_tracking_from_link(url)
+            post.url = embed_url
 
-            if url.endswith('.mp4') or url.endswith('.webm') or is_video_hosting_site(url):
+            if url.endswith('.mp4') or url.endswith('.webm') or is_video_hosting_site(embed_url):
                 post.type = POST_TYPE_VIDEO
             else:
                 post.type = POST_TYPE_LINK
 
         post.calculate_cross_posts(url_changed=url_changed)
+    elif url and is_video_hosting_site(url):
+        post.type = POST_TYPE_VIDEO
 
     federate = True
     if type == POST_TYPE_POLL:
@@ -409,9 +444,9 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
 
     if from_scratch:
         if federate:
-            task_selector('make_post', user_id=user.id, post_id=post.id)
+            task_selector('make_post', post_id=post.id)
     elif federate:
-        task_selector('edit_post', user_id=user.id, post_id=post.id)
+        task_selector('edit_post', post_id=post.id)
 
     if src == SRC_API:
         if from_scratch:
@@ -505,16 +540,17 @@ def report_post(post_id, input, src, auth=None):
     for mod in post.community.moderators():
         moderator = User.query.get(mod.user_id)
         if moderator and moderator.is_local():
-            notification = Notification(user_id=mod.user_id, title=_('A comment has been reported'),
-                                        url=f"https://{current_app.config['SERVER_NAME']}/comment/{post.id}",
-                                        author_id=user_id)
+            notification = Notification(user_id=mod.user_id, title=_('A post has been reported'),
+                                        url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
+                                        author_id=user_id, notif_type=NOTIF_REPORT)
             db.session.add(notification)
             already_notified.add(mod.user_id)
     post.reports += 1
     # todo: only notify admins for certain types of report
     for admin in Site.admins():
         if admin.id not in already_notified:
-            notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, author_id=user_id)
+            notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, 
+                                  author_id=user_id, notif_type=NOTIF_REPORT)
             db.session.add(notify)
             admin.unread_notifications += 1
     db.session.commit()
@@ -553,15 +589,20 @@ def lock_post(post_id, locked, src, auth=None):
         add_to_modlog_activitypub(modlog_type, user, community_id=post.community_id,
                                   link_text=shorten_string(post.title), link=f'post/{post.id}', reason='')
 
-    if locked:
-        task_selector('lock_post', user_id=user.id, post_id=post_id)
-    else:
-        task_selector('unlock_post', user_id=user.id, post_id=post_id)
+        if locked:
+            if src == SRC_WEB:
+                flash(_('%(name)s has been locked.', name=post.title))
+            task_selector('lock_post', user_id=user.id, post_id=post_id)
+        else:
+            if src == SRC_WEB:
+                flash(_('%(name)s has been unlocked.', name=post.title))
+            task_selector('unlock_post', user_id=user.id, post_id=post_id)
 
-    return user.id, post
+    if src == SRC_API:
+        return user.id, post
 
 
-def sticky_post(post_id, featured, src, auth=None):
+def sticky_post(post_id: int, featured: bool, src: int, auth=None):
     if src == SRC_API:
         user = authorise_api_user(auth, return_type='model')
     else:
@@ -570,7 +611,7 @@ def sticky_post(post_id, featured, src, auth=None):
     post = Post.query.filter_by(id=post_id).one()
     community = post.community
 
-    if post.community.is_moderator(user) or post.community.is_instance_admin(user):
+    if post.community.is_moderator(user) or post.community.is_instance_admin(user) or user.is_admin():
         post.sticky = featured
         if featured:
             modlog_type = 'featured_post'
@@ -653,5 +694,3 @@ def mod_restore_post(post_id, reason, src, auth):
         return user.id, post
     else:
         return
-
-

@@ -5,7 +5,8 @@ from app.api.alpha.utils.post import get_post_list
 from app.api.alpha.utils.reply import get_reply_list
 from app.api.alpha.utils.validators import required, integer_expected, boolean_expected
 from app.models import Conversation, ChatMessage, Notification, PostReply, User
-from app.shared.user import block_another_user, unblock_another_user
+from app.shared.user import block_another_user, unblock_another_user, subscribe_user
+from app.constants import *
 
 from sqlalchemy import text, desc
 
@@ -30,49 +31,49 @@ def get_user(auth, data):
         auth = None                 # avoid authenticating user again in get_post_list and get_reply_list
 
     # bit unusual. have to help construct the json here rather than in views, to avoid circular dependencies
-    # lists are empty when viewing own account, to deal with a bug I've yet to identify
-    post_list = get_post_list(auth, data, user_id) if not user_id == person_id else {'posts': []}
-    reply_list = get_reply_list(auth, data, user_id) if not user_id == person_id else {'comments': []}
+    post_list = get_post_list(auth, data, user_id)
+    reply_list = get_reply_list(auth, data, user_id)
 
-    user_json = user_view(user=person_id, variant=3)
+    user_json = user_view(user=person_id, variant=3, user_id=user_id)
     user_json['posts'] = post_list['posts']
     user_json['comments'] = reply_list['comments']
     return user_json
 
 
 def get_user_list(auth, data):
-    # only support 'api/alpha/search?q&type_=Users&sort=TopAll&listing_type=Local&page=1&limit=15' for now
+    # only support 'api/alpha/search?q&type_=Users&sort=Top&listing_type=Local&page=1&limit=15' for now
     # (enough for instance view)
 
     type = data['type_'] if data and 'type_' in data else "All"
-    sort = data['sort'] if data and 'sort' in data else "Hot"
     page = int(data['page']) if data and 'page' in data else 1
     limit = int(data['limit']) if data and 'limit' in data else 10
 
     query = data['q'] if data and 'q' in data else ''
 
+    user_id = authorise_api_user(auth) if auth else None
+
     if type == 'Local':
         users = User.query.filter_by(instance_id=1, deleted=False).order_by(User.id)
     else:
-        users = User.query.filter_by(deleted=False).order_by(User.id)
+        users = User.query.filter(User.instance_id != 1, User.deleted == False).order_by(desc(User.id))
 
     if query:
-        users = users.filter(User.user_name.ilike(f"%{query}%"))
+        if '@' in query:
+            users = users.filter(User.ap_id.ilike(f"%{query}%"))
+        else:
+            users = users.filter(User.user_name.ilike(f"%{query}%"))
 
     users = users.paginate(page=page, per_page=limit, error_out=False)
 
     user_list = []
     for user in users:
-        user_list.append(user_view(user, variant=2, stub=True))
+        user_list.append(user_view(user, variant=2, stub=True, user_id=user_id))
     list_json = {
         "users": user_list
     }
 
     return list_json
 
-
-# would be in app/constants.py
-SRC_API = 3
 
 def post_user_block(auth, data):
     required(['person_id', 'block'], data)
@@ -88,21 +89,21 @@ def post_user_block(auth, data):
 
 
 def get_user_unread_count(auth):
-    user_id = authorise_api_user(auth)
+    user = authorise_api_user(auth, return_type='model')
+    unread_replies = unread_messages = 0
+    unread_notifications = user.unread_notifications
+    if unread_notifications > 0:
+        unread_replies = db.session.execute(text("SELECT COUNT(id) as c FROM notification WHERE user_id = :user_id AND read = false AND url LIKE '%comment%'"), {'user_id': user.id}).scalar()
+        unread_messages = db.session.execute(text("SELECT COUNT(id) as c FROM chat_message WHERE recipient_id = :user_id AND read = false"), {'user_id': user.id}).scalar()
 
-    # Mentions are just included in replies
-
-    unread_notifications = db.session.execute(text("SELECT COUNT(id) as c FROM notification WHERE user_id = :user_id AND read = false"), {'user_id': user_id}).scalar()
-    unread_messages = db.session.execute(text("SELECT * from chat_message AS cm INNER JOIN conversation c ON cm.conversation_id =c.id WHERE c.read = false AND cm.recipient_id = :user_id"), {'user_id': user_id}).scalar()
-    if not unread_messages:
-        unread_messages = 0
-    if unread_notifications == 0:
-        unread_messages = 0
+    # "other" is things like reports and activity alerts that this endpoint isn't really intended to support
+    # replies and mentions are merged together in 'replies' as that's what get_user_replies() currently expects
 
     unread_count = {
-        "replies": unread_notifications - unread_messages,
+        "replies": unread_replies,
         "mentions": 0,
-        "private_messages": unread_messages
+        "private_messages": unread_messages,
+        "other": unread_notifications - unread_replies - unread_messages
     }
 
     return unread_count
@@ -135,18 +136,65 @@ def get_user_replies(auth, data):
 
 
 def post_user_mark_all_as_read(auth):
-    user_id = authorise_api_user(auth)
+    user = authorise_api_user(auth, return_type='model')
 
-    notifications = Notification.query.filter_by(user_id=user_id, read=False)
+    notifications = Notification.query.filter_by(user_id=user.id, read=False)
     for notification in notifications:
         notification.read = True
 
-    conversations = Conversation.query.filter_by(read=False).join(ChatMessage, ChatMessage.conversation_id == Conversation.id).filter_by(recipient_id=user_id)
+    user.unread_notifications = 0
+
+    conversations = Conversation.query.filter_by(read=False).join(ChatMessage, ChatMessage.conversation_id == Conversation.id).filter_by(recipient_id=user.id)
     for conversation in conversations:
         conversation.read = True
+
+    chat_messages = ChatMessage.query.filter_by(recipient_id=user.id)
+    for chat_message in chat_messages:
+        chat_message.read = True
 
     db.session.commit()
 
     return {'replies': []}
 
+
+def put_user_subscribe(auth, data):
+    required(['person_id', 'subscribe'], data)
+    integer_expected(['person_id'], data)
+    boolean_expected(['subscribe'], data)
+
+    person_id = data['person_id']
+    subscribe = data['subscribe']
+
+    user_id = subscribe_user(person_id, subscribe, SRC_API, auth)
+    user_json = user_view(user=person_id, variant=5, user_id=user_id)
+    return user_json
+
+
+def put_user_save_user_settings(auth, data):
+    user = authorise_api_user(auth, return_type='model')
+    show_nfsw = data['show_nsfw'] if 'show_nsfw' in data else None
+    show_read_posts = data['show_read_posts'] if 'show_read_posts' in data else None
+    about = data['bio'] if 'bio' in data else None
+
+    # english is fun, so lets do the reversing and update the user settings
+    if show_nfsw == True:
+        user.hide_nsfw = 0
+    elif show_nfsw == False:
+        user.hide_nsfw = 1
+
+    if show_read_posts == True:
+        user.hide_read_posts = False
+    elif show_read_posts == False:
+        user.hide_read_posts = True
+
+    if isinstance(about, str):
+        from app.utils import markdown_to_html
+        user.about = about
+        user.about_html = markdown_to_html(about)
+
+    # save the change to the db
+    db.session.commit()
+
+    user_json = {"my_user": user_view(user=user, variant=6)}
+    return user_json
 
