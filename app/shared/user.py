@@ -1,18 +1,14 @@
 from app import db, cache
 from app.constants import ROLE_STAFF, ROLE_ADMIN
-from app.models import UserBlock
-from app.utils import authorise_api_user, blocked_users
+from app.models import UserBlock, NotificationSubscription, User
+from app.constants import *
+from app.utils import authorise_api_user, blocked_users, render_template
 
 from flask import flash
 from flask_babel import _
 from flask_login import current_user
 
 from sqlalchemy import text
-
-# would be in app/constants.py
-SRC_WEB = 1
-SRC_PUB = 2
-SRC_API = 3
 
 # only called from API for now, but can be called from web using [un]block_another_user(user.id, SRC_WEB)
 
@@ -84,3 +80,56 @@ def unblock_another_user(person_id, src, auth=None):
         return user_id
     else:
         return              # let calling function handle confirmation flash message and redirect
+
+
+def subscribe_user(person_id: int, subscribe, src, auth=None):
+    user_id = authorise_api_user(auth) if src == SRC_API else current_user.id
+    person = User.query.filter_by(id=person_id, banned=False).one()
+
+    if src == SRC_WEB:
+        subscribe = False if person.notify_new_posts(user_id) else True
+
+    existing_notification = NotificationSubscription.query.filter_by(entity_id=person_id, user_id=user_id,
+                                                                     type=NOTIF_USER).first()
+    if subscribe == False:
+        if existing_notification:
+            db.session.delete(existing_notification)
+            db.session.commit()
+        else:
+            msg = 'A subscription for this user did not exist.'
+            if src == SRC_API:
+                raise Exception(msg)
+            else:
+                flash(_(msg))
+
+    else:
+        if existing_notification:
+            msg = 'A subscription for this user already existed.'
+            if src == SRC_API:
+                raise Exception(msg)
+            else:
+                flash(_(msg))
+        else:
+            if person.id == user_id:
+                msg = 'Target must be a another user.'
+                if src == SRC_API:
+                    raise Exception(msg)
+                else:
+                    flash(_(msg))
+            if person.has_blocked_user(user_id):
+                msg = 'This user has blocked you.'
+                if src == SRC_API:
+                    raise Exception(msg)
+                else:
+                    flash(_(msg))
+            new_notification = NotificationSubscription(name=person.display_name(), user_id=user_id,
+                                                        entity_id=person_id, type=NOTIF_USER)
+            db.session.add(new_notification)
+            db.session.commit()
+
+    if src == SRC_API:
+        return user_id
+    else:
+        return render_template('user/_notification_toggle.html', user=person)
+
+

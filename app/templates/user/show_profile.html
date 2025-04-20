@@ -10,7 +10,7 @@
 {% endif %}
 {% block app_content %}
 <div class="row">
-    <div class="col-12 col-md-8 position-relative main_pane">
+    <main class="col-12 col-md-8 position-relative main_pane">
         {% if user.cover_image() != '' %}
             <div class="community_header" style="height: 240px; background-image: url({{ user.cover_image() }});">
                 <nav aria-label="breadcrumb" id="breadcrumb_nav" title="Navigation">
@@ -73,7 +73,15 @@
         {% endif %}
         <div class="profile_action_buttons">
         {% if current_user.is_authenticated and current_user != user %}
-                <a class="btn btn-primary" href="{{ url_for('chat.new_message', to=user.id) }}" rel="nofollow" aria-label="{{ _('Send message') }}">{{ _('Send message') }}</a>
+                {% if user.accept_private_messages -%}
+                    {% if user.is_local() -%}
+                        <a class="btn btn-primary" href="{{ url_for('chat.new_message', to=user.id) }}" rel="nofollow" aria-label="{{ _('Send message') }}">{{ _('Send message') }}</a>
+                    {% else -%}
+                        {% if user.accept_private_messages >= 2 -%}
+                            <a class="btn btn-primary" href="{{ url_for('chat.new_message', to=user.id) }}" rel="nofollow" aria-label="{{ _('Send message') }}">{{ _('Send message') }}</a>
+                        {% endif -%}
+                    {% endif -%}
+                {% endif -%}
                 {% if user.matrix_user_id %}
                     <a class="btn btn-primary" href="https://matrix.to/#/{{ user.matrix_user_id }}" rel="nofollow" aria-label="{{ _('Send message with matrix chat') }}">{{ _('Send message using Matrix') }}</a>
                 {% endif %}
@@ -101,6 +109,7 @@
                         {% endif -%}
                     {% endif -%}
                     <li><a class="dropdown-item" href="{{ url_for('user.report_profile', actor=user.link()) }}" rel="nofollow">{{ _('Report') }}</a></li>
+                    <li><a class="dropdown-item" href="http://lemmyverse.link/u/{{ user.lemmy_link() }}" rel="nofollow">{{ _('Lemmyverse.link') }}</a></li>
                     <li><a class="dropdown-item" href="{{ url_for('user.edit_user_note', actor=user.link()) }}" rel="nofollow">{{ _('Edit note') }}</a></li>
                   </ul>
                 </div>
@@ -121,6 +130,7 @@
                 {% if user.referrer %}{{ _('Referer') }}: <span title="{{ _('Which website linked to PieFed when the user initially registered.') }}">{{ user.referrer }}</span><br />{% endif %}
                 {% if user.ip_address %}{{ _('IP and country code') }}: <span title="{{ _('IP address of last interaction.') }}">{{ user.ip_address }} ({{ user.ip_address_country if user.ip_address_country }})</span><br />{% endif %}
                 {% if user.last_seen %}{{ _('Active') }}: {{ arrow.get(user.last_seen).humanize(locale=locale) }}<br />{% endif %}
+                {% if user.stripe_subscription_id %}<strong>{{ _('Donor') }}</strong><br />{% endif %}
             {% endif -%}
         </p>
         <div class="profile_bio">
@@ -166,12 +176,11 @@
 
         {% if post_replies %}
             <h2 class="mt-4" id="comments">Comments</h2>
-            <div class="post_list">
+            <div class="post_list comments">
                 {% for post_reply in post_replies.items %}
                     {% with teaser=True %}
                         {% include 'post/_post_reply_teaser.html' %}
                     {% endwith %}
-                    <hr />
                 {% endfor %}
             </div>
             <nav aria-label="{{ _('Comment pagination') }}" class="mt-4" role="navigation">
@@ -189,7 +198,7 @@
         {% else %}
             <p>{{ _('No comments yet.') }}</p>
         {% endif %}
-    </div>
+    </main>
 
     <aside id="side_pane" class="col-12 col-md-4 side_pane" role="complementary">
         {% if current_user.is_authenticated and current_user.id == user.id %}
@@ -281,6 +290,20 @@
                             {% endfor %}
                         </ul>
 
+                </div>
+            </div>
+        {% endif %}
+        {% if user_has_public_feeds %}
+            <div class="card mb-3" id="public_feeds">
+                <div class="card-header">
+                     <h2>{{ _('Public Feeds') }}</h2>
+                </div>
+                <div class="card-body">
+                        <ul>
+                            {% for feed in user_public_feeds %}
+                                <li><a href="/f/{{ feed.link() }}">{{ feed.title }}</a></li>
+                            {% endfor %}
+                        </ul>
                 </div>
             </div>
         {% endif %}

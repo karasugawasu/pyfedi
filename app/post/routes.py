@@ -1,27 +1,29 @@
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from datetime import datetime, timedelta
 from random import randint
 
 from flask import redirect, url_for, flash, current_app, abort, request, g, make_response
 from flask_login import logout_user, current_user, login_required
 from flask_babel import _
-from sqlalchemy import or_, desc
+from sqlalchemy import or_, desc, text
+from sqlalchemy.orm.exc import NoResultFound
 from wtforms import SelectField, RadioField
 
-from app import db, constants, cache, celery
-from app.activitypub.signature import HttpSignature, post_request, default_context, post_request_in_background
+from app import db, constants, cache, limiter
+from app.activitypub.signature import HttpSignature, post_request, default_context, send_post_request
 from app.activitypub.util import notify_about_post_reply, update_post_from_activity
 from app.community.util import send_to_remote_instance
 from app.inoculation import inoculation
 from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm
 from app.community.forms import CreateLinkForm, CreateImageForm, CreateDiscussionForm, CreateVideoForm, CreatePollForm, EditImageForm
+from app.constants import NOTIF_REPORT
 from app.post.util import post_replies, get_comment_branch, tags_to_string, url_needs_archive, \
     generate_archive_link, body_has_no_archive_link
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, POST_TYPE_LINK, \
     POST_TYPE_IMAGE, \
-    POST_TYPE_ARTICLE, POST_TYPE_VIDEO, NOTIF_REPLY, NOTIF_POST, POST_TYPE_POLL
+    POST_TYPE_ARTICLE, POST_TYPE_VIDEO, NOTIF_REPLY, NOTIF_POST, POST_TYPE_POLL, SRC_WEB
 from app.models import Post, PostReply, \
-    PostReplyVote, PostVote, Notification, utcnow, UserBlock, DomainBlock, InstanceBlock, Report, Site, Community, \
+    PostReplyVote, PostVote, Notification, utcnow, UserBlock, DomainBlock, Report, Site, Community, \
     Topic, User, Instance, NotificationSubscription, UserFollower, Poll, PollChoice, PollChoiceVote, PostBookmark, \
     PostReplyBookmark, CommunityBlock, File
 from app.post import bp
@@ -33,170 +35,190 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     blocked_instances, blocked_domains, community_moderators, blocked_phrases, show_ban_message, recently_upvoted_posts, \
     recently_downvoted_posts, recently_upvoted_post_replies, recently_downvoted_post_replies, reply_is_stupid, \
     languages_for_form, menu_topics, add_to_modlog, blocked_communities, piefed_markdown_to_lemmy_markdown, \
-    permission_required, blocked_users, get_request, is_local_image_url, is_video_url, can_upvote, can_downvote
-from app.shared.reply import make_reply, edit_reply
-from app.shared.post import edit_post
+    permission_required, blocked_users, get_request, is_local_image_url, is_video_url, can_upvote, can_downvote, \
+    menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, referrer, can_create_post_reply, communities_banned_from
+from app.post.util import post_type_to_form_url_type
+from app.shared.reply import make_reply, edit_reply, bookmark_reply, remove_bookmark_reply, subscribe_reply
+from app.shared.post import edit_post, sticky_post, lock_post, bookmark_post, remove_bookmark_post, subscribe_post
+from app.shared.site import block_remote_instance
 
 
 def show_post(post_id: int):
-    post = Post.query.get_or_404(post_id)
-    community: Community = post.community
+    with limiter.limit('30/minute'):
+        post = Post.query.get_or_404(post_id)
+        community: Community = post.community
 
-    if community.banned or post.deleted:
-        if current_user.is_anonymous or not (current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff())):
-            abort(404)
+        if community.banned or post.deleted:
+            if current_user.is_anonymous or not (current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff())):
+                abort(404)
+            else:
+                if post.deleted_by == post.user_id:
+                    flash(_('This post has been deleted by the author and is only visible to staff and admins.'), 'warning')
+                else:
+                    flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
+
+        sort = request.args.get('sort', 'hot')
+
+        # If nothing has changed since their last visit, return HTTP 304
+        current_etag = f"{post.id}{sort}_{hash(post.last_active)}"
+        if current_user.is_anonymous and request_etag_matches(current_etag):
+            return return_304(current_etag)
+
+        if post.mea_culpa:
+            flash(_('%(name)s has indicated they made a mistake in this post.', name=post.author.user_name), 'warning')
+
+        mods = community_moderators(community.id)
+        is_moderator = community.is_moderator()
+
+        if community.private_mods:
+            mod_list = []
         else:
-            if post.deleted_by == post.user_id:
-                flash(_('This post has been deleted by the author and is only visible to staff and admins.'), 'warning')
-            else:
-                flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
+            mod_user_ids = [mod.user_id for mod in mods]
+            mod_list = User.query.filter(User.id.in_(mod_user_ids)).all()
 
-    sort = request.args.get('sort', 'hot')
+        # handle top-level comments/replies
+        form = NewReplyForm()
+        form.language_id.choices = languages_for_form() if current_user.is_authenticated else []
+        if current_user.is_authenticated and current_user.verified and form.validate_on_submit():
 
-    # If nothing has changed since their last visit, return HTTP 304
-    current_etag = f"{post.id}{sort}_{hash(post.last_active)}"
-    if current_user.is_anonymous and request_etag_matches(current_etag):
-        return return_304(current_etag)
+            try:
+                reply = make_reply(form, post, None, SRC_WEB)
+            except Exception as ex:
+                flash(_('Your reply was not accepted because %(reason)s', reason=str(ex)), 'error')
+                return redirect(url_for('activitypub.post_ap', post_id=post_id))
 
-    if post.mea_culpa:
-        flash(_('%(name)s has indicated they made a mistake in this post.', name=post.author.user_name), 'warning')
+            return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{reply.id}'))
+        else:
+            replies = post_replies(community, post.id, sort)
+            more_replies = defaultdict(list)
+            if post.cross_posts:
+                cbf = communities_banned_from(current_user.get_id())
+                bc = blocked_communities(current_user.get_id())
+                bi = blocked_instances(current_user.get_id())
+                for cross_posted_post in Post.query.filter(Post.id.in_(post.cross_posts)):
+                    if cross_posted_post.community_id not in cbf \
+                            and cross_posted_post.community_id not in bc \
+                            and cross_posted_post.community.instance_id not in bi:
+                        cross_posted_replies = post_replies(cross_posted_post.community, cross_posted_post.id, sort)
+                        if len(cross_posted_replies):
+                            more_replies[cross_posted_post.community].extend(cross_posted_replies)
+            form.notify_author.data = True
 
-    mods = community_moderators(community.id)
-    is_moderator = community.is_moderator()
+        og_image = post.image.source_url if post.image_id else None
+        description = shorten_string(markdown_to_text(post.body), 150) if post.body else None
 
-    if community.private_mods:
-        mod_list = []
-    else:
-        mod_user_ids = [mod.user_id for mod in mods]
-        mod_list = User.query.filter(User.id.in_(mod_user_ids)).all()
-
-    # handle top-level comments/replies
-    form = NewReplyForm()
-    form.language_id.choices = languages_for_form()
-    if current_user.is_authenticated and current_user.verified and form.validate_on_submit():
-
-        try:
-            reply = make_reply(form, post, None, 1)
-        except Exception as ex:
-            flash(_('Your reply was not accepted because %(reason)s', reason=str(ex)), 'error')
-            return redirect(url_for('activitypub.post_ap', post_id=post_id))
-
-        return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{reply.id}'))
-    else:
-        replies = post_replies(post.id, sort)
-        form.notify_author.data = True
-
-    og_image = post.image.source_url if post.image_id else None
-    description = shorten_string(markdown_to_text(post.body), 150) if post.body else None
-
-    # Breadcrumbs
-    breadcrumbs = []
-    breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
-    breadcrumb.text = _('Home')
-    breadcrumb.url = '/'
-    breadcrumbs.append(breadcrumb)
-
-    if community.topic_id:
-        related_communities = Community.query.filter_by(topic_id=community.topic_id).\
-            filter(Community.id != community.id, Community.banned == False).order_by(Community.name)
-        topics = []
-        previous_topic = Topic.query.get(community.topic_id)
-        topics.append(previous_topic)
-        while previous_topic.parent_id:
-            topic = Topic.query.get(previous_topic.parent_id)
-            topics.append(topic)
-            previous_topic = topic
-        topics = list(reversed(topics))
-
+        # Breadcrumbs
+        breadcrumbs = []
         breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
-        breadcrumb.text = _('Topics')
-        breadcrumb.url = '/topics'
+        breadcrumb.text = _('Home')
+        breadcrumb.url = '/'
         breadcrumbs.append(breadcrumb)
 
-        existing_url = '/topic'
-        for topic in topics:
+        if community.topic_id:
+            related_communities = Community.query.filter_by(topic_id=community.topic_id).\
+                filter(Community.id != community.id, Community.banned == False).order_by(Community.name)
+            topics = []
+            previous_topic = Topic.query.get(community.topic_id)
+            topics.append(previous_topic)
+            while previous_topic.parent_id:
+                topic = Topic.query.get(previous_topic.parent_id)
+                topics.append(topic)
+                previous_topic = topic
+            topics = list(reversed(topics))
+
             breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
-            breadcrumb.text = topic.name
-            breadcrumb.url = f"{existing_url}/{topic.machine_name}"
+            breadcrumb.text = _('Topics')
+            breadcrumb.url = '/topics'
             breadcrumbs.append(breadcrumb)
-            existing_url = breadcrumb.url
-    else:
-        related_communities = []
-        breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
-        breadcrumb.text = _('Communities')
-        breadcrumb.url = '/communities'
-        breadcrumbs.append(breadcrumb)
 
-    # Voting history
-    if current_user.is_authenticated:
-        recently_upvoted = recently_upvoted_posts(current_user.id)
-        recently_downvoted = recently_downvoted_posts(current_user.id)
-        recently_upvoted_replies = recently_upvoted_post_replies(current_user.id)
-        recently_downvoted_replies = recently_downvoted_post_replies(current_user.id)
-        reply_collapse_threshold = current_user.reply_collapse_threshold if current_user.reply_collapse_threshold else -1000
-    else:
-        recently_upvoted = []
-        recently_downvoted = []
-        recently_upvoted_replies = []
-        recently_downvoted_replies = []
-        reply_collapse_threshold = -10
+            existing_url = '/topic'
+            for topic in topics:
+                breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
+                breadcrumb.text = topic.name
+                breadcrumb.url = f"{existing_url}/{topic.machine_name}"
+                breadcrumbs.append(breadcrumb)
+                existing_url = breadcrumb.url
+        else:
+            related_communities = []
+            breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
+            breadcrumb.text = _('Communities')
+            breadcrumb.url = '/communities'
+            breadcrumbs.append(breadcrumb)
 
-    # Polls
-    poll_form = False
-    poll_results = False
-    poll_choices = []
-    poll_data = None
-    poll_total_votes = 0
-    if post.type == POST_TYPE_POLL:
-        poll_data = Poll.query.get(post.id)
-        if poll_data:
-            poll_choices = PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all()
-            poll_total_votes = poll_data.total_votes()
-            # Show poll results to everyone after the poll finishes, to the poll creator and to those who have voted
-            if (current_user.is_authenticated and (poll_data.has_voted(current_user.id))) \
-                    or poll_data.end_poll < datetime.utcnow():
-                poll_results = True
-            else:
-                poll_form = True
+        # Voting history
+        if current_user.is_authenticated:
+            recently_upvoted = recently_upvoted_posts(current_user.id)
+            recently_downvoted = recently_downvoted_posts(current_user.id)
+            recently_upvoted_replies = recently_upvoted_post_replies(current_user.id)
+            recently_downvoted_replies = recently_downvoted_post_replies(current_user.id)
+            reply_collapse_threshold = current_user.reply_collapse_threshold if current_user.reply_collapse_threshold else -1000
+        else:
+            recently_upvoted = []
+            recently_downvoted = []
+            recently_upvoted_replies = []
+            recently_downvoted_replies = []
+            reply_collapse_threshold = -10
 
-    # Archive.ph link
-    archive_link = None
-    if post.type == POST_TYPE_LINK and body_has_no_archive_link(post.body_html) and url_needs_archive(post.url):
-        archive_link = generate_archive_link(post.url)
+        # Polls
+        poll_form = False
+        poll_results = False
+        poll_choices = []
+        poll_data = None
+        poll_total_votes = 0
+        if post.type == POST_TYPE_POLL:
+            poll_data = Poll.query.get(post.id)
+            if poll_data:
+                poll_choices = PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all()
+                poll_total_votes = poll_data.total_votes()
+                # Show poll results to everyone after the poll finishes, to the poll creator and to those who have voted
+                if (current_user.is_authenticated and (poll_data.has_voted(current_user.id))) \
+                        or poll_data.end_poll < datetime.utcnow():
+                    poll_results = True
+                else:
+                    poll_form = True
 
-    # for logged in users who have the 'hide read posts' function enabled
-    # mark this post as read
-    if current_user.is_authenticated:
-        user = current_user
-        if current_user.hide_read_posts:
-            current_user.mark_post_as_read(post)
-            db.session.commit()
-    else:
-        user = None
+        # Archive.ph link
+        archive_link = None
+        if post.type == POST_TYPE_LINK and body_has_no_archive_link(post.body_html) and url_needs_archive(post.url):
+            archive_link = generate_archive_link(post.url)
 
-    response = render_template('post/post.html', title=post.title, post=post, is_moderator=is_moderator, is_owner=community.is_owner(),
-                           community=post.community,
-                           breadcrumbs=breadcrumbs, related_communities=related_communities, mods=mod_list,
-                           poll_form=poll_form, poll_results=poll_results, poll_data=poll_data, poll_choices=poll_choices, poll_total_votes=poll_total_votes,
-                           canonical=post.ap_id, form=form, replies=replies, THREAD_CUTOFF_DEPTH=constants.THREAD_CUTOFF_DEPTH,
-                           description=description, og_image=og_image,
-                           autoplay=request.args.get('autoplay', False), archive_link=archive_link,
-                           noindex=not post.author.indexable, preconnect=post.url if post.url else None,
-                           recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
-                           recently_upvoted_replies=recently_upvoted_replies, recently_downvoted_replies=recently_downvoted_replies,
-                           reply_collapse_threshold=reply_collapse_threshold,
-                           etag=f"{post.id}{sort}_{hash(post.last_active)}", markdown_editor=current_user.is_authenticated and current_user.markdown_editor,
-                           can_upvote_here=can_upvote(user, community),
-                           can_downvote_here=can_downvote(user, community, g.site),
-                           low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
-                           moderating_communities=moderating_communities(current_user.get_id()),
-                           joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site,
-                           inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None
-                           )
-    response.headers.set('Vary', 'Accept, Cookie, Accept-Language')
-    response.headers.set('Link', f'<https://{current_app.config["SERVER_NAME"]}/post/{post.id}>; rel="alternate"; type="application/activity+json"')
-    return response
+        # for logged in users who have the 'hide read posts' function enabled
+        # mark this post as read
+        if current_user.is_authenticated:
+            user = current_user
+            if current_user.hide_read_posts:
+                current_user.mark_post_as_read(post)
+                db.session.commit()
+        else:
+            user = None
+
+        response = render_template('post/post.html', title=post.title, post=post, is_moderator=is_moderator, is_owner=community.is_owner(),
+                               community=post.community,
+                               breadcrumbs=breadcrumbs, related_communities=related_communities, mods=mod_list,
+                               poll_form=poll_form, poll_results=poll_results, poll_data=poll_data, poll_choices=poll_choices, poll_total_votes=poll_total_votes,
+                               canonical=post.ap_id, form=form, replies=replies, more_replies=more_replies,
+                               THREAD_CUTOFF_DEPTH=constants.THREAD_CUTOFF_DEPTH,
+                               description=description, og_image=og_image,
+                               autoplay=request.args.get('autoplay', False), archive_link=archive_link,
+                               noindex=not post.author.indexable, preconnect=post.url if post.url else None,
+                               recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
+                               recently_upvoted_replies=recently_upvoted_replies, recently_downvoted_replies=recently_downvoted_replies,
+                               reply_collapse_threshold=reply_collapse_threshold,
+                               etag=f"{post.id}{sort}_{hash(post.last_active)}", markdown_editor=current_user.is_authenticated and current_user.markdown_editor,
+                               can_upvote_here=can_upvote(user, community),
+                               can_downvote_here=can_downvote(user, community, g.site),
+                               low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
+                               moderating_communities=moderating_communities(current_user.get_id()),
+                               joined_communities=joined_communities(current_user.get_id()),
+                               menu_topics=menu_topics(), site=g.site,
+                               inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
+                               menu_instance_feeds=menu_instance_feeds(),
+                               menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                               menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                               )
+        response.headers.set('Vary', 'Accept, Cookie, Accept-Language')
+        response.headers.set('Link', f'<https://{current_app.config["SERVER_NAME"]}/post/{post.id}>; rel="alternate"; type="application/activity+json"')
+        return response
 
 
 @bp.route('/post/<int:post_id>/<vote_direction>', methods=['GET', 'POST'])
@@ -207,14 +229,28 @@ def post_vote(post_id: int, vote_direction):
     undo = post.vote(current_user, vote_direction)
 
     if not post.community.local_only:
+        # Create two versions of action_json - one for public votes and one for private votes
         if undo:
-            action_json = {
-                'actor': current_user.public_url(not(post.community.instance.votes_are_public() and current_user.vote_privately())),
+            action_json_public = {
+                'actor': current_user.public_url(True),  # Public URL
                 'type': 'Undo',
                 'id': f"https://{current_app.config['SERVER_NAME']}/activities/undo/{gibberish(15)}",
                 'audience': post.community.public_url(),
                 'object': {
-                    'actor': current_user.public_url(not(post.community.instance.votes_are_public() and current_user.vote_privately())),
+                    'actor': current_user.public_url(True),  # Public URL
+                    'object': post.public_url(),
+                    'type': undo,
+                    'id': f"https://{current_app.config['SERVER_NAME']}/activities/{undo.lower()}/{gibberish(15)}",
+                    'audience': post.community.public_url()
+                }
+            }
+            action_json_private = {
+                'actor': current_user.public_url(False),  # Private URL
+                'type': 'Undo',
+                'id': f"https://{current_app.config['SERVER_NAME']}/activities/undo/{gibberish(15)}",
+                'audience': post.community.public_url(),
+                'object': {
+                    'actor': current_user.public_url(False),  # Private URL
                     'object': post.public_url(),
                     'type': undo,
                     'id': f"https://{current_app.config['SERVER_NAME']}/activities/{undo.lower()}/{gibberish(15)}",
@@ -223,15 +259,24 @@ def post_vote(post_id: int, vote_direction):
             }
         else:
             action_type = 'Like' if vote_direction == 'upvote' else 'Dislike'
-            action_json = {
-                'actor': current_user.public_url(not(post.community.instance.votes_are_public() and current_user.vote_privately())),
+            action_json_public = {
+                'actor': current_user.public_url(True),  # Public URL
                 'object': post.profile_id(),
                 'type': action_type,
                 'id': f"https://{current_app.config['SERVER_NAME']}/activities/{action_type.lower()}/{gibberish(15)}",
                 'audience': post.community.public_url()
             }
+            action_json_private = {
+                'actor': current_user.public_url(False),  # Private URL
+                'object': post.profile_id(),
+                'type': action_type,
+                'id': f"https://{current_app.config['SERVER_NAME']}/activities/{action_type.lower()}/{gibberish(15)}",
+                'audience': post.community.public_url()
+            }
+        
         if post.community.is_local():
-            announce = {
+            # Create two versions of the announce - one for public votes and one for private votes
+            announce_public = {
                     "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
                     "type": 'Announce',
                     "to": [
@@ -242,18 +287,46 @@ def post_vote(post_id: int, vote_direction):
                         post.community.ap_followers_url
                     ],
                     '@context': default_context(),
-                    'object': action_json
+                    'object': action_json_public
             }
+            announce_private = {
+                    "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
+                    "type": 'Announce',
+                    "to": [
+                        "https://www.w3.org/ns/activitystreams#Public"
+                    ],
+                    "actor": post.community.public_url(),
+                    "cc": [
+                        post.community.ap_followers_url
+                    ],
+                    '@context': default_context(),
+                    'object': action_json_private
+            }
+            
             for instance in post.community.following_instances():
                 if instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                    send_to_remote_instance(instance.id, post.community.id, announce)
-        else:
+                    # Send the appropriate announce based on whether votes should be private for this instance
+                    if instance.votes_are_public() and current_user.vote_privately():
+                        send_to_remote_instance(instance.id, post.community.id, announce_private)
+                    else:
+                        send_to_remote_instance(instance.id, post.community.id, announce_public)
+        else:   # Send to remote community
             inbox = post.community.ap_inbox_url
             if (post.community.ap_domain and post.author.ap_inbox_url and                    # sanity check these fields aren't null
                 post.community.ap_domain == 'a.gup.pe' and vote_direction == 'upvote'):      # send upvotes to post author's instance instead of a.gup.pe (who reject them)
                 inbox = post.author.ap_inbox_url
-            post_request_in_background(inbox, action_json, current_user.private_key,
-                                       current_user.public_url(not(post.community.instance.votes_are_public() and current_user.vote_privately())) + '#main-key')
+                
+            # Use the correct action_json and public_url based on whether votes should be private
+            if post.community.instance.votes_are_public() and current_user.vote_privately():
+                # Private voting
+                action_json = action_json_private
+                user_url = current_user.public_url(False) + '#main-key'
+            else:
+                # Public voting
+                action_json = action_json_public
+                user_url = current_user.public_url(True) + '#main-key'
+                
+            send_post_request(inbox, action_json, current_user.private_key, user_url)
 
     recently_upvoted = []
     recently_downvoted = []
@@ -283,49 +356,102 @@ def comment_vote(comment_id, vote_direction):
     undo = comment.vote(current_user, vote_direction)
 
     if not comment.community.local_only:
+        # Create both public and private actor URLs
+        public_actor = current_user.public_url(True)  # Public vote
+        private_actor = current_user.public_url(False)  # Private vote
+        vote_id_suffix = gibberish(15)
+        undo_id_suffix = gibberish(15)
+        announce_id_suffix = gibberish(15)
+
         if undo:
-            action_json = {
-                'actor': current_user.public_url(not(comment.community.instance.votes_are_public() and current_user.vote_privately())),
+            # Vote objects for Like/Dislike being undone (inner object in Undo)
+            vote_id = f"https://{current_app.config['SERVER_NAME']}/activities/{undo.lower()}/{vote_id_suffix}"
+            
+            # Public version (for non-private votes)
+            action_json_public = {
+                'actor': public_actor,
                 'type': 'Undo',
-                'id': f"https://{current_app.config['SERVER_NAME']}/activities/undo/{gibberish(15)}",
+                'id': f"https://{current_app.config['SERVER_NAME']}/activities/undo/{undo_id_suffix}",
                 'audience': comment.community.public_url(),
                 'object': {
-                    'actor': current_user.public_url(not(comment.community.instance.votes_are_public() and current_user.vote_privately())),
+                    'actor': public_actor,
                     'object': comment.public_url(),
                     'type': undo,
-                    'id': f"https://{current_app.config['SERVER_NAME']}/activities/{undo.lower()}/{gibberish(15)}",
+                    'id': vote_id,
+                    'audience': comment.community.public_url()
+                }
+            }
+            
+            # Private version (for private votes)
+            action_json_private = {
+                'actor': private_actor,
+                'type': 'Undo',
+                'id': f"https://{current_app.config['SERVER_NAME']}/activities/undo/{undo_id_suffix}",
+                'audience': comment.community.public_url(),
+                'object': {
+                    'actor': private_actor,
+                    'object': comment.public_url(),
+                    'type': undo,
+                    'id': vote_id,
                     'audience': comment.community.public_url()
                 }
             }
         else:
             action_type = 'Like' if vote_direction == 'upvote' else 'Dislike'
-            action_json = {
-                'actor': current_user.public_url(not(comment.community.instance.votes_are_public() and current_user.vote_privately())),
+            
+            # Public version
+            action_json_public = {
+                'actor': public_actor,
                 'object': comment.public_url(),
                 'type': action_type,
-                'id': f"https://{current_app.config['SERVER_NAME']}/activities/{action_type.lower()}/{gibberish(15)}",
+                'id': f"https://{current_app.config['SERVER_NAME']}/activities/{action_type.lower()}/{vote_id_suffix}",
                 'audience': comment.community.public_url()
             }
+            
+            # Private version
+            action_json_private = {
+                'actor': private_actor,
+                'object': comment.public_url(),
+                'type': action_type,
+                'id': f"https://{current_app.config['SERVER_NAME']}/activities/{action_type.lower()}/{vote_id_suffix}",
+                'audience': comment.community.public_url()
+            }
+            
         if comment.community.is_local():
-            announce = {
-                    "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
+            # For local communities, we need to handle each instance with its own privacy settings
+            for instance in comment.community.following_instances():
+                if not (instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain)):
+                    continue
+                
+                # Determine privacy level for this instance
+                use_private = instance.votes_are_public() and current_user.vote_privately()
+                
+                # Use the appropriate action JSON based on privacy
+                action = action_json_private if use_private else action_json_public
+                
+                # Create a unique announcement for this instance
+                announce = {
+                    "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{announce_id_suffix}_{instance.id}",
                     "type": 'Announce',
-                    "to": [
-                        "https://www.w3.org/ns/activitystreams#Public"
-                    ],
+                    "to": ["https://www.w3.org/ns/activitystreams#Public"],
                     "actor": comment.community.ap_profile_id,
                     "cc": [
                         comment.community.ap_followers_url
                     ],
                     '@context': default_context(),
-                    'object': action_json
-            }
-            for instance in comment.community.following_instances():
-                if instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                    send_to_remote_instance(instance.id, comment.community.id, announce)
+                    'object': action
+                }
+                
+                # Send to this instance
+                send_to_remote_instance(instance.id, comment.community.id, announce)
         else:
-            post_request_in_background(comment.community.ap_inbox_url, action_json, current_user.private_key,
-                                       current_user.public_url(not(comment.community.instance.votes_are_public() and current_user.vote_privately())) + '#main-key')
+            # For remote communities, select the appropriate action JSON based on that community's instance
+            use_private = comment.community.instance.votes_are_public() and current_user.vote_privately()
+            action_json = action_json_private if use_private else action_json_public
+            key_id = (private_actor if use_private else public_actor) + '#main-key'
+            
+            # Send to the remote community
+            send_post_request(comment.community.ap_inbox_url, action_json, current_user.private_key, key_id)
 
     recently_upvoted = []
     recently_downvoted = []
@@ -360,8 +486,7 @@ def poll_vote(post_id):
         poll_votes = PollChoice.query.join(PollChoiceVote, PollChoiceVote.choice_id == PollChoice.id).filter(PollChoiceVote.post_id == post.id, PollChoiceVote.user_id == current_user.id).all()
         for pv in poll_votes:
             if post.author.is_local():
-                from app.shared.tasks import task_selector
-                task_selector('edit_post', user_id=current_user.id, post_id=post.id)
+                task_selector('edit_post', post_id=post.id)
             else:
                 pollvote_json = {
                   '@context': default_context(),
@@ -378,11 +503,7 @@ def poll_vote(post_id):
                   'to': post.author.public_url(),
                   'type': 'Create'
                 }
-                try:
-                    post_request(post.author.ap_inbox_url, pollvote_json, current_user.private_key,
-                                                          current_user.public_url() + '#main-key')
-                except Exception:
-                    pass
+                send_post_request(post.author.ap_inbox_url, pollvote_json, current_user.private_key, current_user.public_url() + '#main-key')
 
     return redirect(url_for('activitypub.post_ap', post_id=post_id))
 
@@ -410,11 +531,23 @@ def continue_discussion(post_id, comment_id):
         mod_list = User.query.filter(User.id.in_(mod_user_ids)).all()
     replies = get_comment_branch(post.id, comment.id, 'top')
 
+    # Voting history
+    if current_user.is_authenticated:
+        recently_upvoted_replies = recently_upvoted_post_replies(current_user.id)
+        recently_downvoted_replies = recently_downvoted_post_replies(current_user.id)
+    else:
+        recently_upvoted_replies = []
+        recently_downvoted_replies = []
+
     response = render_template('post/continue_discussion.html', title=_('Discussing %(title)s', title=post.title), post=post, mods=mod_list,
                            is_moderator=is_moderator, comment=comment, replies=replies, markdown_editor=current_user.is_authenticated and current_user.markdown_editor,
+                           recently_upvoted_replies=recently_upvoted_replies, recently_downvoted_replies=recently_downvoted_replies,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
                            menu_topics=menu_topics(), site=g.site,
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            community=post.community,
                            SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
@@ -431,7 +564,7 @@ def add_reply(post_id: int, comment_id: int):
     post = Post.query.get_or_404(post_id)
 
     if not post.comments_enabled:
-        flash('Comments have been disabled.', 'warning')
+        flash(_('Comments have been disabled.'), 'warning')
         return redirect(url_for('activitypub.post_ap', post_id=post_id))
 
     in_reply_to = PostReply.query.get_or_404(comment_id)
@@ -454,7 +587,7 @@ def add_reply(post_id: int, comment_id: int):
         current_user.ip_address = ip_address()
 
         try:
-            reply = make_reply(form, post, in_reply_to.id, 1)
+            reply = make_reply(form, post, in_reply_to.id, SRC_WEB)
         except Exception as ex:
             flash(_('Your reply was not accepted because %(reason)s', reason=str(ex)), 'error')
             if in_reply_to.depth <= constants.THREAD_CUTOFF_DEPTH:
@@ -474,7 +607,11 @@ def add_reply(post_id: int, comment_id: int):
                                moderating_communities=moderating_communities(current_user.get_id()), mods=mod_list,
                                joined_communities = joined_communities(current_user.id), community=post.community,
                                SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
-                               inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
+                               inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
+                               menu_topics=menu_topics(), menu_instance_feeds=menu_instance_feeds(), 
+                               menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                               menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                               )
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/reply_inline', methods=['GET', 'POST'])
@@ -485,6 +622,8 @@ def add_reply_inline(post_id: int, comment_id: int):
     if current_user.banned or current_user.ban_comments:
         return _('You have been banned.')
     post = Post.query.get_or_404(post_id)
+    if not can_create_post_reply(current_user, post.community):
+        return _('You are not permitted to comment in this community')
 
     if not post.comments_enabled:
         return _('Comments have been disabled.')
@@ -511,7 +650,7 @@ def add_reply_inline(post_id: int, comment_id: int):
         db.session.commit()
 
         # Federate the reply
-        task_selector('make_reply', user_id=current_user.id, reply_id=reply.id, parent_id=in_reply_to.id)
+        task_selector('make_reply', reply_id=reply.id, parent_id=in_reply_to.id)
 
         return render_template('post/add_reply_inline_result.html', post_reply=reply)
 
@@ -534,7 +673,10 @@ def post_options(post_id: int):
     return render_template('post/post_options.html', post=post, existing_bookmark=existing_bookmark,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site)
+                           menu_topics=menu_topics(), site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           )
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/options_menu', methods=['GET'])
@@ -558,7 +700,10 @@ def post_reply_options(post_id: int, comment_id: int):
                            existing_bookmark=existing_bookmark,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site
+                           menu_topics=menu_topics(), site=g.site,
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
@@ -614,7 +759,7 @@ def post_edit(post_id: int):
         if form.validate_on_submit():
             try:
                 uploaded_file = request.files['image_file'] if post_type == POST_TYPE_IMAGE else None
-                edit_post(form, post, post_type, 1, uploaded_file=uploaded_file)
+                edit_post(form, post, post_type, SRC_WEB, uploaded_file=uploaded_file)
                 flash(_('Your changes have been saved.'), 'success')
             except Exception as ex:
                 flash(_('Your edit was not accepted because %(reason)s', reason=str(ex)), 'error')
@@ -641,8 +786,9 @@ def post_edit(post_id: int):
                     path = "app/" + post.image.source_url.replace(
                         f"https://{current_app.config['SERVER_NAME']}/", ""
                     )
-                with open(path, "rb")as file:
-                    form.image_file.data = file.read()
+                if not path.startswith('http'):
+                    with open(path, "rb")as file:
+                        form.image_file.data = file.read()
 
             elif post_type == POST_TYPE_VIDEO:
                 form.video_url.data = post.url
@@ -664,7 +810,10 @@ def post_edit(post_id: int):
                                    moderating_communities=moderating_communities(current_user.get_id()),
                                    joined_communities=joined_communities(current_user.get_id()),
                                    menu_topics=menu_topics(), site=g.site,
-                                   inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None
+                                   inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
+                                   menu_instance_feeds=menu_instance_feeds(), 
+                                   menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                                   menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                                    )
     else:
         abort(401)
@@ -689,7 +838,6 @@ def post_delete_post(community: Community, post: Post, user_id: int, federate_al
     post.author.post_count -= 1
     community.post_count -= 1
     if hasattr(g, 'site'):  # g.site is invalid when running from cli
-        g.site.last_active = community.last_active = utcnow()
         flash(_('Post deleted.'))
     db.session.commit()
 
@@ -713,7 +861,7 @@ def post_delete_post(community: Community, post: Post, user_id: int, federate_al
     if not community.local_only:    # local_only communities do not federate
         # if this is a remote community and we are a mod of that community
         if not post.community.is_local() and user.is_local() and (post.user_id == user.id or community.is_moderator(user) or community.is_owner(user)):
-            post_request(post.community.ap_inbox_url, delete_json, user.private_key, user.public_url() + '#main-key')
+            send_post_request(post.community.ap_inbox_url, delete_json, user.private_key, user.public_url() + '#main-key')
         elif post.community.is_local():  # if this is a local community - Announce it to followers on remote instances
             announce = {
                 "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
@@ -740,7 +888,7 @@ def post_delete_post(community: Community, post: Post, user_id: int, federate_al
         instances = instances.filter(UserFollower.local_user_id == post.user_id)
         for instance in instances:
             if instance.inbox and not user.has_blocked_instance(instance.id) and not instance_banned(instance.domain) and instance.online():
-                post_request_in_background(instance.inbox, delete_json, user.private_key, user.public_url() + '#main-key')
+                send_post_request(instance.inbox, delete_json, user.private_key, user.public_url() + '#main-key')
 
     if post.user_id != user.id:
         add_to_modlog('delete_post', community_id=community.id, link_text=shorten_string(post.title),
@@ -790,10 +938,8 @@ def post_restore(post_id: int):
 
             if not post.community.is_local():  # this is a remote community, send it to the instance that hosts it
                 if not was_mod_deletion or (was_mod_deletion and post.community.is_moderator(current_user)):
-                    success = post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
-                                           current_user.public_url() + '#main-key')
-                    if success is False or isinstance(success, str):
-                        flash('Failed to send delete to remote server', 'error')
+                    send_post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
+                                      current_user.public_url() + '#main-key')
 
             else:  # local community - send it to followers on remote instances
                 announce = {
@@ -842,47 +988,34 @@ def post_purge(post_id: int):
 @bp.route('/post/<int:post_id>/bookmark', methods=['GET', 'POST'])
 @login_required
 def post_bookmark(post_id: int):
-    post = Post.query.get_or_404(post_id)
-    if post.deleted:
+    try:
+        bookmark_post(post_id, SRC_WEB)
+    except NoResultFound:
         abort(404)
-    existing_bookmark = PostBookmark.query.filter(PostBookmark.post_id == post_id, PostBookmark.user_id == current_user.id).first()
-    if not existing_bookmark:
-        db.session.add(PostBookmark(post_id=post_id, user_id=current_user.id))
-        db.session.commit()
-        flash(_('Bookmark added.'))
-    else:
-        flash(_('This post has already been bookmarked.'))
-    return redirect(url_for('activitypub.post_ap', post_id=post.id))
+
+    return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id)))
 
 
 @bp.route('/post/<int:post_id>/remove_bookmark', methods=['GET', 'POST'])
 @login_required
 def post_remove_bookmark(post_id: int):
-    post = Post.query.get_or_404(post_id)
-    if post.deleted:
+    try:
+        remove_bookmark_post(post_id, SRC_WEB)
+    except NoResultFound:
         abort(404)
-    existing_bookmark = PostBookmark.query.filter(PostBookmark.post_id == post_id, PostBookmark.user_id == current_user.id).first()
-    if existing_bookmark:
-        db.session.delete(existing_bookmark)
-        db.session.commit()
-        flash(_('Bookmark has been removed.'))
-    return redirect(url_for('activitypub.post_ap', post_id=post.id))
+
+    return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id)))
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/remove_bookmark', methods=['GET', 'POST'])
 @login_required
 def post_reply_remove_bookmark(post_id: int, comment_id: int):
-    post = Post.query.get_or_404(post_id)
-    post_reply = PostReply.query.get_or_404(comment_id)
-
-    if post.deleted or post_reply.deleted:
+    try:
+        remove_bookmark_reply(comment_id, SRC_WEB)
+    except NoResultFound:
         abort(404)
-    existing_bookmark = PostReplyBookmark.query.filter(PostReplyBookmark.post_reply_id == comment_id, PostReplyBookmark.user_id == current_user.id).first()
-    if existing_bookmark:
-        db.session.delete(existing_bookmark)
-        db.session.commit()
-        flash(_('Bookmark has been removed.'))
-    return redirect(url_for('activitypub.post_ap', post_id=post.id))
+
+    return redirect(url_for('activitypub.post_ap', post_id=post_id))
 
 
 @bp.route('/post/<int:post_id>/report', methods=['GET', 'POST'])
@@ -906,14 +1039,15 @@ def post_report(post_id: int):
         for mod in post.community.moderators():
             notification = Notification(user_id=mod.user_id, title=_('A post has been reported'),
                                         url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
-                                        author_id=current_user.id)
+                                        author_id=current_user.id, notif_type=NOTIF_REPORT)
             db.session.add(notification)
             already_notified.add(mod.user_id)
         post.reports += 1
         # todo: only notify admins for certain types of report
         for admin in Site.admins():
             if admin.id not in already_notified:
-                notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, author_id=current_user.id)
+                notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, 
+                                      author_id=current_user.id, notif_type=NOTIF_REPORT)
                 db.session.add(notify)
                 admin.unread_notifications += 1
         db.session.commit()
@@ -937,10 +1071,8 @@ def post_report(post_id: int):
             }
             instance = Instance.query.get(post.community.instance_id)
             if post.community.ap_inbox_url and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                success = post_request(post.community.ap_inbox_url, report_json, current_user.private_key,
-                                       current_user.public_url() + '#main-key')
-                if success is False or isinstance(success, str):
-                    flash('Failed to send report to remote server', 'error')
+                send_post_request(post.community.ap_inbox_url, report_json, current_user.private_key,
+                                  current_user.public_url() + '#main-key')
 
         flash(_('Post has been reported, thank you!'))
         return redirect(post.community.local_url())
@@ -950,7 +1082,9 @@ def post_report(post_id: int):
     return render_template('post/post_report.html', title=_('Report post'), form=form, post=post,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site
+                           menu_topics=menu_topics(), site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
@@ -1000,11 +1134,7 @@ def post_block_community(post_id: int):
 @login_required
 def post_block_instance(post_id: int):
     post = Post.query.get_or_404(post_id)
-    existing = InstanceBlock.query.filter_by(user_id=current_user.id, instance_id=post.instance_id).first()
-    if not existing:
-        db.session.add(InstanceBlock(user_id=current_user.id, instance_id=post.instance_id))
-        db.session.commit()
-        cache.delete_memoized(blocked_instances, current_user.id)
+    block_remote_instance(post.instance_id, SRC_WEB)
     flash(_('Content from %(name)s will be hidden.', name=post.instance.domain))
     return redirect(post.community.local_url())
 
@@ -1025,8 +1155,34 @@ def post_mea_culpa(post_id: int):
     return render_template('post/post_mea_culpa.html', title=_('I changed my mind'), form=form, post=post,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site
+                           menu_topics=menu_topics(), site=g.site,
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
+
+
+@bp.route('/post/<int:post_id>/sticky/<mode>', methods=['GET', 'POST'])
+@login_required
+def post_sticky(post_id: int, mode):
+    post = Post.query.get_or_404(post_id)
+    if post.community.is_moderator(current_user) or current_user.is_admin():
+        sticky_post(post.id, mode == 'yes', SRC_WEB)
+    if mode == 'yes':
+        flash(_('%(name)s has been stickied.', name=post.title))
+    else:
+        flash(_('%(name)s has been un-stickied.', name=post.title))
+    return redirect(referrer(url_for('activitypub.post_ap', post_id=post.id)))
+
+
+@bp.route('/post/<int:post_id>/lock/<mode>', methods=['GET', 'POST'])
+@login_required
+def post_lock(post_id: int, mode):
+    try:
+        lock_post(post_id, mode == 'yes', SRC_WEB)
+    except:
+        abort(404)
+    return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id)))
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/report', methods=['GET', 'POST'])
@@ -1056,14 +1212,15 @@ def post_reply_report(post_id: int, comment_id: int):
         for mod in post.community.moderators():
             notification = Notification(user_id=mod.user_id, title=_('A comment has been reported'),
                                         url=f"https://{current_app.config['SERVER_NAME']}/comment/{post_reply.id}",
-                                        author_id=current_user.id)
+                                        author_id=current_user.id, notif_type=NOTIF_REPORT)
             db.session.add(notification)
             already_notified.add(mod.user_id)
         post_reply.reports += 1
         # todo: only notify admins for certain types of report
         for admin in Site.admins():
             if admin.id not in already_notified:
-                notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, author_id=current_user.id)
+                notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, 
+                                      author_id=current_user.id, notif_type=NOTIF_REPORT)
                 db.session.add(notify)
                 admin.unread_notifications += 1
         db.session.commit()
@@ -1088,10 +1245,7 @@ def post_reply_report(post_id: int, comment_id: int):
             instance = Instance.query.get(post.community.instance_id)
             if post.community.ap_inbox_url and not current_user.has_blocked_instance(
                     instance.id) and not instance_banned(instance.domain):
-                success = post_request(post.community.ap_inbox_url, report_json, current_user.private_key,
-                                       current_user.public_url() + '#main-key')
-                if success is False or isinstance(success, str):
-                    flash('Failed to send report to remote server', 'error')
+                send_post_request(post.community.ap_inbox_url, report_json, current_user.private_key, current_user.public_url() + '#main-key')
 
         flash(_('Comment has been reported, thank you!'))
         return redirect(url_for('activitypub.post_ap', post_id=post.id))
@@ -1101,27 +1255,21 @@ def post_reply_report(post_id: int, comment_id: int):
     return render_template('post/post_reply_report.html', title=_('Report comment'), form=form, post=post, post_reply=post_reply,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site
+                           menu_topics=menu_topics(), site=g.site, menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/bookmark', methods=['GET'])
 @login_required
 def post_reply_bookmark(post_id: int, comment_id: int):
-    post = Post.query.get_or_404(post_id)
-    post_reply = PostReply.query.get_or_404(comment_id)
-
-    if post.deleted or post_reply.deleted:
+    try:
+        bookmark_reply(comment_id, SRC_WEB)
+    except NoResultFound:
         abort(404)
-    existing_bookmark = PostReplyBookmark.query.filter(PostReplyBookmark.post_reply_id == comment_id,
-                                                       PostReplyBookmark.user_id == current_user.id).first()
-    if not existing_bookmark:
-        db.session.add(PostReplyBookmark(post_reply_id=comment_id, user_id=current_user.id))
-        db.session.commit()
-        flash(_('Bookmark added.'))
-    else:
-        flash(_('This comment has already been bookmarked.'))
-    return redirect(url_for('activitypub.post_ap', post_id=post.id, _anchor=f'comment_{comment_id}'))
+
+    return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{comment_id}'))
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/block_user', methods=['GET', 'POST'])
@@ -1144,14 +1292,10 @@ def post_reply_block_user(post_id: int, comment_id: int):
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/block_instance', methods=['GET', 'POST'])
 @login_required
 def post_reply_block_instance(post_id: int, comment_id: int):
-    post = Post.query.get_or_404(post_id)
     post_reply = PostReply.query.get_or_404(comment_id)
-    existing = InstanceBlock.query.filter_by(user_id=current_user.id, instance_id=post_reply.instance_id).first()
-    if not existing:
-        db.session.add(InstanceBlock(user_id=current_user.id, instance_id=post_reply.instance_id))
-        db.session.commit()
+    block_remote_instance(post_reply.instance_id, SRC_WEB)
     flash(_('Content from %(name)s will be hidden.', name=post_reply.instance.domain))
-    return redirect(url_for('activitypub.post_ap', post_id=post.id))
+    return redirect(url_for('activitypub.post_ap', post_id=post_id))
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/edit', methods=['GET', 'POST'])
@@ -1167,7 +1311,7 @@ def post_reply_edit(post_id: int, comment_id: int):
     form.language_id.choices = languages_for_form()
     if post_reply.user_id == current_user.id or post.community.is_moderator():
         if form.validate_on_submit():
-            edit_reply(form, post_reply, post, 1)
+            edit_reply(form, post_reply, post, SRC_WEB)
             return redirect(url_for('activitypub.post_ap', post_id=post.id))
         else:
             form.body.data = post_reply.body
@@ -1178,7 +1322,11 @@ def post_reply_edit(post_id: int, comment_id: int):
                                    joined_communities=joined_communities(current_user.get_id()), menu_topics=menu_topics(),
                                    community=post.community, site=g.site,
                                    SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
-                                   inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
+                                   inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
+                                   menu_instance_feeds=menu_instance_feeds(), 
+                                   menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                                   menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                                   )
     else:
         abort(401)
 
@@ -1196,6 +1344,9 @@ def post_reply_delete(post_id: int, comment_id: int):
         if not post_reply.author.bot:
             post.reply_count -= 1
         post_reply.author.post_reply_count -= 1
+        if post_reply.path:
+            db.session.execute(text('update post_reply set child_count = child_count - 1 where id in :parents'),
+                               {'parents': tuple(post_reply.path[:-1])})
         db.session.commit()
         flash(_('Comment deleted.'))
         # federate delete
@@ -1217,10 +1368,8 @@ def post_reply_delete(post_id: int, comment_id: int):
 
             if not post.community.is_local():
                 if post_reply.user_id == current_user.id or post.community.is_moderator(current_user):
-                    success = post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
-                                           current_user.public_url() + '#main-key')
-                    if success is False or isinstance(success, str):
-                        flash('Failed to send delete to remote server', 'error')
+                    send_post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
+                                      current_user.public_url() + '#main-key')
             else:  # local community - send it to followers on remote instances
                 announce = {
                     "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
@@ -1252,7 +1401,7 @@ def post_reply_delete(post_id: int, comment_id: int):
 def post_reply_restore(post_id: int, comment_id: int):
     post = Post.query.get_or_404(post_id)
     post_reply = PostReply.query.get_or_404(comment_id)
-    community = post.community
+
     if post_reply.user_id == current_user.id or post.community.is_moderator() or current_user.is_admin():
         if post_reply.deleted_by == post_reply.user_id:
             was_mod_deletion = False
@@ -1263,6 +1412,9 @@ def post_reply_restore(post_id: int, comment_id: int):
         if not post_reply.author.bot:
             post.reply_count += 1
         post_reply.author.post_reply_count += 1
+        if post_reply.path:
+            db.session.execute(text('update post_reply set child_count = child_count + 1 where id in :parents'),
+                               {'parents': tuple(post_reply.path[:-1])})
         db.session.commit()
         flash(_('Comment restored.'))
 
@@ -1294,10 +1446,9 @@ def post_reply_restore(post_id: int, comment_id: int):
 
             if not post.community.is_local():  # this is a remote community, send it to the instance that hosts it
                 if not was_mod_deletion or (was_mod_deletion and post.community.is_moderator(current_user)):
-                    success = post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
-                                           current_user.public_url() + '#main-key')
-                    if success is False or isinstance(success, str):
-                        flash('Failed to send delete to remote server', 'error')
+                    send_post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
+                                      current_user.public_url() + '#main-key')
+
 
             else:  # local community - send it to followers on remote instances
                 announce = {
@@ -1349,44 +1500,19 @@ def post_reply_purge(post_id: int, comment_id: int):
 @bp.route('/post/<int:post_id>/notification', methods=['GET', 'POST'])
 @login_required
 def post_notification(post_id: int):
-    # Toggle whether the current user is subscribed to notifications about top-level replies to this post or not
-    post = Post.query.get_or_404(post_id)
-    existing_notification = NotificationSubscription.query.filter(NotificationSubscription.entity_id == post.id,
-                                                                  NotificationSubscription.user_id == current_user.id,
-                                                                  NotificationSubscription.type == NOTIF_POST).first()
-    if existing_notification:
-        db.session.delete(existing_notification)
-        db.session.commit()
-    else:  # no subscription yet, so make one
-        new_notification = NotificationSubscription(name=shorten_string(_('Replies to my post %(post_title)s',
-                                                                              post_title=post.title)),
-                                                    user_id=current_user.id, entity_id=post.id,
-                                                    type=NOTIF_POST)
-        db.session.add(new_notification)
-        db.session.commit()
-
-    return render_template('post/_post_notification_toggle.html', post=post)
+    try:
+        return subscribe_post(post_id, None, SRC_WEB)
+    except NoResultFound:
+        abort(404)
 
 
 @bp.route('/post_reply/<int:post_reply_id>/notification', methods=['GET', 'POST'])
 @login_required
 def post_reply_notification(post_reply_id: int):
-    # Toggle whether the current user is subscribed to notifications about replies to this reply or not
-    post_reply = PostReply.query.get_or_404(post_reply_id)
-    existing_notification = NotificationSubscription.query.filter(NotificationSubscription.entity_id == post_reply.id,
-                                                                  NotificationSubscription.user_id == current_user.id,
-                                                                  NotificationSubscription.type == NOTIF_REPLY).first()
-    if existing_notification:
-        db.session.delete(existing_notification)
-        db.session.commit()
-    else:  # no subscription yet, so make one
-        new_notification = NotificationSubscription(name=shorten_string(_('Replies to my comment on %(post_title)s',
-                                                                              post_title=post_reply.post.title)), user_id=current_user.id, entity_id=post_reply.id,
-                                                    type=NOTIF_REPLY)
-        db.session.add(new_notification)
-        db.session.commit()
-
-    return render_template('post/_reply_notification_toggle.html', comment={'comment': post_reply})
+    try:
+        return subscribe_reply(post_reply_id, None, SRC_WEB)
+    except NoResultFound:
+        abort(404)
 
 
 @bp.route('/post/<int:post_id>/cross_posts', methods=['GET'])
@@ -1412,7 +1538,10 @@ def post_view_voting_activity(post_id: int):
                            post_title=post_title, upvoters=upvoters, downvoters=downvoters,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site
+                           menu_topics=menu_topics(), site=g.site, 
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
@@ -1432,7 +1561,10 @@ def post_reply_view_voting_activity(comment_id: int):
                            reply_text=reply_text, upvoters=upvoters, downvoters=downvoters,
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site
+                           menu_topics=menu_topics(), site=g.site,
+                           menu_instance_feeds=menu_instance_feeds(), 
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
@@ -1492,7 +1624,12 @@ def post_cross_post(post_id: int):
     form.which_community.choices = which_community
     if form.validate_on_submit():
         community = Community.query.get_or_404(form.which_community.data)
-        return redirect(url_for('community.add_post', actor=community.link(), type='link', source=str(post.id)))
+        post_type = post_type_to_form_url_type(post.type, post.url)
+        response = make_response(redirect(url_for('community.add_post', actor=community.link(), type=post_type, source=str(post.id))))
+        response.delete_cookie('post_title')
+        response.delete_cookie('post_description')
+        response.delete_cookie('post_tags')
+        return response
     else:
         breadcrumbs = []
         breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
@@ -1508,7 +1645,10 @@ def post_cross_post(post_id: int):
                                breadcrumbs=breadcrumbs,
                                moderating_communities=moderating,
                                joined_communities=joined,
-                               menu_topics=menu_topics(), site=g.site
+                               menu_topics=menu_topics(), site=g.site,
+                               menu_instance_feeds=menu_instance_feeds(), 
+                               menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                               menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                                )
 
 

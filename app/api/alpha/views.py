@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from app import cache, db
 from app.constants import *
-from app.models import ChatMessage, Community, CommunityMember, Instance, Post, PostReply, PostVote, User
-from app.utils import blocked_communities
+from app.models import ChatMessage, Community, CommunityMember, Language, Instance, Post, PostReply, PostVote, User
+from app.utils import blocked_communities, blocked_instances, blocked_users
+
+from flask import current_app, g
 
 from sqlalchemy import text
 
@@ -24,7 +26,7 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0):
                         'language_id': post.language_id if post.language_id else 0,
                         'removed': post.deleted,
                         'locked': not post.comments_enabled})
-        if post.body and not stub:
+        if post.body:
             v1['body'] = post.body
         if post.edited_at:
             v1['edited_at'] = post.edited_at.isoformat() + 'Z'
@@ -32,7 +34,7 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0):
             if post.url:
                 v1['url'] = post.url
             if post.image_id:
-                v1['thumbnail_url'] = post.image.thumbnail_url()
+                v1['thumbnail_url'] = post.image.medium_url()
                 if post.image.alt_text:
                     v1['alt_text'] = post.image.alt_text
         if post.type == POST_TYPE_IMAGE:
@@ -110,24 +112,6 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0):
         return v4
 
 
-@cache.memoize(timeout=600)
-def cached_user_view_variant_1(user: User, stub=False):
-    include = ['id', 'user_name', 'title', 'banned', 'deleted', 'bot']
-    v1 = {column.name: getattr(user, column.name) for column in user.__table__.columns if column.name in include}
-    v1.update({'published': user.created.isoformat() + 'Z',
-                    'actor_id': user.public_url(),
-                    'local': user.is_local(),
-                    'instance_id': user.instance_id if user.instance_id else 1})
-    if user.about and not stub:
-        v1['about'] = user.about
-    if user.avatar_id:
-        v1['avatar'] = user.avatar.view_url()
-    if user.cover_id and not stub:
-        v1['banner'] = user.cover.view_url()
-
-    return v1
-
-
 # 'user' param can be anyone (including the logged in user), 'user_id' param belongs to the user making the request
 def user_view(user: User | int, variant, stub=False, user_id=None):
     if isinstance(user, int):
@@ -135,19 +119,37 @@ def user_view(user: User | int, variant, stub=False, user_id=None):
 
     # Variant 1 - models/person/person.dart
     if variant == 1:
-        return cached_user_view_variant_1(user=user, stub=stub)
+        include = ['id', 'user_name', 'title', 'banned', 'deleted', 'bot']
+        v1 = {column.name: getattr(user, column.name) for column in user.__table__.columns if column.name in include}
+        v1.update({'published': user.created.isoformat() + 'Z',
+                   'actor_id': user.public_url(),
+                   'local': user.is_local(),
+                   'instance_id': user.instance_id if user.instance_id else 1})
+        if user.about and not stub:
+            v1['about'] = user.about
+        if user.avatar_id:
+            v1['avatar'] = user.avatar.view_url()
+        if user.cover_id and not stub:
+            v1['banner'] = user.cover.view_url()
+
+        return v1
 
     # Variant 2 - views/person_view.dart
     if variant == 2:
         counts = {'person_id': user.id, 'post_count': user.post_count, 'comment_count': user.post_reply_count}
         v2 = {'person': user_view(user=user, variant=1), 'counts': counts, 'is_admin': user.is_admin()}
+        user_sub = False
+        if user_id and user_id != user.id:
+            user_sub = db.session.execute(text('SELECT user_id FROM "notification_subscription" WHERE type = :type and entity_id = :entity_id and user_id = :user_id'), {'type': NOTIF_USER, 'entity_id': user.id, 'user_id': user_id}).scalar()
+        activity_alert = True if user_sub else False
+        v2 = {'person': user_view(user=user, variant=1), 'activity_alert': activity_alert, 'counts': counts, 'is_admin': user.is_admin()}
         return v2
 
     # Variant 3 - models/user/get_person_details.dart - /user?person_id api endpoint
     if variant == 3:
         modlist = cached_modlist_for_user(user)
 
-        v3 = {'person_view': user_view(user=user, variant=2),
+        v3 = {'person_view': user_view(user=user, variant=2, user_id=user_id),
               'moderates': modlist,
               'posts': [],
               'comments': []}
@@ -157,32 +159,52 @@ def user_view(user: User | int, variant, stub=False, user_id=None):
     if variant == 4:
         block = db.session.execute(text('SELECT blocker_id FROM "user_block" WHERE blocker_id = :blocker_id and blocked_id = :blocked_id'), {'blocker_id': user_id, 'blocked_id': user.id}).scalar()
         blocked = True if block else False
-        v4 = {'person_view': user_view(user=user, variant=2),
+        v4 = {'person_view': user_view(user=user, variant=2, user_id=user_id),
               'blocked': blocked}
         return v4
 
+    # Variant 5 - PersonResponse (for user activity_alert subscriptions, to be consistent with the response to community activity_alert subscriptions)
+    if variant == 5:
+        v5 = {'person_view': user_view(user=user, variant=2, user_id=user_id)}
+        return v5
 
-@cache.memoize(timeout=600)
-def cached_community_view_variant_1(community: Community, stub=False):
-    include = ['id', 'name', 'title', 'banned', 'nsfw', 'restricted_to_mods']
-    v1 = {column.name: getattr(community, column.name) for column in community.__table__.columns if column.name in include}
-    v1.update({'published': community.created_at.isoformat() + 'Z',
-               'updated': community.created_at.isoformat() + 'Z',
-               'deleted': False,
-               'removed': False,
-               'actor_id': community.public_url(),
-               'local': community.is_local(),
-               'hidden': not community.show_all,
-               'instance_id': community.instance_id if community.instance_id else 1,
-               'ap_domain': community.ap_domain})
-    if community.description and not stub:
-        v1['description'] = community.description
-    if community.icon_id:
-        v1['icon'] = community.icon.view_url()
-    if community.image_id and not stub:
-        v1['banner'] = community.image.view_url()
-
-    return v1
+    # Variant 6 - User Settings - api/user.dart saveUserSettings
+    if variant == 6:
+        v6 = {
+          "local_user_view": {
+            "local_user": {
+              "show_nsfw": not user.hide_nsfw == 1,
+              "default_sort_type": user.default_sort.capitalize(),
+              "default_listing_type": user.default_filter.capitalize(),
+              "show_scores": True,
+              "show_bot_accounts": not user.ignore_bots == 1,
+              "show_read_posts": not user.hide_read_posts == True
+            },
+            "person": {
+              "id": user.id,
+              "user_name": user.user_name,
+              "banned": user.banned,
+              "published": user.created.isoformat() + 'Z',
+              "actor_id": user.public_url()[8:],
+              "local": True,
+              "deleted": user.deleted,
+              "bot": user.bot,
+              "instance_id": 1
+            },
+            "counts": {
+              "person_id": user.id,
+              "post_count": user.post_count,
+             "comment_count": user.post_reply_count
+            }
+          },
+          "moderates": [], # moderating_communities(user),
+          "follows": [], # joined_communities(user),
+          "community_blocks": blocked_communities_view(user),
+          "instance_blocks": blocked_instances_view(user),
+          "person_blocks": blocked_people_view(user),
+          "discussion_languages": []        # TODO
+        }
+        return v6
 
 
 def community_view(community: Community | int | str, variant, stub=False, user_id=None):
@@ -194,7 +216,25 @@ def community_view(community: Community | int | str, variant, stub=False, user_i
 
     # Variant 1 - models/community/community.dart
     if variant == 1:
-        return cached_community_view_variant_1(community=community, stub=stub)
+        include = ['id', 'name', 'title', 'banned', 'nsfw', 'restricted_to_mods']
+        v1 = {column.name: getattr(community, column.name) for column in community.__table__.columns if column.name in include}
+        v1.update({'published': community.created_at.isoformat() + 'Z',
+                   'updated': community.created_at.isoformat() + 'Z',
+                   'deleted': community.banned,
+                   'removed': False,
+                   'actor_id': community.public_url(),
+                   'local': community.is_local(),
+                   'hidden': not community.show_all,
+                   'instance_id': community.instance_id if community.instance_id else 1,
+                   'ap_domain': community.ap_domain})
+        if community.description and not stub:
+            v1['description'] = community.description
+        if community.icon_id:
+            v1['icon'] = community.icon.medium_url()
+        if community.image_id and not stub:
+            v1['banner'] = community.image.medium_url()
+
+        return v1
 
     # Variant 2 - views/community_view.dart - /community/list api endpoint
     if variant == 2:
@@ -205,10 +245,12 @@ def community_view(community: Community | int | str, variant, stub=False, user_i
         if user_id:
             followed = db.session.execute(text('SELECT user_id FROM "community_member" WHERE community_id = :community_id and user_id = :user_id'), {"community_id": community.id, "user_id": user_id}).scalar()
             blocked = True if community.id in blocked_communities(user_id) else False
+            community_sub = db.session.execute(text('SELECT user_id FROM "notification_subscription" WHERE type = :type and entity_id = :entity_id and user_id = :user_id'), {'type': NOTIF_COMMUNITY, 'entity_id': community.id, 'user_id': user_id}).scalar()
         else:
-            followed = blocked = False
+            followed = blocked = community_sub = False
         subscribe_type = 'Subscribed' if followed else 'NotSubscribed'
-        v2 = {'community': community_view(community=community, variant=1, stub=stub), 'subscribed': subscribe_type, 'blocked': blocked, 'counts': counts}
+        activity_alert = True if community_sub else False
+        v2 = {'community': community_view(community=community, variant=1, stub=stub), 'subscribed': subscribe_type, 'blocked': blocked, 'activity_alert': activity_alert, 'counts': counts}
         return v2
 
     # Variant 3 - models/community/get_community_response.dart - /community api endpoint
@@ -235,14 +277,14 @@ def community_view(community: Community | int | str, variant, stub=False, user_i
         return v5
 
 
-# would be better to incrementally add to a post_reply.path field
+# emergency function - shouldn't be called in normal circumstances
 @cache.memoize(timeout=86400)
 def calculate_path(reply):
-    path = "0." + str(reply.id)
+    path = [0, reply.id]
     if reply.depth == 1:
-        path = "0." + str(reply.parent_id) + "." + str(reply.id)
+        path = [0, reply.parent_id, reply.id]
     elif reply.depth > 1:
-        path = "0"
+        path = [0]
         parent_id = reply.parent_id
         depth = reply.depth - 1
         path_ids = [reply.id, reply.parent_id]
@@ -252,17 +294,19 @@ def calculate_path(reply):
             parent_id = pid
             depth -= 1
         for pid in path_ids[::-1]:
-            path += "." + str(pid)
-    return path
+            path.append(pid)
+    reply.path = path
+    db.session.commit()
 
 
-# would be better to incrementally add to a post_reply.child_count field (walk along .path, and ++ each one)
-@cache.memoize(timeout=86400)
-def calculate_if_has_children(reply):    # result used as True / False
-    return db.session.execute(text('SELECT COUNT(id) AS c FROM "post_reply" WHERE parent_id = :id'), {'id': reply.id}).scalar()
+# emergency function - shouldn't be called in normal circumstances
+def calculate_child_count(reply):
+    child_count = db.session.execute(text('select count(id) as c from post_reply where :id = ANY(path) and id != :id and deleted = false'), {"id": reply.id}).scalar()
+    reply.child_count = child_count
+    db.session.commit()
 
 
-def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0, read=False):
+def reply_view(reply: PostReply | int, variant: int, user_id=None, my_vote=0, read=False):
     if isinstance(reply, int):
         reply = PostReply.query.filter_by(id=reply).one()
 
@@ -278,7 +322,9 @@ def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0, read=Fa
                    'distinguished': False,
                    'removed': False})
 
-        v1['path'] = calculate_path(reply)
+        if not reply.path:
+            calculate_path(reply)
+        v1['path'] = '.'.join(str(id) for id in reply.path)
         if reply.edited_at:
             v1['edited_at'] = reply.edited_at.isoformat() + 'Z'
         if reply.deleted == True:
@@ -292,7 +338,7 @@ def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0, read=Fa
     if variant == 2:
         # counts - models/comment/comment_aggregates.dart
         counts = {'comment_id': reply.id, 'score': reply.score, 'upvotes': reply.up_votes, 'downvotes': reply.down_votes,
-                  'published': reply.posted_at.isoformat() + 'Z', 'child_count': 1 if calculate_if_has_children(reply) else 0}
+                  'published': reply.posted_at.isoformat() + 'Z', 'child_count': reply.child_count if reply.child_count is not None else 0}
 
         bookmarked = db.session.execute(text('SELECT user_id FROM "post_reply_bookmark" WHERE post_reply_id = :post_reply_id and user_id = :user_id'), {'post_reply_id': reply.id, 'user_id': user_id}).scalar()
         reply_sub = db.session.execute(text('SELECT user_id FROM "notification_subscription" WHERE type = :type and entity_id = :entity_id and user_id = :user_id'), {'type': NOTIF_REPLY, 'entity_id': reply.id, 'user_id': user_id}).scalar()
@@ -337,7 +383,13 @@ def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0, read=Fa
         banned = db.session.execute(text('SELECT user_id FROM "community_ban" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': reply.user_id, 'community_id': reply.community_id}).scalar()
         moderator = db.session.execute(text('SELECT is_moderator FROM "community_member" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': reply.user_id, 'community_id': reply.community_id}).scalar()
         admin = db.session.execute(text('SELECT user_id FROM "user_role" WHERE user_id = :user_id and role_id = 4'), {'user_id': reply.user_id}).scalar()
+        if my_vote == 0 and user_id is not None:
+            reply_vote = db.session.execute(text('SELECT effect FROM "post_reply_vote" WHERE post_reply_id = :post_reply_id and user_id = :user_id'), {'post_reply_id': reply.id, 'user_id': user_id}).scalar()
+            effect = reply_vote if reply_vote else 0
+        else:
+            effect = my_vote
 
+        my_vote = int(effect)
         saved = True if bookmarked else False
         activity_alert = True if reply_sub else False
         creator_banned_from_community = True if banned else False
@@ -357,7 +409,8 @@ def reply_view(reply: PostReply | int, variant, user_id=None, my_vote=0, read=Fa
               'creator_is_admin': creator_is_admin,
               'subscribed': 'NotSubscribed',
               'saved': saved,
-              'creator_blocked': False
+              'creator_blocked': False,
+              'my_vote': my_vote
              }
 
         return v5
@@ -495,6 +548,38 @@ def private_message_view(cm: ChatMessage, user_id, ap_id):
     return v1
 
 
+def site_view(user):
+    logo = g.site.logo if g.site.logo else '/static/images/piefed_logo_icon_t_75.png'
+    site = {
+      "enable_downvotes": g.site.enable_downvotes,
+      "icon": f"https://{current_app.config['SERVER_NAME']}{logo}",
+      "registration_mode": g.site.registration_mode,
+      "name": g.site.name,
+      "actor_id": f"https://{current_app.config['SERVER_NAME']}/",
+      "user_count": users_total(),
+      "all_languages": []
+    }
+    if g.site.sidebar:
+        site['sidebar'] = g.site.sidebar
+    if g.site.description:
+        site['description'] = g.site.description
+    for language in Language.query.all():
+        site["all_languages"].append({
+            "id": language.id,
+            "code": language.code,
+            "name": language.name
+        })
+
+    v1 = {
+      "version": "1.0.0",
+      "site": site
+    }
+    if user:
+        v1['my_user'] = user_view(user=user, variant=6)
+
+    return v1
+
+
 @cache.memoize(timeout=86400)
 def cached_modlist_for_community(community_id):
     moderator_ids = db.session.execute(text('SELECT user_id FROM "community_member" WHERE community_id = :community_id and is_moderator = True'), {'community_id': community_id}).scalars()
@@ -519,3 +604,58 @@ def cached_modlist_for_user(user):
         }
         modlist.append(entry)
     return modlist
+
+
+@cache.memoize(timeout=86400)
+def users_total():
+    return db.session.execute(text(
+        'SELECT COUNT(id) as c FROM "user" WHERE ap_id is null AND verified is true AND banned is false AND deleted is false')).scalar()
+
+
+"""
+@cache.memoize(timeout=86400)
+def moderating_communities(user):
+    cms = CommunityMember.query.filter_by(user_id=user.id, is_moderator=True)
+    moderates = []
+    for cm in cms:
+        moderates.append({'community': community_view(cm.community_id, variant=1, stub=True), 'moderator': user_view(user, variant=1, stub=True)})
+    return moderates
+"""
+
+"""
+@cache.memoize(timeout=86400)
+def joined_communities(user):
+    cms = CommunityMember.query.filter_by(user_id=user.id, is_banned=False)
+    follows = []
+    for cm in cms:
+        follows.append({'community': community_view(cm.community_id, variant=1, stub=True), 'follower': user_view(user, variant=1, stub=True)})
+    return follows
+"""
+
+
+# @cache.memoize(timeout=86400)
+def blocked_people_view(user):
+    blocked_ids = blocked_users(user.id)
+    blocked = []
+    for blocked_id in blocked_ids:
+        blocked.append({'person': user_view(user, variant=1, stub=True), 'target': user_view(blocked_id, variant=1, stub=True)})
+    return blocked
+
+
+# @cache.memoize(timeout=86400)
+def blocked_communities_view(user):
+    blocked_ids = blocked_communities(user.id)
+    blocked = []
+    for blocked_id in blocked_ids:
+        blocked.append({'person': user_view(user, variant=1, stub=True), 'community': community_view(blocked_id, variant=1, stub=True)})
+    return blocked
+
+
+# @cache.memoize(timeout=86400)
+def blocked_instances_view(user):
+    blocked_ids = blocked_instances(user.id)
+    blocked = []
+    for blocked_id in blocked_ids:
+        blocked.append({'person': user_view(user, variant=1, stub=True), 'instance': instance_view(blocked_id, variant=1)})
+    return blocked
+

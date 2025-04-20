@@ -1,6 +1,7 @@
 from app import celery, db
-from app.activitypub.signature import default_context, post_request
-from app.constants import POST_TYPE_LINK, POST_TYPE_ARTICLE, POST_TYPE_IMAGE, POST_TYPE_VIDEO, POST_TYPE_POLL, MICROBLOG_APPS
+from app.activitypub.signature import default_context, send_post_request
+from app.constants import POST_TYPE_LINK, POST_TYPE_ARTICLE, POST_TYPE_IMAGE, POST_TYPE_VIDEO, \
+    POST_TYPE_POLL, MICROBLOG_APPS, NOTIF_MENTION
 from app.models import CommunityBan, Instance, Notification, Poll, PollChoice, Post, User, UserFollower, utcnow
 from app.user.utils import search_for_user
 from app.utils import gibberish, instance_banned, ap_datetime
@@ -55,18 +56,18 @@ import re
 
 
 @celery.task
-def make_post(send_async, user_id, post_id):
-    send_post(user_id, post_id)
+def make_post(send_async, post_id):
+    send_post(post_id)
 
 
 @celery.task
-def edit_post(send_async, user_id, post_id):
-    send_post(user_id, post_id, edit=True)
+def edit_post(send_async, post_id):
+    send_post(post_id, edit=True)
 
 
-def send_post(user_id, post_id, edit=False):
-    user = User.query.filter_by(id=user_id).one()
+def send_post(post_id, edit=False):
     post = Post.query.filter_by(id=post_id).one()
+    user = post.author
     community = post.community
 
     # Find any users Mentioned in post body with @user@instance syntax
@@ -108,7 +109,7 @@ def send_post(user_id, post_id, edit=False):
             if not existing_notification:
                 notification = Notification(user_id=recipient.id, title=_(f"You have been mentioned in post {post.id}"),
                                             url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
-                                            author_id=user.id)
+                                            author_id=user.id, notif_type=NOTIF_MENTION)
                 recipient.unread_notifications += 1
                 db.session.add(notification)
                 db.session.commit()
@@ -122,7 +123,7 @@ def send_post(user_id, post_id, edit=False):
     if not followers and community.local_only:
         return
 
-    banned = CommunityBan.query.filter_by(user_id=user_id, community_id=community.id).first()
+    banned = CommunityBan.query.filter_by(user_id=user.id, community_id=community.id).first()
     if banned:
         return
     if not community.is_local():
@@ -182,7 +183,7 @@ def send_post(user_id, post_id, edit=False):
         page['endTime'] = ap_datetime(poll.end_poll)
         page['votersCount'] = poll.total_votes() if edit else 0
         choices = []
-        for choice in PollChoice.query.filter_by(post_id=post.id).all():
+        for choice in PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all():
             choices.append({'type': 'Note', 'name': choice.choice_text, 'replies': {'type': 'Collection', 'totalItems': choice.num_votes if edit else 0}})
         page['oneOf' if poll.mode == 'single' else 'anyOf'] = choices
 
@@ -235,15 +236,15 @@ def send_post(user_id, post_id, edit=False):
                 if instance.inbox and instance.online() and not user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
                     if instance.software in MICROBLOG_APPS:
                         if activity == 'create':
-                            post_request(instance.inbox, microblog_announce, community.private_key, community.public_url() + '#main-key')
+                            send_post_request(instance.inbox, microblog_announce, community.private_key, community.public_url() + '#main-key')
                         else:
-                            post_request(instance.inbox, create, user.private_key, user.public_url() + '#main-key')
+                            send_post_request(instance.inbox, create, user.private_key, user.public_url() + '#main-key')
                     else:
-                        post_request(instance.inbox, group_announce, community.private_key, community.public_url() + '#main-key')
+                        send_post_request(instance.inbox, group_announce, community.private_key, community.public_url() + '#main-key')
                     if post.type < POST_TYPE_POLL:
                           domains_sent_to.append(instance.domain)
         else:
-            post_request(community.ap_inbox_url, create, user.private_key, user.public_url() + '#main-key')
+            send_post_request(community.ap_inbox_url, create, user.private_key, user.public_url() + '#main-key')
             domains_sent_to.append(community.instance.domain)
 
     # amend copy of the Create, for anyone Mentioned in post body or who is following the user, to a format more likely to be understood
@@ -265,7 +266,7 @@ def send_post(user_id, post_id, edit=False):
     if not community.local_only:
         for recipient in recipients:
             if recipient.instance.domain not in domains_sent_to:
-                post_request(recipient.instance.inbox, create, user.private_key, user.public_url() + '#main-key')
+                send_post_request(recipient.instance.inbox, create, user.private_key, user.public_url() + '#main-key')
                 domains_sent_to.append(recipient.instance.domain)
 
     if not followers:
@@ -280,5 +281,5 @@ def send_post(user_id, post_id, edit=False):
     instances = instances.filter(UserFollower.local_user_id == post.user_id).filter(Instance.gone_forever == False)
     for instance in instances:
         if instance.domain not in domains_sent_to:
-            post_request(instance.inbox, create, user.private_key, user.public_url() + '#main-key')
+            send_post_request(instance.inbox, create, user.private_key, user.public_url() + '#main-key')
 

@@ -11,6 +11,7 @@
 * [Database Management](#database-management)
 * [Keeping your local instance up to date](#keeping-your-local-instance-up-to=date)
 * [Running PieFed in production](#running-piefed-in-production)
+* [Accepting donations through Stripe](#stripe)
 * [Pre-requisites for Mac OS](#pre-requisites-for-mac-os)
 * [Notes for Windows (WSL2)](#notes-for-windows-wsl2)        
 * [Notes for Pip Package Management](#notes-for-pip-package-management)
@@ -24,100 +25,12 @@
 Docker can be used to create an isolated environment that is separate from the host server and starts from a consistent
 configuration. While it is quicker and easier, it's not to everyone's taste.
 
-* Clone PieFed into a new directory
+[DOCKER INSTRUCTIONS ARE HERE](https://codeberg.org/rimu/pyfedi/src/branch/main/INSTALL-docker.md)
 
-```bash
-git clone https://codeberg.org/rimu/pyfedi.git
-```
-
-* Copy suggested docker config
-
-```bash
-cd pyfedi
-cp env.docker.sample .env.docker
-```
-
-* Edit docker environment file
-
-Open .env.docker in your text editor, set SECRET_KEY to something random and set SERVER_NAME to your domain name,
-WITHOUT the https:// at the front. The database login details doesn't really need to be changed because postgres will be
-locked away inside it's own docker network that only PieFed can access but if you want to change POSTGRES_PASSWORD go ahead
-just be sure to update DATABASE_URL accordingly.
-
-Check out compose.yaml and see if it is to your liking. Note the port (8030) and volume definitions - they might need to be
-tweaked.
-
-* First startup
-
-This will take a few minutes.
-
-```bash
-export DOCKER_BUILDKIT=1
-docker-compose up --build
-```
-
-After a while the gibberish will stop scrolling past. If you see errors let us know at [https://piefed.social/c/piefed_help](https://piefed.social/c/piefed_help).
-
-* Networking
-
-You need to somehow to allow client connections from outside to access port 8030 on your server. The details of this is outside the scope
-of this article. You could use a nginx reverse proxy, a cloudflare zero trust tunnel, tailscale, whatever. Just make sure it has SSL on
-it as PieFed assumes you're making requests that start with https://your-domain.
-
-Once you have the networking set up, go to https://your-domain in your browser and see if the docker output in your terminal
-shows signs of reacting to the request. There will be an error showing up in the console because we haven't done the next step yet.
-
-* Database initialization
-
-This must be done once and once only. Doing this will wipe all existing data in your instance so do not do it unless you have a
-brand new instance.
-
-Open a shell inside the PieFed docker container:
-
-`docker exec -it piefed_app1 sh`
-
-Inside the container, run the initialization command:
-
-```
-export FLASK_APP=pyfedi.py
-flask init-db
-```
-
-Among other things this process will get you set up with a username and password. Don't use 'admin' as the user name, script kiddies love that one.
-
-* The moment of truth
-
-Go to https://your-domain in your web browser and PieFed should appear. Log in with the username and password from the previous step.
-
-At this point docker is pretty much Ok so you don't need to see the terminal output as readily. Hit Ctrl + C to close down docker and then run
-
-```bash
-docker-compose up -d
-```
-
-to have PieFed run in the background.
-
-* But wait there's more
-
-Until you set the right environment variables, PieFed won't be able to send email. Check out env.sample for some hints.
-When you have a new value to set, add it to .env.docker and then restart docker with:
-
-```
-docker-compose down && docker-compose up -d
-```
-
-There are also regular cron jobs that need to be run. Set up cron on the host to run those scripts inside the container - see the Cron
-section of this document for details.
-
-You probably want a Captcha on the registration form - more environment variables.
-
-CDN, CloudFlare. More environment variables.
-
-All this is explained in the bare metal guide, below.
 
 ### Hard way: bare metal
 
-Read on
+Doing things this way will give you the ultimate customization that larger instances need.
 
 <div id="setup-database"></div>
 
@@ -224,7 +137,6 @@ pip install -r requirements.txt
 
 * `SERVER_NAME` should be the domain of the site/instance. Use `127.0.0.1:5000` during development unless using ngrok. Just use the bare
 domain name, without https:// on the front or a slash on the end.
-* `RECAPTCHA_PUBLIC_KEY` and `RECAPTCHA_PRIVATE_KEY` can be generated at https://www.google.com/recaptcha/admin/create (this is optional - omit to allow registration without RECAPCHA).
 * `CACHE_TYPE` can be `FileSystemCache` or `RedisCache`. `FileSystemCache` is fine during development (set `CACHE_DIR` to `/tmp/piefed` or `/dev/shm/piefed`)
 while `RedisCache` **should** be used in production. If using `RedisCache`, set `CACHE_REDIS_URL` to `redis://localhost:6379/1`. Visit https://yourdomain/testredis to check if your redis url is working.
 
@@ -242,7 +154,7 @@ while `RedisCache` **should** be used in production. If using `RedisCache`, set 
     ```
     You can also [use environment variables](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html#environment-variables) if you prefer.
 
-* Test email sending by going to https://yourdomain/test_email. It will try to send an email to the current user's email address.
+* Test email sending by going to https://yourdomain/test_email. (after setting the FLASK_DEBUG environment variable to 1). It will try to send an email to the current user's email address.
 If it does not work check the log file at logs/pyfedi.log for clues.
 
 * BOUNCE_ADDRESS is where email bounces will go to. If BOUNCE_* is configured then all emails in that inbox
@@ -251,7 +163,7 @@ for bounces, not a inbox you also use for other purposes.
 
 ### Development mode
 
-Setting `FLASK_DEBUG=1` in the `.env` file will enable the `<your-site>/dev/tools` page.
+Setting `FLASK_DEBUG=1` in the `.env` file will enable the `<your-site>/dev/tools` page. It will expose some various testing routes as well.
 
 That page can be accessed from the `Admin` navigation drop down, or nav bar as `Dev Tools`. That page has buttons that can create/delete communities and topics. The communities and topics will all begin with "dev_".
 
@@ -549,31 +461,12 @@ One per day there are some maintenance tasks that PieFed needs to do:
 5 2 * * * rimu cd /home/rimu/pyfedi && /home/rimu/pyfedi/daily.sh
 ```
 
-If celery is hanging occasionally, put this script in /etc/cron.hourly:
+Every few minutes PieFed will retry federation sending attempts that failed previously:
 
 ```
-#!/bin/bash
-
-# Define the service to restart
-SERVICE="celery.service"
-
-# Get the load average for the last 1 minute
-LOAD=$(awk '{print $1}' /proc/loadavg)
-
-# Check if the load average is less than 0.1
-if (( $(echo "$LOAD < 0.1" | bc -l) )); then
-    # Restart the service
-    systemctl restart $SERVICE
-    # Log the action
-    echo "$(date): Load average is $LOAD. Restarted $SERVICE." >> /var/log/restart_service.log
-else
-    # Log that no action was taken
-    echo "$(date): Load average is $LOAD. No action taken." >> /var/log/restart_service.log
-fi
-
+*/5 * * * * rimu cd /home/rimu/pyfedi && /home/rimu/pyfedi/send_queue.sh
 ```
 
-Adjust the echo "$LOAD < 0.1" to suit your system.
 
 ### Email
 
@@ -603,6 +496,26 @@ PieFed has the capability to automatically remove file copies from the Cloudflar
 - `CLOUDFLARE_API_TOKEN` - go to https://dash.cloudflare.com/profile/api-tokens and create a "Zone.Cache Purge" token.
 - `CLOUDFLARE_ZONE_ID` - this can be found in the right hand column of your Cloudflare dashboard in the API section.
 
+#### S3 (object storage)
+
+Over time images for user profile photos, image posts and link thumbnails will consume quite a lot of storage space so it is a good idea
+to use a cheaper form of storage such as AWS S3 or Cloudflare R2. The S3 API is widely implemented by many providers and PieFed can
+store media in any of them. Cloudflare does not charge egress fees so they are pretty good value.
+
+To enable S3 storage you need to set these environment variables in your .env file:
+
+ - S3_REGION = 'auto'
+ - S3_BUCKET = 'piefed-media'
+ - S3_ENDPOINT = 'https://something_something.r2.cloudflarestorage.com'
+ - S3_PUBLIC_URL = 'media.piefed.social'
+ - S3_ACCESS_KEY = 'xyz'
+ - S3_ACCESS_SECRET = 'xyzxyz'
+
+Cloudflare does not care about S3_REGION so it can be 'auto' but for AWS you should use something like us-east-1. All the
+other values are shown to you during the setup of the space (often called the "bucket") on your S3 provider.
+
+Test your S3 connection by going to https://yourinstance.tld/test_s3. If it crashes, something is wrong. If you see 'Ok' all is well.
+
 #### SMTP
 
 To use SMTP you need to set all the `MAIL_*` environment variables in you `.env` file. See `env.sample` for a list of them.
@@ -611,12 +524,31 @@ To use SMTP you need to set all the `MAIL_*` environment variables in you `.env`
 
 You need to set `MAIL_FROM` in `.env` to some email address.
 
+Also set an environment variable `FLASK_DEBUG` to '1' ( `export FLASK_DEBUG="1"` ).
+
 Log into Piefed then go to https://yourdomain/test_email to trigger a test email. It will use SES or SMTP depending on
 which environment variables you defined in .env. If `MAIL_SERVER` is empty it will try SES. Then if `AWS_REGION` is empty it'll
 silently do nothing.
 
 ---
 
+<div id="stripe"></div>
+
+## Accepting donations through Stripe
+
+In env.sample there are all the environment variables you need to add to your .env for Stripe to work.
+
+STRIPE_SECRET_KEY and STRIPE_PUBLISHABLE_KEY can be found on the Stripe dashboard.
+
+STRIPE_MONTHLY_SMALL and STRIPE_MONTHLY_BIG are the Price IDs of two **monthly recurring** products. Find the price ID by editing
+a product you've made and then clicking on the 3 dot button to the right of the price.
+
+Change STRIPE_MONTHLY_SMALL_TEXT and STRIPE_MONTHLY_BIG_TEXT to be the amounts of your product prices.
+
+To get a WEBHOOK_SIGNING_SECRET you need to set up a webhook to send data to https://yourinstance/stripe_webhook, sending the
+checkout.session.completed and customer.subscription.deleted events.
+
+---
 
 <div id="pre-requisites-for-mac-os"></div>
 
@@ -724,3 +656,6 @@ upgrade a package:
 pip install --upgrade <package_name>
 ```
 
+## Developers
+
+See dev_notes.txt and https://join.piefed.social/docs/developers/

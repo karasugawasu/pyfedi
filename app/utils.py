@@ -7,9 +7,12 @@ import random
 import urllib
 from collections import defaultdict
 from datetime import datetime, timedelta, date
+from json import JSONDecodeError
 from time import sleep
 from typing import List, Literal, Union
 
+import app
+import redis
 import httpx
 import markdown2
 from urllib.parse import urlparse, parse_qs, urlencode
@@ -18,6 +21,7 @@ import flask
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 import warnings
 import jwt
+import base64
 
 from app.constants import DOWNVOTE_ACCEPT_ALL, DOWNVOTE_ACCEPT_TRUSTED, DOWNVOTE_ACCEPT_INSTANCE, \
     DOWNVOTE_ACCEPT_MEMBERS
@@ -25,20 +29,26 @@ from app.constants import DOWNVOTE_ACCEPT_ALL, DOWNVOTE_ACCEPT_TRUSTED, DOWNVOTE
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 import os
 from furl import furl
-from flask import current_app, json, redirect, url_for, request, make_response, Response, g, flash
-from flask_babel import _
+import boto3
+from flask import current_app, json, redirect, url_for, request, make_response, Response, g, flash, abort
+from flask_babel import _, lazy_gettext as _l
 from flask_login import current_user, logout_user
-from sqlalchemy import text, or_
+from sqlalchemy import text, or_, desc
 from sqlalchemy.orm import Session
-from wtforms.fields  import SelectField, SelectMultipleField
-from wtforms.widgets import Select, html_params, ListWidget, CheckboxInput
+from wtforms.fields  import SelectField, SelectMultipleField, StringField
+from wtforms.widgets import Select, html_params, ListWidget, CheckboxInput, TextInput
+from wtforms.validators import ValidationError
+from markupsafe import Markup
 from app import db, cache, httpx_client, celery
 import re
 from PIL import Image, ImageOps
 
+from captcha.audio import AudioCaptcha
+from captcha.image import ImageCaptcha
+
 from app.models import Settings, Domain, Instance, BannedInstances, User, Community, DomainBlock, ActivityPubLog, IpBan, \
     Site, Post, PostReply, utcnow, Filter, CommunityMember, InstanceBlock, CommunityBan, Topic, UserBlock, Language, \
-    File, ModLog, CommunityBlock
+    File, ModLog, CommunityBlock, Feed, FeedMember
 
 
 # Flask's render_template function, with support for themes added
@@ -77,13 +87,13 @@ def return_304(etag, content_type=None):
 
 # Jinja: when a file was modified. Useful for cache-busting
 def getmtime(filename):
-    if os.path.exists('static/' + filename):
-        return os.path.getmtime('static/' + filename)
+    if os.path.exists('app/static/' + filename):
+        return os.path.getmtime('app/static/' + filename)
 
 
 # do a GET request to a uri, return the result
 def get_request(uri, params=None, headers=None) -> httpx.Response:
-    timeout = 15 if 'washingtonpost.com' in uri else 5  # Washington Post is really slow on og:image for some reason
+    timeout = 15 if 'washingtonpost.com' in uri else 10  # Washington Post is really slow on og:image for some reason
     if headers is None:
         headers = {'User-Agent': f'PieFed/1.0; +https://{current_app.config["SERVER_NAME"]}'}
     else:
@@ -150,7 +160,10 @@ def get_setting(name: str, default=None):
     if setting is None:
         return default
     else:
-        return json.loads(setting.value)
+        try:
+            return json.loads(setting.value)
+        except JSONDecodeError:
+            return default
 
 
 # retrieves arbitrary object from persistent key-value store
@@ -202,7 +215,7 @@ def is_local_image_url(url):
     if not is_image_url(url):
         return False
     f = furl(url)
-    return f.host in ["127.0.0.1", current_app.config["SERVER_NAME"]]
+    return f.host in ["127.0.0.1", current_app.config["SERVER_NAME"], current_app.config['S3_PUBLIC_URL']]
 
 
 def is_video_url(url: str) -> bool:
@@ -244,17 +257,19 @@ def mime_type_using_head(url):
             return content_type
         else:
             return ''
-    except httpx.HTTPError as e:
+    except httpx.HTTPError:
         return ''
 
+
+allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre',
+                'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small', 'sub', 'sup',
+                's']
 
 # sanitise HTML using an allow list
 def allowlist_html(html: str, a_target='_blank') -> str:
     if html is None or html == '':
         return ''
-    allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre',
-                    'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small', 'sub', 'sup',
-                    's']
+
     # Parse the HTML using BeautifulSoup
     soup = BeautifulSoup(html, 'html.parser')
 
@@ -266,7 +281,9 @@ def allowlist_html(html: str, a_target='_blank') -> str:
         for t in re_url.split(tag.string):
             if re_url.match(t):
                 # Avoid picking up trailing punctuation for raw URLs in text
-                href = t[:-1] if t[-1] in ['.', ',', ')', '!', ':', ';', '?'] else t
+                href = t[:-1] if t[-1] in ['.', ',', '!', ':', ';', '?'] else t
+                if not '(' in t:
+                    href = t[:-1] if t[-1] == ')' else t
                 a = soup.new_tag("a", href=href)
                 a.string = href
                 tags.append(a)
@@ -318,10 +335,6 @@ def allowlist_html(html: str, a_target='_blank') -> str:
 
     clean_html = str(soup)
 
-    # avoid wrapping anchors around existing anchors (e.g. if raw URL already wrapped by remote PieFed instance)
-    re_double_anchor = re.compile(r'<a href=".*?" rel="nofollow ugc" target="_blank">(<a href=".*?" rel="nofollow ugc" target="_blank">.*?<\/a>)<\/a>')
-    clean_html = re_double_anchor.sub(r'\1', clean_html)
-
     # avoid returning empty anchors
     re_empty_anchor = re.compile(r'<a href="(.*?)" rel="nofollow ugc" target="_blank"><\/a>')
     clean_html = re_empty_anchor.sub(r'<a href="\1" rel="nofollow ugc" target="_blank">\1</a>', clean_html)
@@ -361,20 +374,88 @@ def allowlist_html(html: str, a_target='_blank') -> str:
     return clean_html
 
 
+def escape_non_html_angle_brackets(text: str) -> str:
+    # Step 1: Extract inline and block code, replacing with placeholders
+    code_snippets = []
+
+    def store_code(match):
+        code_snippets.append(match.group(0))
+        return f"__CODE_PLACEHOLDER_{len(code_snippets) - 1}__"
+
+    # Fenced code blocks (```...```)
+    text = re.sub(r'```[\s\S]*?```', store_code, text)
+    # Inline code (`...`)
+    text = re.sub(r'`[^`\n]+`', store_code, text)
+
+    # Step 2: Escape <...> unless they look like valid HTML tags
+    def escape_tag(match):
+        tag_content = match.group(1).strip().lower()
+        tag_name = re.split(r'\s|/', tag_content)[0]
+        if tag_name in allowed_tags:
+            return match.group(0)
+        else:
+            return f"&lt;{match.group(1)}&gt;"
+
+    text = re.sub(r'<([^<>]+?)>', escape_tag, text)
+
+    # Step 3: Restore code blocks
+    for i, code in enumerate(code_snippets):
+        text = text.replace(f"__CODE_PLACEHOLDER_{i}__", code)
+
+    return text
+
+
 # use this for Markdown irrespective of origin, as it can deal with both soft break newlines ('\n' used by PieFed) and hard break newlines ('  \n' or ' \\n')
 # ' \\n' will create <br /><br /> instead of just <br />, but hopefully that's acceptable.
 def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
     # Lemmyの改行の仕方と揃える
     # on_newlineをFalseにして、スペース2つを見つけたらバックスラッシュを入れてあげる
-    re_breaks = re.compile(r'(\S)  ((\r?\n)|(\r\n?))')
-    markdown_text = re_breaks.sub(r'\1\\\2', markdown_text)
+    markdown_text = convert_soft_breaks(markdown_text)
     if markdown_text:
-        raw_html = markdown2.markdown(markdown_text,
-                    extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True, 'breaks': {'on_newline': False, 'on_backslash': True}, 'footnotes': True})
+
+        # Escape <...> if it’s not a real HTML tag
+        markdown_text = escape_non_html_angle_brackets(markdown_text)   # To handle situations like https://ani.social/comment/9666667
+
+        try:
+            raw_html = markdown2.markdown(markdown_text,
+                        extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True,
+                                'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True})
+        except TypeError:
+            # weird markdown, like https://mander.xyz/u/tty1 and https://feddit.uk/comment/16076443,
+            # causes "markdown2.Markdown._color_with_pygments() argument after ** must be a mapping, not bool" error, so try again without fenced-code-blocks extra
+            try:
+                raw_html = markdown2.markdown(markdown_text,
+                            extras={'middle-word-em': False, 'tables': True, 'strike': True,
+                                    'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True})
+            except TypeError:
+                raw_html = ''
         return allowlist_html(raw_html, a_target='_blank' if anchors_new_tab else '')
     else:
         return ''
 
+def convert_soft_breaks(text: str) -> str:
+    # スペース2個＋改行を見つける
+    pattern = re.compile(r'(\S)  (\r?\n)')
+    lines = text.splitlines(keepends=True)
+
+    def replacer(match):
+        start = match.start()
+        line_idx = 0
+        total_len = 0
+        for i, line in enumerate(lines):
+            total_len += len(line)
+            if total_len > start:
+                line_idx = i
+                break
+
+        # 次の行が空白行または空なら改行を入れない
+        if line_idx + 1 < len(lines):
+            next_line = lines[line_idx + 1]
+            if next_line.strip() == '':
+                return match.group(1) + match.group(2)  # 改行のみ
+        return match.group(1) + '<br>' + match.group(2)
+
+    return pattern.sub(replacer, text)
 
 # this function lets local users use the more intuitive soft-breaks for newlines, but actually stores the Markdown in Lemmy-compatible format
 # Reasons for this:
@@ -505,6 +586,17 @@ def domain_from_url(url: str, create=True) -> Domain:
         return None
 
 
+def domain_from_email(email: str) -> str:
+    if email is None or email.strip() == '':
+        return ''
+    else:
+        if '@' in email:
+            parts = email.split('@')
+            return parts[-1]
+        else:
+            return ''
+
+
 def shorten_string(input_str, max_length=50):
     if input_str:
         if len(input_str) <= max_length:
@@ -520,6 +612,22 @@ def shorten_url(input: str, max_length=20):
         return shorten_string(input.replace('https://', '').replace('http://', ''))
     else:
         ''
+
+
+def remove_images(html) -> str:
+    # Parse the HTML content
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Remove all <img> tags
+    for img in soup.find_all('img'):
+        img.decompose()
+
+    # Remove all <video> tags
+    for video in soup.find_all('video'):
+        video.decompose()
+
+    # Return the modified HTML
+    return str(soup)
 
 
 # the number of digits in a number. e.g. 1000 would be 4
@@ -550,32 +658,49 @@ def community_membership(user: User, community: Community) -> int:
     return user.subscribed(community.id)
 
 
+@cache.memoize(timeout=10)
+def feed_membership(user: User, feed: Feed) -> int:
+    if feed is None:
+        return False
+    return feed.subscribed(user.id)
+
+
 @cache.memoize(timeout=86400)
 def communities_banned_from(user_id: int) -> List[int]:
+    if user_id == 0:
+        return []
     community_bans = CommunityBan.query.filter(CommunityBan.user_id == user_id).all()
     return [cb.community_id for cb in community_bans]
 
 
 @cache.memoize(timeout=86400)
 def blocked_domains(user_id) -> List[int]:
+    if user_id == 0:
+        return []
     blocks = DomainBlock.query.filter_by(user_id=user_id)
     return [block.domain_id for block in blocks]
 
 
 @cache.memoize(timeout=86400)
 def blocked_communities(user_id) -> List[int]:
+    if user_id == 0:
+        return []
     blocks = CommunityBlock.query.filter_by(user_id=user_id)
     return [block.community_id for block in blocks]
 
 
 @cache.memoize(timeout=86400)
 def blocked_instances(user_id) -> List[int]:
+    if user_id == 0:
+        return []
     blocks = InstanceBlock.query.filter_by(user_id=user_id)
     return [block.instance_id for block in blocks]
 
 
 @cache.memoize(timeout=86400)
 def blocked_users(user_id) -> List[int]:
+    if user_id == 0:
+        return []
     blocks = UserBlock.query.filter_by(blocker_id=user_id)
     return [block.blocked_id for block in blocks]
 
@@ -669,6 +794,17 @@ def permission_required(permission):
     return decorator
 
 
+def debug_mode_only(func):
+    @wraps(func)
+    def decorated_function(*args, **kwargs):
+        if current_app.debug:
+            return func(*args, **kwargs)
+        else:
+            return abort(403, description="Not available in production mode. Set the FLASK_DEBUG environment variable to 1.")
+
+    return decorated_function
+
+
 # sends the user back to where they came from
 def back(default_url):
     # Get the referrer from the request headers
@@ -720,6 +856,34 @@ def instance_banned(domain: str) -> bool:   # see also activitypub.util.instance
     regex_patterns = [re.compile(f"^{cond.domain.replace('*', '[a-zA-Z0-9]')}$") for cond in
                       BannedInstances.query.filter(BannedInstances.domain.like('%*%')).all()]
     return any(pattern.match(domain) for pattern in regex_patterns)
+
+
+@cache.memoize(timeout=150)
+def instance_online(domain: str) -> bool:
+    if domain is None or domain == '':
+        return False
+    domain = domain.lower().strip()
+    if 'https://' in domain or 'http://' in domain:
+        domain = urlparse(domain).hostname
+    instance = Instance.query.filter_by(domain=domain).first()
+    if instance is not None:
+        return instance.online()
+    else:
+        return False
+
+
+@cache.memoize(timeout=150)
+def instance_gone_forever(domain: str) -> bool:
+    if domain is None or domain == '':
+        return False
+    domain = domain.lower().strip()
+    if 'https://' in domain or 'http://' in domain:
+        domain = urlparse(domain).hostname
+    instance = Instance.query.filter_by(domain=domain).first()
+    if instance is not None:
+        return instance.gone_forever
+    else:
+        return True
 
 
 def user_cookie_banned() -> bool:
@@ -967,6 +1131,28 @@ def menu_topics():
     return Topic.query.filter(Topic.parent_id == None).order_by(Topic.name).all()
 
 
+@cache.memoize(timeout=3000)
+def menu_instance_feeds():
+    return Feed.query.filter(Feed.parent_feed_id == None).filter(Feed.is_instance_feed == True).order_by(Feed.name).all()
+
+
+# @cache.memoize(timeout=3000)
+def menu_my_feeds(user_id):
+    return Feed.query.filter(Feed.parent_feed_id == None).filter(Feed.user_id == user_id).order_by(Feed.name).all()
+
+
+@cache.memoize(timeout=3000)
+def menu_subscribed_feeds(user_id):
+    return Feed.query.join(FeedMember, Feed.id == FeedMember.feed_id).filter(FeedMember.user_id == user_id).filter_by(is_owner=False).all()
+
+
+# @cache.memoize(timeout=3000)
+def subscribed_feeds(user_id: int) -> List[int]:
+    if user_id is None or user_id == 0:
+        return []
+    return [feed.id for feed in Feed.query.join(FeedMember, Feed.id == FeedMember.feed_id).filter(FeedMember.user_id == user_id)]
+
+
 @cache.memoize(timeout=300)
 def community_moderators(community_id):
     return CommunityMember.query.filter((CommunityMember.community_id == community_id) &
@@ -985,9 +1171,13 @@ def finalize_user_setup(user):
         private_key, public_key = RsaKeys.generate_keypair()
         user.private_key = private_key
         user.public_key = public_key
-    user.ap_profile_id = f"https://{current_app.config['SERVER_NAME']}/u/{user.user_name}".lower()
-    user.ap_public_url = f"https://{current_app.config['SERVER_NAME']}/u/{user.user_name}"
-    user.ap_inbox_url = f"https://{current_app.config['SERVER_NAME']}/u/{user.user_name.lower()}/inbox"
+    
+    # Only set AP profile IDs if they haven't been set already
+    if user.ap_profile_id is None:
+        user.ap_profile_id = f"https://{current_app.config['SERVER_NAME']}/u/{user.user_name}".lower()
+        user.ap_public_url = f"https://{current_app.config['SERVER_NAME']}/u/{user.user_name}"
+        user.ap_inbox_url = f"https://{current_app.config['SERVER_NAME']}/u/{user.user_name.lower()}/inbox"
+    
     db.session.commit()
 
 
@@ -1011,13 +1201,42 @@ def topic_tree() -> List:
     return [topic for topic in topics_dict.values() if topic['topic'].parent_id is None]
 
 
+# feeds, in a tree
+def feed_tree(user_id) -> List[dict]:
+    feeds = Feed.query.filter(Feed.user_id == user_id).order_by(Feed.name)
+
+    feeds_dict = {feed.id: {'feed': feed, 'children': []} for feed in feeds.all()}
+
+    for feed in feeds:
+        if feed.parent_feed_id is not None:
+            parent_comment = feeds_dict.get(feed.parent_feed_id)
+            if parent_comment:
+                parent_comment['children'].append(feeds_dict[feed.id])
+
+    return [feed for feed in feeds_dict.values() if feed['feed'].parent_feed_id is None]
+
+
+def feed_tree_public() -> List[dict]:
+    feeds = Feed.query.filter(Feed.public == True).order_by(Feed.title)
+
+    feeds_dict = {feed.id: {'feed': feed, 'children': []} for feed in feeds.all()}
+
+    for feed in feeds:
+        if feed.parent_feed_id is not None:
+            parent_comment = feeds_dict.get(feed.parent_feed_id)
+            if parent_comment:
+                parent_comment['children'].append(feeds_dict[feed.id])
+
+    return [feed for feed in feeds_dict.values() if feed['feed'].parent_feed_id is None]
+
+
 def opengraph_parse(url):
     if '?' in url:
         url = url.split('?')
         url = url[0]
     try:
         return parse_page(url)
-    except Exception as ex:
+    except Exception:
         return None
 
 
@@ -1031,6 +1250,9 @@ def url_to_thumbnail_file(filename) -> File:
         content_type = response.headers.get('content-type')
         if content_type and content_type.startswith('image'):
             # Generate file extension from mime type
+            if ';' in content_type:
+                content_type_parts = content_type.split(';')
+                content_type = content_type_parts[0]
             content_type_parts = content_type.split('/')
             if content_type_parts:
                 file_extension = '.' + content_type_parts[-1]
@@ -1149,6 +1371,7 @@ def sha256_digest(input_string):
     return sha256_hash.hexdigest()
 
 
+# still used to hint to a local user that a post to a URL has already been submitted
 def remove_tracking_from_link(url):
     parsed_url = urlparse(url)
 
@@ -1172,6 +1395,61 @@ def remove_tracking_from_link(url):
         return cleaned_url
     else:
         return url
+
+
+# Fixes URLs so we're more likely to get a thumbnail from youtube, and more posts from streaming sites are embedded
+# Also duplicates link tracking removal from the function above.
+def fixup_url(url):
+    thumbnail_url = embed_url = url
+    parsed_url = urlparse(url)
+
+    # fixup embed_url for peertube videos shared outside of the channel
+    if len(url) > 25 and url[-25:][:3] == '/w/':
+        peertube_domains = db.session.execute(text("SELECT domain FROM instance WHERE software = 'peertube'")).scalars()
+        if parsed_url.netloc in peertube_domains:
+            try:
+                response = get_request(url, headers={'Accept': 'application/activity+json'})
+                if response.status_code == 200:
+                    try:
+                        video_json = response.json()
+                        if 'id' in video_json:
+                            embed_url = video_json['id']
+                        response.close()
+                    except:
+                        response.close()
+            except:
+                pass
+
+    youtube_domains = ['www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtube.com', 'youtu.be']
+
+    if not parsed_url.netloc in youtube_domains:
+        return thumbnail_url, embed_url
+    else:
+        video_id = timestamp = None
+        path = parsed_url.path
+        query_params = parse_qs(parsed_url.query)
+        if path:
+            if path.startswith('/shorts/') and len(path) > 8:
+                video_id = path[8:]
+            elif path == '/watch' and 'v' in query_params:
+                video_id = query_params['v'][0]
+            else:
+                video_id = path[1:]
+        if not video_id:
+            return thumbnail_url, embed_url
+        if 'start' in query_params:
+            timestamp = query_params['start'][0]
+        elif 't' in query_params:
+            timestamp = query_params['t'][0]
+
+        thumbnail_url = 'https://youtu.be/' + video_id
+        embed_url = 'https://www.youtube.com/watch?v=' + video_id
+        if timestamp:
+            timestamp_param = {'start': timestamp}
+            timestamp_query = urlencode(timestamp_param, doseq=True)
+            embed_url += f"&{timestamp_query}"
+
+        return thumbnail_url, embed_url
 
 
 def show_ban_message():
@@ -1266,13 +1544,32 @@ def english_language_id():
     return english.id if english else None
 
 
-def actor_contains_blocked_words(actor):
+def read_language_choices() -> List[tuple]:
+    result = []
+    for language in Language.query.order_by(Language.name).all():
+        result.append((language.id, language.name))
+    return result
+
+
+def actor_contains_blocked_words(actor: str):
     actor = actor.lower().strip()
     blocked_words = get_setting('actor_blocked_words')
     if blocked_words and blocked_words.strip() != '':
         for blocked_word in blocked_words.split('\n'):
             blocked_word = blocked_word.lower().strip()
             if blocked_word in actor:
+                return True
+    return False
+
+
+def actor_profile_contains_blocked_words(user: User) -> bool:
+    if user is None or not isinstance(user, User):
+        return False
+    blocked_words = get_setting('actor_bio_blocked_words')
+    if blocked_words and blocked_words.strip() != '':
+        for blocked_word in blocked_words.split('\n'):
+            blocked_word = blocked_word.lower().strip()
+            if user.about_html and blocked_word in user.about_html.lower():
                 return True
     return False
 
@@ -1299,6 +1596,7 @@ def add_to_modlog_activitypub(action: str, actor: User, community_id: int = None
         action_type = 'admin'
     else:
         action_type = 'mod'
+    reason=shorten_string(reason, 512)
     db.session.add(ModLog(user_id=actor.id, community_id=community_id, type=action_type, action=action,
                           reason=reason, link=link, link_text=link_text, public=get_setting('public_modlog', False)))
     db.session.commit()
@@ -1322,16 +1620,57 @@ def authorise_api_user(auth, return_type=None, id_match=None):
             return user.id
 
 
-@cache.memoize(timeout=86400)
-def community_ids_from_instances(instance_ids) -> List[int]:
-    communities = Community.query.join(Instance, Instance.id == Community.instance_id).filter(Instance.id.in_(instance_ids))
-    return [community.id for community in communities]
-
-
 # Set up a new SQLAlchemy session specifically for Celery tasks
 def get_task_session() -> Session:
     # Use the same engine as the main app, but create an independent session
     return Session(bind=db.engine)
+
+
+def get_redis_connection() -> redis.Redis:
+    connection_string = current_app.config['CACHE_REDIS_URL']
+    if connection_string.startswith('unix://'):
+        unix_socket_path, db, password = parse_redis_pipe_string(connection_string)
+        return redis.Redis(unix_socket_path=unix_socket_path, db=db, password=password, decode_responses=True)
+    else:
+        host, port, db, password = parse_redis_socket_string(connection_string)
+        return redis.Redis(host=host, port=port, db=db, password=password, decode_responses=True)
+
+
+def parse_redis_pipe_string(connection_string: str):
+    if connection_string.startswith('unix://'):
+        # Parse the connection string
+        parsed_url = urlparse(connection_string)
+
+        # Extract the path (Unix socket path)
+        unix_socket_path = parsed_url.path
+
+        # Extract query parameters (if any)
+        query_params = parse_qs(parsed_url.query)
+
+        # Extract database number (default to 0 if not provided)
+        db = int(query_params.get('db', [0])[0])
+
+        # Extract password (if provided)
+        password = query_params.get('password', [None])[0]
+
+        return unix_socket_path, db, password
+
+
+def parse_redis_socket_string(connection_string: str):
+    # Parse the connection string
+    parsed_url = urlparse(connection_string)
+
+    # Extract password
+    password = parsed_url.password
+
+    # Extract host and port
+    host = parsed_url.hostname
+    port = parsed_url.port
+
+    # Extract database number (default to 0 if not provided)
+    db_num = int(parsed_url.path.lstrip('/') or 0)
+
+    return host, port, db_num, password
 
 
 def download_defeds(defederation_subscription_id: int, domain: str):
@@ -1380,6 +1719,75 @@ def instance_software(domain: str):
     return instance.software.lower() if instance else ''
 
 
+# ----------------------------------------------------------------------
+# Return contents of referrer with a fallback
+def referrer(default: str=None) -> str:
+    if request.args.get('next'):
+        return request.args.get('next')
+    if request.referrer and current_app.config['SERVER_NAME'] in request.referrer:
+        return request.referrer
+    if default:
+        return default
+    return url_for('main.index')
+
+
+def create_captcha(length=4):
+    code = ""
+    for i in range(length):
+        code += str(random.choice(['2', '3', '4', '5', '6', '8', '9']))
+
+    imagedata = ImageCaptcha().generate(code)
+    image = "data:image/jpeg;base64,"+base64.encodebytes(imagedata.read()).decode()
+
+    audiodata = AudioCaptcha().generate(code)
+    audio = "data:audio/wav;base64,"+base64.encodebytes(audiodata).decode()
+
+    uuid = os.urandom(12).hex()
+
+    redis_client = get_redis_connection()
+    redis_client.set("captcha_" + uuid, code, ex=30*60)
+
+    return {"uuid":uuid, "audio":audio, "image":image}
+
+
+def decode_captcha(uuid: str, code: str):
+    re_uuid = re.compile(r'^([a-fA-F0-9]{24})$')
+    try:
+        if not re.fullmatch(re_uuid, uuid):
+            return False
+    except TypeError:
+        return False
+
+    redis_client = get_redis_connection()
+    saved_code = redis_client.get("captcha_" + uuid)
+    redis_client.delete("captcha_" + uuid)
+    if saved_code is not None:
+        if code.lower() == saved_code.lower():
+            return True
+    return False
+
+
+class CaptchaField(StringField):
+    widget = TextInput()
+
+    def  __call__(self, *args, **kwargs):
+        self.data = ''
+        captcha = create_captcha()
+        input_field_html = super(CaptchaField, self).__call__(*args,**kwargs)
+        return Markup("""<input type="hidden" name="captcha_uuid" value="{uuid}" id="captcha-uuid">
+                         <img src="{image}" class="border mb-2" id="captcha-image">
+                         <audio src="{audio}" type="audio/wav" controls></audio>
+                         <!--<button type="button" id="captcha-refresh-button">Refresh</button>-->
+                         <br />
+                      """).format(uuid=captcha["uuid"], image=captcha["image"], audio=captcha["audio"]) + input_field_html
+
+    def post_validate(self, form, validation_stopped):
+        if decode_captcha(request.form.get('captcha_uuid', None), self.data):
+            pass
+        else:
+            raise ValidationError(_l('Wrong Captcha text.'))
+
+
 user2_cache = {}
 def jaccard_similarity(user1_upvoted: set, user2_id: int):
     if user2_id not in user2_cache:
@@ -1396,3 +1804,175 @@ def jaccard_similarity(user1_upvoted: set, user2_id: int):
         return (intersection / union) * 100
     else:
         return 0
+
+
+def dedupe_post_ids(post_ids) -> List[int]:
+    result = []
+    if post_ids is None or len(post_ids) == 0:
+        return result
+    seen_before = set()
+    for post_id in post_ids:
+        if post_id[1]:
+            seen_before.update(post_id[1])
+        if post_id[0] not in seen_before:
+            result.append(post_id[0])
+    return result
+
+
+def paginate_post_ids(post_ids, page: int, page_length: int):
+    start = page * page_length
+    end = start + page_length
+    return post_ids[start:end]
+
+
+def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str) -> List[int]:
+    if community_ids is None or len(community_ids) == 0:
+        return []
+    redis_client = None
+    if result_id:
+        redis_client = get_redis_connection()
+        if redis_client.exists(result_id):
+            return json.loads(redis_client.get(result_id))
+
+    if community_ids[0] == -1:  # A special value meaning to get posts from all communities
+        post_id_sql = 'SELECT p.id, p.cross_posts FROM "post" as p\nINNER JOIN "community" as c on p.community_id = c.id\n'
+        post_id_where = ['c.banned is false ']
+        params = {}
+    else:
+        post_id_sql = 'SELECT p.id, p.cross_posts FROM "post" as p\nINNER JOIN "community" as c on p.community_id = c.id\n'
+        post_id_where = ['c.id IN :community_ids AND c.banned is false ']
+        params = {'community_ids': tuple(community_ids)}
+    # filter out nsfw and nsfl if desired
+    if current_user.is_anonymous:
+        post_id_where.append('p.from_bot is false AND p.nsfw is false AND p.nsfl is false AND p.deleted is false ')
+    else:
+        if current_user.ignore_bots == 1:
+            post_id_where.append('p.from_bot is false ')
+        if current_user.hide_nsfl == 1:
+            post_id_where.append('p.nsfl is false ')
+        if current_user.hide_nsfw == 1:
+            post_id_where.append('p.nsfw is false')
+        if current_user.hide_read_posts:
+            post_id_where.append('p.id NOT IN (SELECT read_post_id FROM "read_posts" WHERE user_id = :user_id) ')
+            params['user_id'] = current_user.id
+
+        # Language filter
+        if current_user.read_language_ids and len(current_user.read_language_ids) > 0:
+            post_id_where.append('(p.language_id IN :read_language_ids OR p.language_id is null) ')
+            params['read_language_ids'] = tuple(current_user.read_language_ids)
+
+        post_id_where.append('p.deleted is false ')
+
+        # filter blocked domains and instances
+        domains_ids = blocked_domains(current_user.id)
+        if domains_ids:
+            post_id_where.append('(p.domain_id NOT IN :domain_ids OR p.domain_id is null) ')
+            params['domain_ids'] = tuple(domains_ids)
+        instance_ids = blocked_instances(current_user.id)
+        if instance_ids:
+            post_id_where.append('(p.instance_id NOT IN :instance_ids OR p.instance_id is null) ')
+            params['instance_ids'] = tuple(instance_ids)
+        blocked_community_ids = blocked_communities(current_user.id)
+        if blocked_community_ids:
+            post_id_where.append('p.community_id NOT IN :blocked_community_ids ')
+            params['blocked_community_ids'] = tuple(blocked_community_ids)
+        # filter blocked users
+        blocked_accounts = blocked_users(current_user.id)
+        if blocked_accounts:
+            post_id_where.append('p.user_id NOT IN :blocked_accounts ')
+            params['blocked_accounts'] = tuple(blocked_accounts)
+        # filter communities banned from
+        banned_from = communities_banned_from(current_user.id)
+        if banned_from:
+            post_id_where.append('p.community_id NOT IN :banned_from ')
+            params['banned_from'] = tuple(banned_from)
+    # sorting
+    post_id_sort = ''
+    if sort == '' or sort == 'hot':
+        post_id_sort = 'ORDER BY p.ranking DESC, p.posted_at DESC'
+    elif sort == 'scaled':
+        post_id_sort = 'ORDER BY p.ranking_scaled DESC, p.ranking DESC, p.posted_at DESC'
+        post_id_where.append('p.ranking_scaled is not null ')
+    elif sort.startswith('top'):
+        post_id_where.append('p.posted_at > :top_cutoff ')
+        post_id_sort = 'ORDER BY p.up_votes - p.down_votes DESC'
+        if sort == 'top_1h':
+            params['top_cutoff'] = utcnow() - timedelta(hours=1)
+        elif sort == 'top_6h':
+            params['top_cutoff'] = utcnow() - timedelta(hours=6)
+        elif sort == 'top_12h':
+            params['top_cutoff'] = utcnow() - timedelta(hours=12)
+        elif sort == 'top':
+            params['top_cutoff'] = utcnow() - timedelta(hours=24)
+        elif sort == 'top_1w':
+            params['top_cutoff'] = utcnow() - timedelta(days=7)
+        elif sort == 'top_1m':
+            params['top_cutoff'] = utcnow() - timedelta(days=28)
+        else:
+            params['top_cutoff'] = utcnow() - timedelta(days=1)
+    elif sort == 'new':
+        post_id_sort = 'ORDER BY p.posted_at DESC'
+    elif sort == 'active':
+        post_id_sort = 'ORDER BY p.last_active DESC'
+    final_post_id_sql = f"{post_id_sql} WHERE {' AND '.join(post_id_where)}\n{post_id_sort}\nLIMIT 1000"
+    post_ids = db.session.execute(text(final_post_id_sql), params).all()
+    post_ids = dedupe_post_ids(post_ids)
+
+    if current_user.is_authenticated:
+        if redis_client is None:
+            redis_client = get_redis_connection()
+        redis_client.set(result_id, json.dumps(post_ids), ex=86400)    # 86400 is 1 day
+    return post_ids
+
+
+def post_ids_to_models(post_ids: List[int], sort: str):
+    posts = Post.query.filter(Post.id.in_([p for p in post_ids]))
+    # Final sorting
+    if sort == '' or sort == 'hot':
+        posts = posts.order_by(desc(Post.ranking)).order_by(desc(Post.posted_at))
+    elif sort == 'scaled':
+        posts = posts.order_by(desc(Post.ranking_scaled)).order_by(desc(Post.ranking)).order_by(desc(Post.posted_at))
+    elif sort.startswith('top'):
+        posts = posts.order_by(desc(Post.up_votes - Post.down_votes))
+    elif sort == 'new':
+        posts = posts.order_by(desc(Post.posted_at))
+    elif sort == 'active':
+        posts = posts.order_by(desc(Post.last_active))
+    return posts
+
+
+def store_files_in_s3():
+    return current_app.config['S3_ACCESS_KEY'] and current_app.config['S3_ACCESS_SECRET'] and current_app.config['S3_ENDPOINT']
+
+
+def move_file_to_s3(file_id, s3):
+    if store_files_in_s3():
+        file: File = File.query.get(file_id)
+        if file:
+            if file.thumbnail_path and not file.thumbnail_path.startswith('http') and file.thumbnail_path.startswith(
+                    'app/static/media'):
+                if os.path.isfile(file.thumbnail_path):
+                    new_path = file.thumbnail_path.replace('app/static/media/', f"")
+                    s3.upload_file(file.thumbnail_path, current_app.config['S3_BUCKET'], new_path)
+                    os.unlink(file.thumbnail_path)
+                    file.thumbnail_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{new_path}"
+                    db.session.commit()
+
+            if file.file_path and not file.file_path.startswith('http') and file.file_path.startswith(
+                    'app/static/media'):
+                if os.path.isfile(file.file_path):
+                    new_path = file.file_path.replace('app/static/media/', f"")
+                    s3.upload_file(file.file_path, current_app.config['S3_BUCKET'], new_path)
+                    os.unlink(file.file_path)
+                    file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{new_path}"
+                    db.session.commit()
+
+            if file.source_url and not file.source_url.startswith('http') and file.source_url.startswith(
+                    'app/static/media'):
+                if os.path.isfile(file.source_url):
+                    new_path = file.source_url.replace('app/static/media/', f"")
+                    s3.upload_file(file.source_url, current_app.config['S3_BUCKET'], new_path)
+                    os.unlink(file.source_url)
+                    file.source_url = f"https://{current_app.config['S3_PUBLIC_URL']}/{new_path}"
+                    db.session.commit()
+
