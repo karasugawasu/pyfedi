@@ -897,6 +897,19 @@ def banned_ip_addresses() -> List[str]:
     return [ip.ip_address for ip in ips]
 
 
+def guess_mime_type(file_path: str) -> str:
+    content_type = mimetypes.guess_type(file_path)
+    if content_type is None:
+        ext = os.path.splitext(file_path)[1].lower().lstrip('.')  # get extension without dot
+        content_type = f'image/{ext}' if ext else 'application/octet-stream'
+    else:
+        if content_type[0] is None:
+            ext = os.path.splitext(file_path)[1].lower().lstrip('.')  # get extension without dot
+            return f'image/{ext}' if ext else 'application/octet-stream'
+        content_type = content_type[0]
+    return content_type
+
+
 def can_downvote(user, community: Community, site=None) -> bool:
     if user is None or community is None or user.banned or user.bot:
         return False
@@ -1942,7 +1955,7 @@ def post_ids_to_models(post_ids: List[int], sort: str):
 
 
 def store_files_in_s3():
-    return current_app.config['S3_ACCESS_KEY'] and current_app.config['S3_ACCESS_SECRET'] and current_app.config['S3_ENDPOINT']
+    return current_app.config['S3_ACCESS_KEY'] != '' and current_app.config['S3_ACCESS_SECRET'] != '' and current_app.config['S3_ENDPOINT'] != ''
 
 
 def move_file_to_s3(file_id, s3):
@@ -1952,8 +1965,9 @@ def move_file_to_s3(file_id, s3):
             if file.thumbnail_path and not file.thumbnail_path.startswith('http') and file.thumbnail_path.startswith(
                     'app/static/media'):
                 if os.path.isfile(file.thumbnail_path):
+                    content_type = guess_mime_type(file.thumbnail_path)
                     new_path = file.thumbnail_path.replace('app/static/media/', f"")
-                    s3.upload_file(file.thumbnail_path, current_app.config['S3_BUCKET'], new_path)
+                    s3.upload_file(file.thumbnail_path, current_app.config['S3_BUCKET'], new_path, ExtraArgs={'ContentType': content_type})
                     os.unlink(file.thumbnail_path)
                     file.thumbnail_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{new_path}"
                     db.session.commit()
@@ -1961,8 +1975,9 @@ def move_file_to_s3(file_id, s3):
             if file.file_path and not file.file_path.startswith('http') and file.file_path.startswith(
                     'app/static/media'):
                 if os.path.isfile(file.file_path):
+                    content_type = guess_mime_type(file.file_path)
                     new_path = file.file_path.replace('app/static/media/', f"")
-                    s3.upload_file(file.file_path, current_app.config['S3_BUCKET'], new_path)
+                    s3.upload_file(file.file_path, current_app.config['S3_BUCKET'], new_path, ExtraArgs={'ContentType': content_type})
                     os.unlink(file.file_path)
                     file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{new_path}"
                     db.session.commit()
@@ -1970,8 +1985,9 @@ def move_file_to_s3(file_id, s3):
             if file.source_url and not file.source_url.startswith('http') and file.source_url.startswith(
                     'app/static/media'):
                 if os.path.isfile(file.source_url):
+                    content_type = guess_mime_type(file.source_url)
                     new_path = file.source_url.replace('app/static/media/', f"")
-                    s3.upload_file(file.source_url, current_app.config['S3_BUCKET'], new_path)
+                    s3.upload_file(file.source_url, current_app.config['S3_BUCKET'], new_path, ExtraArgs={'ContentType': content_type})
                     os.unlink(file.source_url)
                     file.source_url = f"https://{current_app.config['S3_PUBLIC_URL']}/{new_path}"
                     db.session.commit()

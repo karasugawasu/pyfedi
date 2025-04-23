@@ -329,7 +329,7 @@ class File(db.Model):
         purge_from_cache = []
         s3_files_to_delete = []
         if self.file_path:
-            if self.file_path.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}'):
+            if self.file_path.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}') and _store_files_in_s3():
                 s3_path = self.file_path.replace(f'https://{current_app.config["S3_PUBLIC_URL"]}/', '')
                 s3_files_to_delete.append(s3_path)
                 purge_from_cache.append(self.file_path)
@@ -341,7 +341,7 @@ class File(db.Model):
                 purge_from_cache.append(self.file_path.replace('app/', f"https://{current_app.config['SERVER_NAME']}/"))
 
         if self.thumbnail_path:
-            if self.thumbnail_path.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}'):
+            if self.thumbnail_path.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}') and _store_files_in_s3():
                 s3_path = self.thumbnail_path.replace(f'https://{current_app.config["S3_PUBLIC_URL"]}/', '')
                 s3_files_to_delete.append(s3_path)
                 purge_from_cache.append(self.thumbnail_path)
@@ -352,7 +352,7 @@ class File(db.Model):
                     ...
                 purge_from_cache.append(self.thumbnail_path.replace('app/', f"https://{current_app.config['SERVER_NAME']}/"))
         if self.source_url:
-            if self.source_url.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}'):
+            if self.source_url.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}') and _store_files_in_s3():
                 s3_path = self.source_url.replace(f'https://{current_app.config["S3_PUBLIC_URL"]}/', '')
                 s3_files_to_delete.append(s3_path)
                 purge_from_cache.append(self.source_url)
@@ -794,7 +794,7 @@ class User(UserMixin, db.Model):
     default_filter = db.Column(db.String(25), default='subscribed')
     theme = db.Column(db.String(20), default='')
     referrer = db.Column(db.String(256))
-    markdown_editor = db.Column(db.Boolean, default=False)
+    markdown_editor = db.Column(db.Boolean, default=True)
     interface_language = db.Column(db.String(10))           # a locale that the translation system understands e.g. 'en' or 'en-us'. If empty, use browser default
     language_id = db.Column(db.Integer, db.ForeignKey('language.id'))   # the default choice in the language dropdown when composing posts & comments. NOT UI language
     read_language_ids = db.Column(MutableList.as_mutable(ARRAY(db.Integer)))
@@ -803,6 +803,7 @@ class User(UserMixin, db.Model):
     feed_auto_follow = db.Column(db.Boolean, default=True)  # does the user want to auto-follow feed communities
     feed_auto_leave = db.Column(db.Boolean, default=True)   # does the user want to auto-leave feed communities
     accept_private_messages = db.Column(db.Integer, default=1)         # None or 0 = do not accept, 1 = This instance, 2 = Trusted instances, 3 = All instances
+    google_oauth_id = db.Column(db.String(64), unique=True, index=True)
 
     avatar = db.relationship('File', lazy='joined', foreign_keys=[avatar_id], single_parent=True, cascade="all, delete-orphan")
     cover = db.relationship('File', lazy='joined', foreign_keys=[cover_id], single_parent=True, cascade="all, delete-orphan")
@@ -2853,3 +2854,7 @@ def _large_community_subscribers() -> float:
         result = db.session.execute(text(sql)).scalar()
         cache.set('large_community_subscribers', result, timeout=3600)
     return result
+
+
+def _store_files_in_s3():
+    return current_app.config['S3_ACCESS_KEY'] != '' and current_app.config['S3_ACCESS_SECRET'] != '' and current_app.config['S3_ENDPOINT'] != ''
