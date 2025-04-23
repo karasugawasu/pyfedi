@@ -37,6 +37,7 @@ document.addEventListener("DOMContentLoaded", function () {
     setupPostTypeSwitcher();
     setupSelectNavigation();
     setupUserPopup();
+    preventDoubleFormSubmissions();
 });
 
 
@@ -863,6 +864,17 @@ function setupAddPollChoice() {
     }
 }
 
+function preventDoubleFormSubmissions() {
+    let submitting = false;
+    document.querySelector('form').addEventListener('submit', function (e) {
+      if (submitting) {
+        e.preventDefault();
+      } else {
+        submitting = true;
+      }
+    });
+}
+
 function getCookie(name) {
     var cookies = document.cookie.split(';');
 
@@ -906,3 +918,29 @@ if ('serviceWorker' in navigator) {
     });
   });
 }
+
+
+
+// Add PieFed app button to install PWA
+let deferredPrompt;
+
+window.addEventListener('beforeinstallprompt', function (e) {
+    // Prevent the mini-infobar from appearing on mobile
+    e.preventDefault();
+    // Stash the event so it can be triggered later.
+    deferredPrompt = e;
+    document.getElementById('btn_add_home_screen').style.display = 'inline-block';
+});
+
+document.getElementById('btn_add_home_screen').addEventListener('click', function () {
+    document.getElementById('btn_add_home_screen').style.display = 'none';
+    deferredPrompt.prompt();
+    deferredPrompt.userChoice.then(function (choiceResult) {
+        if (choiceResult.outcome === 'accepted') {
+            console.log('User accepted the A2HS prompt');
+        } else {
+            console.log('User dismissed the A2HS prompt');
+        }
+        deferredPrompt = null;
+    });
+});
