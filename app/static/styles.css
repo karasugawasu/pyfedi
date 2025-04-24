@@ -2448,3 +2448,7 @@ body.compact-max .post_teaser .post_utilities_bar .voting_buttons_new .upvote_bu
 :is(.post_body, .wiki_page) table tbody + tbody {
   border-top: 2px solid var(--bs-dark);
 }
+
+.nav-tabs .nav-link {
+  word-break: keep-all;
+}
