@@ -759,17 +759,19 @@ def register(app):
             all_communities = []
             all_sfw_communities = []
             for c in community_json:
-                # skip if the domain is banned
-                if c['baseurl'] in banned_urls:
-                    continue
+                # 自分のインスタンスはスキップから除外
+                if c['baseurl'] != 'lm.korako.me':
+                    # skip if the domain is banned
+                    if c['baseurl'] in banned_urls:
+                        continue
 
-                # sort out any that have less than 50 posts
-                elif c['counts']['posts'] < 50:
-                    continue
+                    # sort out any that have less than 50 posts
+                    elif c['counts']['posts'] < 50:
+                        continue
 
-                # sort out any that do not have greater than 10 active users over the past week
-                elif c['counts']['users_active_week'] < 10:
-                    continue
+                    # sort out any that do not have greater than 10 active users over the past week
+                    elif c['counts']['users_active_week'] < 10:
+                        continue
 
                 # sort out the 'seven things you can't say on tv' names (cursewords), plus some
                 # "low effort" communities
