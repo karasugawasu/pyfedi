@@ -187,11 +187,13 @@ def feed_edit(feed_id: int):
             file = save_icon_file(icon_file, directory='feeds')
             if file:
                 feed_to_edit.icon = file
+            cache.delete_memoized(Feed.icon_image, feed_to_edit)
         banner_file = request.files['banner_file']
         if banner_file and banner_file.filename != '':
             file = save_banner_file(banner_file, directory='feeds')
             if file:
                 feed_to_edit.image = file
+            cache.delete_memoized(Feed.header_image, feed_to_edit)
         if g.site.enable_nsfw:
             feed_to_edit.nsfw = edit_feed_form.nsfw.data
         if g.site.enable_nsfl:
@@ -665,25 +667,24 @@ def show_feed(feed):
     
     breadcrumbs = []
     existing_url = '/f'
-    # check the path to see if this is a sub feed of some other feed
-    if '/' in feed.path():
-        feed_url_parts = feed.path().split('/')
-        last_feed_machine_name = feed_url_parts[-1]
-        for url_part in feed_url_parts:
-            breadcrumb_feed = Feed.query.filter(Feed.machine_name == url_part.strip().lower()).first()
-            if breadcrumb_feed:
-                breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
-                breadcrumb.text = breadcrumb_feed.title
-                breadcrumb.url = f"{existing_url}/{breadcrumb_feed.machine_name}" if breadcrumb_feed.machine_name != last_feed_machine_name else ''
-                breadcrumbs.append(breadcrumb)
-                existing_url = breadcrumb.url
-            else:
-                abort(404)
-    else:
+
+    parent_id = feed.parent_feed_id
+    parents = []
+    while parent_id:
+        parent_feed = Feed.query.get(parent_id)
+        parents.append(parent_feed)
+        parent_id = parent_feed.parent_feed_id
+
+    for parent_feed in reversed(parents):
         breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
-        breadcrumb.text = feed.title
-        breadcrumb.url = f"{existing_url}/{feed.machine_name}"
+        breadcrumb.text = parent_feed.title
+        breadcrumb.url = f'{existing_url}/{parent_feed.machine_name}'
         breadcrumbs.append(breadcrumb)
+
+    breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
+    breadcrumb.text = feed.title
+    breadcrumb.url = ""
+    breadcrumbs.append(breadcrumb)
 
     current_feed = feed
 

@@ -189,10 +189,7 @@ def post_to_page(post: Post):
 
 
 def post_replies_for_ap(post_id: int) -> List[dict]:
-    replies = PostReply.query.\
-        filter_by(post_id=post_id, deleted=False).\
-        order_by(desc(PostReply.posted_at)).\
-        limit(2000)
+    replies = PostReply.query.filter_by(post_id=post_id, deleted=False).order_by(PostReply.posted_at).limit(2000)
     return [comment_model_to_json(reply) for reply in replies]
 
 
@@ -1850,7 +1847,25 @@ def notify_about_post_task(post_id):
             user = User.query.get(notify_id)
             user.unread_notifications += 1
             db.session.commit()
-            notifications_sent_to.add(notify_id)    
+            notifications_sent_to.add(notify_id)
+
+
+    # NOTIF_FEED
+    # Get all the feeds that the post's community is in
+    community_feeds = Feed.query.join(FeedItem, FeedItem.feed_id == Feed.id).filter(FeedItem.community_id == post.community_id).all()
+
+    for feed in community_feeds:
+        feed_send_notifs_to = notification_subscribers(feed.id, NOTIF_FEED)
+        for notify_id in feed_send_notifs_to:
+            if notify_id != post.user_id and notify_id not in notifications_sent_to:
+                new_notification = Notification(title=shorten_string(post.title, 50), url=f"/post/{post.id}",
+                                                user_id=notify_id, author_id=post.user_id,
+                                                notif_type=NOTIF_FEED)
+                db.session.add(new_notification)
+                user = User.query.get(notify_id)
+                user.unread_notifications += 1
+                db.session.commit()
+                notifications_sent_to.add(notify_id)
 
 
 def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: PostReply):
