@@ -14,14 +14,15 @@ from app.activitypub.signature import HttpSignature, post_request, default_conte
 from app.activitypub.util import notify_about_post_reply, update_post_from_activity
 from app.community.util import send_to_remote_instance
 from app.inoculation import inoculation
-from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm
+from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm, ConfirmationForm, \
+    ConfirmationMultiDeleteForm
 from app.community.forms import CreateLinkForm, CreateImageForm, CreateDiscussionForm, CreateVideoForm, CreatePollForm, EditImageForm
 from app.constants import NOTIF_REPORT
 from app.post.util import post_replies, get_comment_branch, tags_to_string, url_needs_archive, \
     generate_archive_link, body_has_no_archive_link
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, POST_TYPE_LINK, \
     POST_TYPE_IMAGE, \
-    POST_TYPE_ARTICLE, POST_TYPE_VIDEO, NOTIF_REPLY, NOTIF_POST, POST_TYPE_POLL, SRC_WEB
+    POST_TYPE_ARTICLE, POST_TYPE_VIDEO, NOTIF_REPLY, NOTIF_POST, POST_TYPE_POLL, SRC_WEB, SRC_API
 from app.models import Post, PostReply, \
     PostReplyVote, PostVote, Notification, utcnow, UserBlock, DomainBlock, Report, Site, Community, \
     Topic, User, Instance, NotificationSubscription, UserFollower, Poll, PollChoice, PollChoiceVote, PostBookmark, \
@@ -38,7 +39,8 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     permission_required, blocked_users, get_request, is_local_image_url, is_video_url, can_upvote, can_downvote, \
     menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, referrer, can_create_post_reply, communities_banned_from
 from app.post.util import post_type_to_form_url_type
-from app.shared.reply import make_reply, edit_reply, bookmark_reply, remove_bookmark_reply, subscribe_reply
+from app.shared.reply import make_reply, edit_reply, bookmark_reply, remove_bookmark_reply, subscribe_reply, \
+    delete_reply, mod_remove_reply
 from app.shared.post import edit_post, sticky_post, lock_post, bookmark_post, remove_bookmark_post, subscribe_post
 from app.shared.site import block_remote_instance
 
@@ -939,9 +941,15 @@ def post_delete(post_id: int):
     post = Post.query.get_or_404(post_id)
     community = post.community
     if post.user_id == current_user.id or community.is_moderator() or current_user.is_admin():
-        post_delete_post(community, post, current_user.id)
-    return redirect(url_for('activitypub.community_profile', actor=community.ap_id if community.ap_id is not None else community.name))
-
+        form = ConfirmationForm()
+        if form.validate_on_submit():
+            post_delete_post(community, post, current_user.id)
+            return redirect(request.form.get('referrer'))
+        else:
+            form.referrer.data = referrer(url_for('activitypub.community_profile', actor=community.ap_id if community.ap_id is not None else community.name))
+            return render_template('generic_form.html', title=_('Are you sure you want to delete the post "%(post_title)s"?',
+                                                                post_title=post.title),
+                                   form=form)
 
 def post_delete_post(community: Community, post: Post, user_id: int, federate_all_communities=True):
     user: User = User.query.get(user_id)
@@ -1451,63 +1459,43 @@ def post_reply_delete(post_id: int, comment_id: int):
     post = Post.query.get_or_404(post_id)
     post_reply = PostReply.query.get_or_404(comment_id)
     community = post.community
-    if post_reply.user_id == current_user.id or community.is_moderator() or current_user.is_admin():
-        post_reply.deleted = True
-        post_reply.deleted_by = current_user.id
-        g.site.last_active = community.last_active = utcnow()
-        if not post_reply.author.bot:
-            post.reply_count -= 1
-        post_reply.author.post_reply_count -= 1
-        if post_reply.path:
-            db.session.execute(text('update post_reply set child_count = child_count - 1 where id in :parents'),
-                               {'parents': tuple(post_reply.path[:-1])})
-        db.session.commit()
-        flash(_('Comment deleted.'))
-        # federate delete
-        if not post.community.local_only:
-            delete_json = {
-                'id': f"https://{current_app.config['SERVER_NAME']}/activities/delete/{gibberish(15)}",
-                'type': 'Delete',
-                'actor': current_user.public_url(),
-                'audience': post.community.public_url(),
-                'to': [post.community.public_url(), 'https://www.w3.org/ns/activitystreams#Public'],
-                'published': ap_datetime(utcnow()),
-                'cc': [
-                    current_user.followers_url()
-                ],
-                'object': post_reply.ap_id,
-            }
-            if post_reply.user_id != current_user.id:
-                delete_json['summary'] = 'Deleted by mod'
 
-            if not post.community.is_local():
-                if post_reply.user_id == current_user.id or post.community.is_moderator(current_user):
-                    send_post_request(post.community.ap_inbox_url, delete_json, current_user.private_key,
-                                      current_user.public_url() + '#main-key')
-            else:  # local community - send it to followers on remote instances
-                announce = {
-                    "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
-                    "type": 'Announce',
-                    "to": [
-                        "https://www.w3.org/ns/activitystreams#Public"
-                    ],
-                    "actor": post.community.ap_profile_id,
-                    "cc": [
-                        post.community.ap_followers_url
-                    ],
-                    '@context': default_context(),
-                    'object': delete_json
-                }
+    form = ConfirmationMultiDeleteForm()
 
-                for instance in post.community.following_instances():
-                    if instance.inbox and not current_user.has_blocked_instance(instance.id) and not instance_banned(instance.domain):
-                        send_to_remote_instance(instance.id, post.community.id, announce)
+    if form.validate_on_submit():
+        if form.also_delete_replies.data:
+            num_deleted = 0
+            # Find all the post_replys that have the same IDs in the path. NB the @>
+            child_post_ids = db.session.execute(text('select id from "post_reply" where path @> ARRAY[:parent_path]'),
+                                                {'parent_path': post_reply.path}).scalars()
+            for child_post_id in child_post_ids:
+                if child_post_id != 0:
+                    reply = PostReply.query.get_or_404(child_post_id)
 
-        if post_reply.user_id != current_user.id:
-            add_to_modlog('delete_post_reply', community_id=post.community.id, link_text=f'comment on {shorten_string(post.title)}',
-                          link=f'post/{post.id}#comment_{post_reply.id}')
-
-    return redirect(url_for('activitypub.post_ap', post_id=post.id))
+                    if reply.user_id == current_user.id:
+                        # User is deleting their own reply
+                        delete_reply(reply.id, SRC_WEB, None)
+                    elif post.community.is_moderator() or current_user.is_admin():
+                        # Moderator or admin is deleting the reply
+                        reason = 'Deleted by mod'
+                        mod_remove_reply(reply.id, reason, SRC_WEB, None)
+                    num_deleted += 1
+        else:
+            num_deleted = 0
+            if post_reply.user_id == current_user.id:
+                # User is deleting their own reply
+                delete_reply(post_reply.id, SRC_WEB, None)
+                num_deleted = 1
+            elif community.is_moderator() or current_user.is_admin():
+                # Moderator or admin is deleting the reply
+                reason = 'Deleted by mod'
+                mod_remove_reply(post_reply.id, reason, SRC_WEB, None)
+                num_deleted = 1
+        if num_deleted > 0:
+            flash(_('Deleted %(num_deleted)s comments.', num_deleted=num_deleted))
+        return redirect(url_for('activitypub.post_ap', post_id=post.id, _anchor=f'comment_{comment_id}'))
+    else:
+        return render_template('generic_form.html', title=_('Are you sure you want to delete this comment?'), form=form)
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/restore', methods=['GET', 'POST'])

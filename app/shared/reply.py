@@ -226,8 +226,6 @@ def delete_reply(reply_id, src, auth):
         db.session.execute(text('update post_reply set child_count = child_count - 1 where id in :parents'),
                            {'parents': tuple(reply.path[:-1])})
     db.session.commit()
-    if src == SRC_WEB:
-        flash(_('Comment deleted.'))
 
     task_selector('delete_reply', user_id=user_id, reply_id=reply.id)
 
@@ -332,7 +330,7 @@ def mod_remove_reply(reply_id, reason, src, auth):
         user = current_user
 
     reply = PostReply.query.filter_by(id=reply_id, deleted=False).one()
-    if not reply.community.is_moderator(user) and not reply.community.is_instance_admin(user):
+    if not reply.community.is_moderator(user) and not reply.community.is_instance_admin(user) and not user.is_admin():
         raise Exception('Does not have permission')
 
     reply.deleted = True
@@ -341,7 +339,7 @@ def mod_remove_reply(reply_id, reason, src, auth):
         reply.post.reply_count -= 1
     reply.author.post_reply_count -= 1
     if reply.path:
-        db.session.execute(text('update post_reply set child_count = child_count - 1 where id in (:parents)'),
+        db.session.execute(text('update post_reply set child_count = child_count - 1 where id in :parents'),
                            {'parents': tuple(reply.path[:-1])})
     db.session.commit()
     if src == SRC_WEB:

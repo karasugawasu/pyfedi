@@ -12,6 +12,7 @@
 * [Keeping your local instance up to date](#keeping-your-local-instance-up-to=date)
 * [Running PieFed in production](#running-piefed-in-production)
 * [Accepting donations through Stripe](#stripe)
+* [Testing and debugging](#testing)
 * [Pre-requisites for Mac OS](#pre-requisites-for-mac-os)
 * [Notes for Windows (WSL2)](#notes-for-windows-wsl2)        
 * [Notes for Pip Package Management](#notes-for-pip-package-management)
@@ -30,7 +31,28 @@ configuration. While it is quicker and easier, it's not to everyone's taste.
 
 ### Hard way: bare metal
 
-Doing things this way will give you the ultimate customization that larger instances need.
+Doing things this way will give you the ultimate customization that larger instances need. You will need to be more careful about
+whether your OS is compatible with what PieFed needs:
+
+#### Software requirements
+
+ - Python 3.9+
+ - PostgreSQL 13+
+ - Redis 6.x
+
+#### Hardware requirements
+
+It really depends on how many communities you will be subscribing to and how many users you have.
+
+Minimum:
+ - 2 CPU cores
+ - 3 GB of RAM
+
+Recommended:
+ - 4 CPU cores
+ - 5+ GB of RAM
+
+PieFed is quite frugal with storage usage but it will grow over time. After 18 months of operation PieFed.social uses 100 GB of space, for example.
 
 <div id="setup-database"></div>
 
@@ -138,9 +160,11 @@ pip install -r requirements.txt
 * `SERVER_NAME` should be the domain of the site/instance. Use `127.0.0.1:5000` during development unless using ngrok. Just use the bare
 domain name, without https:// on the front or a slash on the end.
 * `CACHE_TYPE` can be `FileSystemCache` or `RedisCache`. `FileSystemCache` is fine during development (set `CACHE_DIR` to `/tmp/piefed` or `/dev/shm/piefed`)
-while `RedisCache` **should** be used in production. If using `RedisCache`, set `CACHE_REDIS_URL` to `redis://localhost:6379/1`. Visit https://yourdomain/testredis to check if your redis url is working.
+while `RedisCache` **should** be used in production. If using `RedisCache`, set `CACHE_REDIS_URL` to `redis://localhost:6379/1` or `unix:///var/run/redis/redis.sock?db=1`. Visit https://yourdomain/testredis to check if your redis url is working.
 
-* `CELERY_BROKER_URL` is similar to `CACHE_REDIS_URL` but with a different number on the end: `redis://localhost:6379/0`
+* `CELERY_BROKER_URL` is similar to `CACHE_REDIS_URL` but with a different number on the end: `redis://localhost:6379/0`.
+ If using unix socket, try something like `CELERY_BROKER_URL='redis+socket:///var/run/redis/redis.sock?virtual_host=0'`
+ Make sure to not have a password set for the default user. (
 
 * `MAIL_*` is for sending email using a SMTP server. Leave `MAIL_SERVER` empty to send email using AWS SES instead.
 
@@ -163,7 +187,7 @@ for bounces, not a inbox you also use for other purposes.
 
 ### Development mode
 
-Setting `FLASK_DEBUG=1` in the `.env` file will enable the `<your-site>/dev/tools` page. It will expose some various testing routes as well.
+Setting `FLASK_DEBUG=1` in the `.env` file will enable the `<your-site>/dev/tools` page. It will expose some various testing routes as well. See the [testing section](#testing).
 
 That page can be accessed from the `Admin` navigation drop down, or nav bar as `Dev Tools`. That page has buttons that can create/delete communities and topics. The communities and topics will all begin with "dev_".
 
@@ -550,6 +574,26 @@ Change STRIPE_MONTHLY_SMALL_TEXT and STRIPE_MONTHLY_BIG_TEXT to be the amounts o
 
 To get a WEBHOOK_SIGNING_SECRET you need to set up a webhook to send data to https://yourinstance/stripe_webhook, sending the
 checkout.session.completed and customer.subscription.deleted events.
+
+---
+
+<div id="testing"></div>
+
+## Testing and debugging
+
+### Logs
+
+Check these locations for interesting error messages:
+
+ - logs/pyfedi.log
+ - /var/log/celery/*.log
+
+There are a few urls you can go to which will test things out and report a result or log an error. You need the FLASK_DEBUG environment
+variable set to 1 for these to work.
+
+ - https://yourinstance.tld/test_s3 - tests your S3 config
+ - https://yourinstance.tld/test_email - tests email sending
+ - https://yourinstance.tld/test_redis - tests the connection to redis
 
 ---
 
