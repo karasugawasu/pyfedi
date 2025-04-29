@@ -1431,12 +1431,12 @@ class Post(db.Model):
             post.url = request_json['object']['attachment']['url']
 
         # MicroBlogかつ画像等なしでURLを含む投稿の場合はリンクタイプにする
-		if not post.url:
-			if post.microblog:
-				soup = BeautifulSoup(post.body_html, 'html.parser')
-				first_a_tag = soup.find('a')
-				if first_a_tag and 'class' not in first_a_tag.attrs:
-					post.url = first_a_tag['href']
+        if not post.url:
+            if post.microblog:
+                soup = BeautifulSoup(post.body_html, 'html.parser')
+                first_a_tag = soup.find('a')
+                if first_a_tag and 'class' not in first_a_tag.attrs:
+                    post.url = first_a_tag['href']
 
         if post.url:
             thumbnail_url, embed_url = fixup_url(post.url)
