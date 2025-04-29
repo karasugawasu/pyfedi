@@ -41,6 +41,7 @@ from app.utils import get_request, allowlist_html, get_setting, ap_datetime, mar
 
 from sqlalchemy import or_
 
+from bs4 import BeautifulSoup
 
 def public_key():
     if not os.path.exists('./public.pem'):
@@ -2190,6 +2191,15 @@ def update_post_from_activity(post: Post, request_json: dict):
 
     if 'attachment' in request_json['object'] and isinstance(request_json['object']['attachment'], dict):   # Mastodon / a.gup.pe
         new_url = request_json['object']['attachment']['url']
+
+    # MicroBlogかつ画像等なしでURLを含む投稿の場合はリンクタイプにする
+    if not new_url:
+        if post.microblog:
+            soup = BeautifulSoup(post.body_html, 'html.parser')
+            first_a_tag = soup.find('a')
+            if first_a_tag and 'class' not in first_a_tag.attrs:
+                new_url = first_a_tag['href']
+
     if new_url:
         new_domain = domain_from_url(new_url)
         if new_domain.banned:
