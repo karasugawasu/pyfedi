@@ -27,6 +27,7 @@ from app.constants import SUBSCRIPTION_NONMEMBER, SUBSCRIPTION_MEMBER, SUBSCRIPT
     SUBSCRIPTION_BANNED, SUBSCRIPTION_PENDING, NOTIF_USER, NOTIF_COMMUNITY, NOTIF_TOPIC, NOTIF_POST, NOTIF_REPLY, \
     ROLE_ADMIN, ROLE_STAFF, NOTIF_FEED, NOTIF_DEFAULT, NOTIF_REPORT, NOTIF_MENTION
 
+from bs4 import BeautifulSoup
 
 # datetime.utcnow() is depreciated in Python 3.12 so it will need to be swapped out eventually
 def utcnow():
@@ -1429,6 +1430,14 @@ class Post(db.Model):
             alt_text = None
             post.url = request_json['object']['attachment']['url']
 
+        # MicroBlogかつ画像等なしでURLを含む投稿の場合はリンクタイプにする
+		if not post.url:
+			if post.microblog:
+				soup = BeautifulSoup(post.body_html, 'html.parser')
+				first_a_tag = soup.find('a')
+				if first_a_tag and 'class' not in first_a_tag.attrs:
+					post.url = first_a_tag['href']
+
         if post.url:
             thumbnail_url, embed_url = fixup_url(post.url)
             post.url = embed_url
@@ -1510,7 +1519,7 @@ class Post(db.Model):
             if 'tag' in request_json['object'] and isinstance(request_json['object']['tag'], list):
                 for json_tag in request_json['object']['tag']:
                     if json_tag and json_tag['type'] == 'Hashtag':
-                        if json_tag['name'][1:].lower() != community.name.lower():  # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
+                        if post.microblog or json_tag['name'][1:].lower() != community.name.lower():  # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
                             hashtag = find_hashtag_or_create(json_tag['name'])
                             if hashtag:
                                 post.tags.append(hashtag)
