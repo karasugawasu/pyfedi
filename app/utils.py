@@ -263,7 +263,7 @@ def mime_type_using_head(url):
 
 allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre',
                 'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small', 'sub', 'sup',
-                's']
+                's', 'input']
 
 # sanitise HTML using an allow list
 def allowlist_html(html: str, a_target='_blank') -> str:
@@ -318,7 +318,7 @@ def allowlist_html(html: str, a_target='_blank') -> str:
         else:
             # Filter and sanitize attributes
             for attr in list(tag.attrs):
-                if attr not in ['href', 'src', 'alt', 'class', 'id', 'title']:
+                if attr not in ['href', 'src', 'alt', 'class', 'id', 'title', 'type', 'disabled', 'checked']:
                     del tag[attr]
             # Remove some mastodon guff - spans with class "invisible"
             if tag.name == 'span' and 'class' in tag.attrs and 'invisible' in tag.attrs['class']:
@@ -332,6 +332,10 @@ def allowlist_html(html: str, a_target='_blank') -> str:
                 tag.attrs['loading'] = 'lazy'
             if tag.name == 'table':
                 tag.attrs['class'] = 'table'
+            if tag.name == 'input':
+                # チェックボックス以外は除外
+                if tag.attrs.get('type') != 'checkbox':
+                    tag.extract()
 
     clean_html = str(soup)
 
@@ -419,14 +423,14 @@ def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
         try:
             raw_html = markdown2.markdown(markdown_text,
                         extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True,
-                                'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True})
+                                'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True, 'task_list': True})
         except TypeError:
             # weird markdown, like https://mander.xyz/u/tty1 and https://feddit.uk/comment/16076443,
             # causes "markdown2.Markdown._color_with_pygments() argument after ** must be a mapping, not bool" error, so try again without fenced-code-blocks extra
             try:
                 raw_html = markdown2.markdown(markdown_text,
                             extras={'middle-word-em': False, 'tables': True, 'strike': True,
-                                    'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True})
+                                    'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True, 'task_list': True})
             except TypeError:
                 raw_html = ''
         return allowlist_html(raw_html, a_target='_blank' if anchors_new_tab else '')
