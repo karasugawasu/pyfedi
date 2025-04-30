@@ -2188,6 +2188,25 @@ def update_post_from_activity(post: Post, request_json: dict):
             new_url = request_json['object']['attachment'][0]['url']
             if 'name' in request_json['object']['attachment'][0]:
                 post.title = request_json['object']['attachment'][0]['name']
+        # tagにlinkが含まれてたら上書き
+        if post.microblog:
+            tags = request_json.get('object', {}).get('tag', [])
+            if any(
+                tag and tag.get('type') == 'Hashtag' and 'link' in tag.get('name', '').lower()
+                for tag in tags
+            ):
+                if 'name' in request_json['object']['attachment'][0]:
+                    alt_text = request_json['object']['attachment'][0]['name']
+                post.body_html += f'''
+                <br>
+                <a href="{new_url}" data-caption="">
+                    <img alt="{alt_text}" loading="lazy" src="{new_url}">
+                </a>
+                '''
+                post.body += f'''
+                ![{alt_text}]({new_url})
+                '''
+                new_url = None
 
     if 'attachment' in request_json['object'] and isinstance(request_json['object']['attachment'], dict):   # Mastodon / a.gup.pe
         new_url = request_json['object']['attachment']['url']
