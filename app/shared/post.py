@@ -1,9 +1,10 @@
+import json
 import os
 import mimetypes
 from app import db, cache
 from app.activitypub.util import make_image_sizes, notify_about_post
 from app.constants import *
-from app.community.util import tags_from_string_old, end_poll_date
+from app.community.util import tags_from_string_old, end_poll_date, flair_from_form
 from app.models import File, Notification, NotificationSubscription, Poll, PollChoice, Post, PostBookmark, PostVote, Report, Site, User, utcnow
 from app.shared.tasks import task_selector
 from app.utils import render_template, authorise_api_user, shorten_string, gibberish, ensure_directory_exists, \
@@ -20,10 +21,6 @@ from PIL import Image, ImageOps
 
 from sqlalchemy import text
 
-
-
-# function can be shared between WEB and API (only API calls it for now)
-# post_vote in app/post/routes would just need to do 'return vote_for_post(post_id, vote_direction, SRC_WEB)'
 
 def vote_for_post(post_id: int, vote_direction, src, auth=None):
     if src == SRC_API:
@@ -229,6 +226,9 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
         notify_author = input['notify_author']
         language_id = input['language_id']
         tags = []
+        flair = []
+        scheduled_for = None
+        repeat = None
     else:
         if not user:
             user = current_user
@@ -246,7 +246,12 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
         notify_author = input.notify_author.data
         language_id = input.language_id.data
         tags = tags_from_string_old(input.tags.data)
-
+        if input.flair:
+            flair = flair_from_form(input.flair.data)
+        else:
+            flair = []
+        scheduled_for = input.scheduled_for.data
+        repeat = input.repeat.data
     post.indexable = user.indexable
     post.sticky = False if src == SRC_API else input.sticky.data
     post.nsfw = nsfw
@@ -258,6 +263,11 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
     post.body = piefed_markdown_to_lemmy_markdown(body)
     post.body_html = markdown_to_html(post.body)
     post.type = type
+    post.scheduled_for = scheduled_for
+    post.repeat = repeat
+
+    if post.scheduled_for and post.scheduled_for > utcnow():
+        post.status = POST_STATUS_SCHEDULED
 
     url_changed = False
 
@@ -289,6 +299,7 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
 
         # remove any old tags
         post.tags.clear()
+        post.flair.clear()
 
         post.edited_at = utcnow()
 
@@ -361,12 +372,15 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
             post.domain = domain
             domain.post_count += 1
             already_notified = set()  # often admins and mods are the same people - avoid notifying them twice
+            targets_data = {'post_id': post.id}
             if domain.notify_mods:
                 for community_member in post.community.moderators():
                     if community_member.is_local():
                         notify = Notification(title='Suspicious content', url=post.ap_id, 
                                               user_id=community_member.user_id, author_id=user.id,
-                                              notif_type=NOTIF_REPORT)
+                                              notif_type=NOTIF_REPORT,
+                                              subtype='post_from_suspicious_domain',
+                                              targets=targets_data)
                         db.session.add(notify)
                         already_notified.add(community_member.user_id)
             if domain.notify_admins:
@@ -374,7 +388,9 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
                     if admin.id not in already_notified:
                         notify = Notification(title='Suspicious content', url=post.ap_id, 
                                               user_id=admin.id, author_id=user.id,
-                                              notif_type=NOTIF_REPORT)
+                                              notif_type=NOTIF_REPORT,
+                                              subtype='post_from_suspicious_domain',
+                                              targets=targets_data)
                         db.session.add(notify)
 
         thumbnail_url, embed_url = fixup_url(url)
@@ -434,8 +450,12 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
         if poll.local_only:
             federate = False
 
-    # add tags
+    if post.status < POST_STATUS_PUBLISHED:
+        federate = False
+
+    # add tags & flair
     post.tags = tags
+    post.flair = flair
 
     # Add subscription if necessary
     if notify_author:
@@ -539,12 +559,15 @@ def report_post(post_id, input, src, auth=None):
 
     # Notify moderators
     already_notified = set()
+    targets_data = {'suspect_post_id':post.id,'suspect_user_id':post.user_id,'reporter_id':user_id}
     for mod in post.community.moderators():
         moderator = User.query.get(mod.user_id)
         if moderator and moderator.is_local():
             notification = Notification(user_id=mod.user_id, title=_('A post has been reported'),
                                         url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
-                                        author_id=user_id, notif_type=NOTIF_REPORT)
+                                        author_id=user_id, notif_type=NOTIF_REPORT,
+                                        subtype='post_reported',
+                                        targets=targets_data)
             db.session.add(notification)
             already_notified.add(mod.user_id)
     post.reports += 1
@@ -552,7 +575,9 @@ def report_post(post_id, input, src, auth=None):
     for admin in Site.admins():
         if admin.id not in already_notified:
             notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, 
-                                  author_id=user_id, notif_type=NOTIF_REPORT)
+                                  author_id=user_id, notif_type=NOTIF_REPORT,
+                                  subtype='post_reported',
+                                  targets=targets_data)
             db.session.add(notify)
             admin.unread_notifications += 1
     db.session.commit()

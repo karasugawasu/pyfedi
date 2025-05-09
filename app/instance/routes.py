@@ -6,7 +6,7 @@ from flask_babel import _
 from sqlalchemy import or_, desc
 
 from app import db, cache
-from app.constants import SRC_WEB
+from app.constants import *
 from app.instance import bp
 from app.models import Instance, User, Post, read_posts
 from app.utils import render_template, moderating_communities, joined_communities, menu_topics, blocked_domains, \
@@ -49,12 +49,7 @@ def list_instances():
                            title=title, search=search, filter=filter,
                            next_url=next_url, prev_url=prev_url,
                            low_bandwidth=low_bandwidth,
-                           moderating_communities=moderating_communities(current_user.get_id()),
-                           joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site, menu_instance_feeds=menu_instance_feeds(), 
-                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
-                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
-                           )
+                           site=g.site, )
 
 
 @bp.route('/instance/<instance_domain>', methods=['GET'])
@@ -66,13 +61,8 @@ def instance_overview(instance_domain):
         abort(404)
 
     return render_template('instance/overview.html', instance=instance,
-                           moderating_communities=moderating_communities(current_user.get_id()),
-                           joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site,
+                           site=g.site,
                            title=_('%(instance)s overview', instance=instance.domain),
-                           menu_instance_feeds=menu_instance_feeds(), 
-                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
-                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
@@ -98,13 +88,8 @@ def instance_people(instance_domain):
     prev_url = url_for('instance.instance_people', page=people.prev_num, instance_domain=instance_domain) if people.has_prev and page != 1 else None
 
     return render_template('instance/people.html', people=people, instance=instance, next_url=next_url, prev_url=prev_url,
-                           moderating_communities=moderating_communities(current_user.get_id()),
-                           joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site,
+                           site=g.site,
                            title=_('People from %(instance)s', instance=instance.domain),
-                           menu_instance_feeds=menu_instance_feeds(), 
-                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
-                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
                            )
 
 
@@ -118,10 +103,10 @@ def instance_posts(instance_domain):
         abort(404)
 
     if current_user.is_anonymous:
-        posts = Post.query.filter(Post.instance_id == instance.id, Post.from_bot == False, Post.nsfw == False, Post.nsfl == False, Post.deleted == False)
+        posts = Post.query.filter(Post.instance_id == instance.id, Post.from_bot == False, Post.nsfw == False, Post.nsfl == False, Post.deleted == False, Post.status > POST_STATUS_REVIEWING)
         content_filters = {}
     else:
-        posts = Post.query.filter(Post.instance_id == instance.id, Post.deleted == False)
+        posts = Post.query.filter(Post.instance_id == instance.id, Post.deleted == False, Post.status > POST_STATUS_REVIEWING)
 
         if current_user.ignore_bots == 1:
             posts = posts.filter(Post.from_bot == False)
@@ -187,12 +172,7 @@ def instance_posts(instance_domain):
                            #rss_feed_name=f"Posts on " + g.site.name,
                            title=_("Posts from %(instance)s", instance=instance.domain),
                            content_filters=content_filters,
-                           moderating_communities=moderating_communities(current_user.get_id()),
-                           joined_communities=joined_communities(current_user.get_id()),
-                           menu_topics=menu_topics(), site=g.site,
-                           menu_instance_feeds=menu_instance_feeds(), 
-                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
-                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           site=g.site,
                            )
 
 

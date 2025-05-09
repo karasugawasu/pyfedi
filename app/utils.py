@@ -29,7 +29,6 @@ from app.constants import DOWNVOTE_ACCEPT_ALL, DOWNVOTE_ACCEPT_TRUSTED, DOWNVOTE
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 import os
 from furl import furl
-import boto3
 from flask import current_app, json, redirect, url_for, request, make_response, Response, g, flash, abort
 from flask_babel import _, lazy_gettext as _l
 from flask_login import current_user, logout_user
@@ -40,6 +39,7 @@ from wtforms.widgets import Select, html_params, ListWidget, CheckboxInput, Text
 from wtforms.validators import ValidationError
 from markupsafe import Markup
 from app import db, cache, httpx_client, celery
+from app.constants import *
 import re
 from PIL import Image, ImageOps
 
@@ -48,7 +48,7 @@ from captcha.image import ImageCaptcha
 
 from app.models import Settings, Domain, Instance, BannedInstances, User, Community, DomainBlock, ActivityPubLog, IpBan, \
     Site, Post, PostReply, utcnow, Filter, CommunityMember, InstanceBlock, CommunityBan, Topic, UserBlock, Language, \
-    File, ModLog, CommunityBlock, Feed, FeedMember
+    File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair
 
 
 # Flask's render_template function, with support for themes added
@@ -783,6 +783,16 @@ def validation_required(func):
     return decorated_view
 
 
+def login_required_if_private_instance(func):
+    @wraps(func)
+    def decorated_view(*args, **kwargs):
+        if (g.site.private_instance and current_user.is_authenticated) or g.site.private_instance is False:
+            return func(*args, **kwargs)
+        else:
+            return redirect(url_for('auth.login'))
+    return decorated_view
+
+
 def permission_required(permission):
     def decorator(func):
         @wraps(func)
@@ -807,6 +817,26 @@ def debug_mode_only(func):
             return abort(403, description="Not available in production mode. Set the FLASK_DEBUG environment variable to 1.")
 
     return decorated_function
+
+
+def block_bots(func):
+    @wraps(func)
+    def decorated_function(*args, **kwargs):
+        if not is_bot(request.user_agent.string):
+            return func(*args, **kwargs)
+        else:
+            return abort(403, description="Do not index this.")
+
+    return decorated_function
+
+
+def is_bot(user_agent) -> bool:
+    user_agent = user_agent.lower()
+    if 'bot' in user_agent:
+        return True
+    if 'meta-externalagent' in user_agent:
+        return True
+    return False
 
 
 # sends the user back to where they came from
@@ -1141,6 +1171,13 @@ def joined_communities(user_id):
         filter(CommunityMember.is_moderator == False, CommunityMember.is_owner == False). \
         filter(CommunityMember.is_banned == False). \
         filter(CommunityMember.user_id == user_id).order_by(Community.title).all()
+
+
+def joined_or_modding_communities(user_id):
+    if user_id is None or user_id == 0:
+        return []
+    return db.session.execute(text('SELECT c.id FROM "community" as c INNER JOIN "community_member" as cm on c.id = cm.community_id WHERE c.banned = false AND cm.user_id = :user_id'),
+                              {'user_id': user_id}).scalars().all()
 
 
 @cache.memoize(timeout=3000)
@@ -1556,6 +1593,21 @@ def languages_for_form():
     return used_languages + other_languages
 
 
+def flair_for_form(community_id):
+    result = []
+    for flair in CommunityFlair.query.filter(CommunityFlair.community_id == community_id).order_by(CommunityFlair.flair):
+        result.append((flair.id, flair.flair))
+    return result
+
+
+def find_flair_id(flair: str, community_id: int) -> int | None:
+    flair = CommunityFlair.query.filter(CommunityFlair.community_id == community_id, CommunityFlair.flair == flair.strip()).first()
+    if flair:
+        return flair.id
+    else:
+        return None
+
+
 def english_language_id():
     english = Language.query.filter(Language.code == 'en').first()
     return english.id if english else None
@@ -1861,7 +1913,7 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str) ->
         params = {'community_ids': tuple(community_ids)}
     # filter out nsfw and nsfl if desired
     if current_user.is_anonymous:
-        post_id_where.append('p.from_bot is false AND p.nsfw is false AND p.nsfl is false AND p.deleted is false ')
+        post_id_where.append('p.from_bot is false AND p.nsfw is false AND p.nsfl is false AND p.deleted is false AND p.status > 0 ')
     else:
         if current_user.ignore_bots == 1:
             post_id_where.append('p.from_bot is false ')
@@ -1878,7 +1930,7 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str) ->
             post_id_where.append('(p.language_id IN :read_language_ids OR p.language_id is null) ')
             params['read_language_ids'] = tuple(current_user.read_language_ids)
 
-        post_id_where.append('p.deleted is false ')
+        post_id_where.append('p.deleted is false AND p.status > 0 ')
 
         # filter blocked domains and instances
         domains_ids = blocked_domains(current_user.id)
@@ -1996,3 +2048,42 @@ def move_file_to_s3(file_id, s3):
                     file.source_url = f"https://{current_app.config['S3_PUBLIC_URL']}/{new_path}"
                     db.session.commit()
 
+
+def notif_id_to_string(notif_id) -> str:
+    # -- user level ---
+    if notif_id == NOTIF_USER:
+        return _('User')
+    if notif_id == NOTIF_COMMUNITY:
+        return _('Community')
+    if notif_id == NOTIF_TOPIC:
+        return _('Topic/feed')
+    if notif_id == NOTIF_POST:
+        return _('Comment')
+    if notif_id == NOTIF_REPLY:
+        return _('Comment')
+    if notif_id == NOTIF_FEED:
+        return _('Topic/feed')
+    if notif_id == NOTIF_MENTION:
+        return _('Comment')
+    if notif_id == NOTIF_MESSAGE:
+        return _('Chat')
+    if notif_id == NOTIF_BAN:
+        return _('Admin')
+    if notif_id == NOTIF_UNBAN:
+        return _('Admin')
+    if notif_id == NOTIF_NEW_MOD:
+        return _('Admin')
+
+    # --- mod/admin level ---
+    if notif_id == NOTIF_REPORT:
+        return _('Admin')
+
+    # --- admin level ---
+    if notif_id == NOTIF_REPORT_ESCALATION:
+        return _('Admin')
+    if notif_id == NOTIF_REGISTRATION:
+        return _('Admin')
+
+    # --model/db default--
+    if notif_id == NOTIF_DEFAULT:
+        return _('All')

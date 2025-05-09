@@ -52,9 +52,13 @@ def testredis_get():
 @bp.route('/.well-known/webfinger')
 def webfinger():
     if request.args.get('resource'):
+        feed = False
         query = request.args.get('resource')  # acct:alice@tada.club
         if 'acct:' in query:
             actor = query.split(':')[1].split('@')[0]  # alice
+            if actor.startswith('~'):
+                feed = True
+                actor = actor[1:]
         elif 'https:' in query or 'http:' in query:
             actor = query.split('/')[-1]
         else:
@@ -82,20 +86,27 @@ def webfinger():
             resp.headers.add_header('Access-Control-Allow-Origin', '*')
             return resp
 
-        # look for the User first, then the Community, then the Feed that matches
-        seperator = 'u'
-        type = 'Person'
-        user = User.query.filter(or_(User.user_name == actor.strip(), User.alt_user_name == actor.strip())).filter_by(deleted=False, banned=False, ap_id=None).first()
-        if user is None:
-            community = Community.query.filter_by(name=actor.strip(), ap_id=None).first()
-            seperator = 'c'
-            type = 'Group'
-            if community is None:
-                feed = Feed.query.filter_by(name=actor.strip(), ap_id=None).first()
-                if feed is None:
-                    return ''
-                seperator = 'f'
-                type = 'Feed'
+        if not feed:
+            # look for the User first, then the Community, then the Feed that matches
+            seperator = 'u'
+            type = 'Person'
+            user = User.query.filter(or_(User.user_name == actor.strip(), User.alt_user_name == actor.strip())).filter_by(deleted=False, banned=False, ap_id=None).first()
+            if user is None:
+                community = Community.query.filter_by(name=actor.strip(), ap_id=None).first()
+                seperator = 'c'
+                type = 'Group'
+                if community is None:
+                    feed = Feed.query.filter_by(name=actor.strip(), ap_id=None).first()
+                    if feed is None:
+                        return ''
+                    seperator = 'f'
+                    type = 'Feed'
+        else:
+            feed = Feed.query.filter_by(name=actor.strip(), ap_id=None).first()
+            if feed is None:
+                return ''
+            seperator = 'f'
+            type = 'Feed'
 
         webfinger_data = {
             "subject": f"acct:{actor}@{current_app.config['SERVER_NAME']}",
@@ -439,6 +450,7 @@ def community_profile(actor):
                 },
                 "published": ap_datetime(community.created_at),
                 "updated": ap_datetime(community.last_active),
+                "lemmy:tagsForPosts": community.flair_for_ap()
             }
             if community.description_html:
                 actor_data["summary"] = community.description_html
@@ -1496,9 +1508,9 @@ def community_outbox(actor):
     actor = actor.strip()
     community = Community.query.filter_by(name=actor, banned=False, ap_id=None).first()
     if community is not None:
-        sticky_posts = community.posts.filter(Post.sticky == True, Post.deleted == False).order_by(desc(Post.posted_at)).limit(50).all()
+        sticky_posts = community.posts.filter(Post.sticky == True, Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).limit(50).all()
         remaining_limit = 50 - len(sticky_posts)
-        remaining_posts = community.posts.filter(Post.sticky == False, Post.deleted == False).order_by(desc(Post.posted_at)).limit(remaining_limit).all()
+        remaining_posts = community.posts.filter(Post.sticky == False, Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).limit(remaining_limit).all()
         posts = sticky_posts + remaining_posts
 
         community_data = {
@@ -1851,9 +1863,11 @@ def process_chat(user, store_ap_json, core_activity):
             db.session.commit()
 
             # Notify recipient
+            targets_data = {'conversation_id':existing_conversation.id,'message_id': new_message.id}
             notify = Notification(title=shorten_string('New message from ' + sender.display_name()),
                                   url=f'/chat/{existing_conversation.id}#message_{new_message.id}', user_id=recipient.id,
-                                  author_id=sender.id, notif_type=NOTIF_MESSAGE)
+                                  author_id=sender.id, notif_type=NOTIF_MESSAGE, subtype='chat_message',
+                                  targets=targets_data)
             db.session.add(notify)
             recipient.unread_notifications += 1
             existing_conversation.read = False

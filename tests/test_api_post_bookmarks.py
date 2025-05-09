@@ -1,6 +1,7 @@
 import pytest
 from flask import Flask
 from app import create_app, db
+from app.constants import POST_STATUS_REVIEWING
 from config import Config
 from app.models import User, Post
 from sqlalchemy import text
@@ -34,7 +35,7 @@ def test_api_post_bookmarks(app):
 
         # normal add / remove bookmark
         existing_bookmarks = db.session.execute(text('SELECT post_id FROM "post_bookmark" WHERE user_id = :user_id'), {"user_id": user_id}).scalars()
-        post = Post.query.filter(Post.id.not_in(existing_bookmarks), Post.deleted == False).first()
+        post = Post.query.filter(Post.id.not_in(existing_bookmarks), Post.deleted == False, Post.status > POST_STATUS_REVIEWING).first()
         assert post is not None and hasattr(post, 'id')
 
         data = {"post_id": post.id, "save": True}
@@ -52,7 +53,7 @@ def test_api_post_bookmarks(app):
 
         # add to existing
         existing_bookmarks = db.session.execute(text('SELECT post_id FROM "post_bookmark" WHERE user_id = :user_id'), {"user_id": user_id}).scalars()
-        post = Post.query.filter(Post.id.in_(existing_bookmarks), Post.deleted == False).first()
+        post = Post.query.filter(Post.id.in_(existing_bookmarks), Post.deleted == False, Post.status > POST_STATUS_REVIEWING).first()
         if post:
             data = {"post_id": post.id, "save": True}
             with pytest.raises(Exception) as ex:
