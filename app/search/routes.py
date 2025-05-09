@@ -4,17 +4,20 @@ from flask_babel import _
 from sqlalchemy import or_, desc, text
 
 from app import limiter, db
+from app.constants import POST_STATUS_REVIEWING
 from app.models import Post, Language, Community, Instance, PostReply
 from app.search import bp
 from app.utils import moderating_communities, joined_communities, render_template, blocked_domains, blocked_instances, \
     communities_banned_from, recently_upvoted_posts, recently_downvoted_posts, blocked_users, menu_topics, \
-    blocked_communities, show_ban_message, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds
+    blocked_communities, show_ban_message, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, \
+    login_required_if_private_instance
 from app.community.forms import RetrieveRemotePost
 from app.activitypub.util import resolve_remote_post_from_search
 
 
 @bp.route('/search', methods=['GET', 'POST'])
 @limiter.limit("100 per day;20 per 5 minutes", exempt_when=lambda: current_user.is_authenticated)
+@login_required_if_private_instance
 def run_search():
     if 'bingbot' in request.user_agent.string:  # Stop bingbot from running nonsense searches
         abort(404)
@@ -37,7 +40,7 @@ def run_search():
         posts = None
         db.session.execute(text("SET work_mem = '100MB';"))
         if search_for == 'posts':
-            posts = Post.query.filter(Post.deleted == False)
+            posts = Post.query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING)
             if current_user.is_authenticated:
                 if current_user.ignore_bots == 1:
                     posts = posts.filter(Post.from_bot == False)
@@ -114,7 +117,7 @@ def run_search():
                 replies = replies.filter(PostReply.nsfl == False)
                 replies = replies.filter(PostReply.nsfw == False)
 
-            replies = replies.join(Post, PostReply.post_id == Post.id).filter(Post.indexable == True, Post.deleted == False)
+            replies = replies.join(Post, PostReply.post_id == Post.id).filter(Post.indexable == True, Post.deleted == False, Post.status > POST_STATUS_REVIEWING)
             if q is not None:
                 replies = replies.search(q, sort=True if sort_by == '' else False)
             if type != 0:
@@ -156,12 +159,7 @@ def run_search():
                                next_url=next_url, prev_url=prev_url, show_post_community=True,
                                recently_upvoted=recently_upvoted,
                                recently_downvoted=recently_downvoted,
-                               moderating_communities=moderating_communities(current_user.get_id()),
-                               joined_communities=joined_communities(current_user.get_id()),
-                               menu_topics=menu_topics(),
-                               site=g.site, menu_instance_feeds=menu_instance_feeds(), 
-                               menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
-                               menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                               site=g.site, 
                                )
 
     else:
@@ -173,12 +171,7 @@ def run_search():
 
         return render_template('search/start.html', title=_('Search'), communities=communities.all(),
                                languages=languages, instance_software=instance_software,
-                               moderating_communities=moderating_communities(current_user.get_id()),
-                               joined_communities=joined_communities(current_user.get_id()),
-                               menu_topics=menu_topics(),
-                               site=g.site, menu_instance_feeds=menu_instance_feeds(), 
-                               menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
-                               menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                               site=g.site, 
                                )
 
 

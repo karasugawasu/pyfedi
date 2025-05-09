@@ -188,6 +188,25 @@ div.navbar {
   }
 }
 
+.dropdown-divider {
+  margin-right: 10px;
+}
+
+.topics_menu, .feeds_menu {
+  ul {
+    margin-left: 0;
+    list-style-type: none;
+    padding-left: 0;
+
+    .dropdown-header {
+      padding-left: 6px;
+    }
+    li {
+
+    }
+  }
+}
+
 #outer_container {
   margin-top: -1px;
   @include breakpoint(tablet) {
@@ -357,6 +376,15 @@ div.navbar {
       display: inherit;
     }
   }
+}
+
+ul.form-multicheck-columns {
+  display: flex;
+  list-style: none;
+  max-height: 12rem;
+  flex-direction: column;
+  flex-wrap: wrap;
+  overflow-y: auto;
 }
 
 .add_reply {
@@ -1691,6 +1719,37 @@ form {
   a {
     color: #777;
   }
+}
+
+.post_flair {
+  font-size: 73%;
+  padding: 1px 3px;
+  border-radius: 3px;
+}
+
+.post_flair_body {
+  padding-left: 0;
+  .post_flair {
+
+  }
+}
+
+.post_flair_sidepane {
+  .post_flair {
+    font-size: 90%;
+    padding: 2px 4px;
+  }
+  margin-bottom: 17px;
+}
+
+.user_flair {
+  font-size: 87%;
+  background-color: $lightest-grey;
+  border-radius: 3px;
+  border: solid 1px $grey;
+  color: $super-dark-grey;
+  padding: 0px 3px 0px 3px;
+  display: inline-block;
 }
 
 .comment_author {

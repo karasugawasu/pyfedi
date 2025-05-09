@@ -12,7 +12,6 @@ from sqlalchemy import or_, text, desc, Index
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_babel import _, lazy_gettext as _l
-from sqlalchemy.orm import backref
 from sqlalchemy_utils.types import TSVectorType # https://sqlalchemy-searchable.readthedocs.io/en/latest/installation.html
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.mutable import MutableList
@@ -25,7 +24,7 @@ import math
 
 from app.constants import SUBSCRIPTION_NONMEMBER, SUBSCRIPTION_MEMBER, SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER, \
     SUBSCRIPTION_BANNED, SUBSCRIPTION_PENDING, NOTIF_USER, NOTIF_COMMUNITY, NOTIF_TOPIC, NOTIF_POST, NOTIF_REPLY, \
-    ROLE_ADMIN, ROLE_STAFF, NOTIF_FEED, NOTIF_DEFAULT, NOTIF_REPORT, NOTIF_MENTION
+    ROLE_ADMIN, ROLE_STAFF, NOTIF_FEED, NOTIF_DEFAULT, NOTIF_REPORT, NOTIF_MENTION, POST_STATUS_REVIEWING
 
 from bs4 import BeautifulSoup
 
@@ -274,6 +273,11 @@ community_language = db.Table('community_language', db.Column('community_id', db
 post_tag = db.Table('post_tag', db.Column('post_id', db.Integer, db.ForeignKey('post.id')),
                                           db.Column('tag_id', db.Integer, db.ForeignKey('tag.id')),
                                           db.PrimaryKeyConstraint('post_id', 'tag_id')
+                        )
+
+post_flair = db.Table('post_flair', db.Column('post_id', db.Integer, db.ForeignKey('post.id')),
+                                          db.Column('flair_id', db.Integer, db.ForeignKey('community_flair.id')),
+                                          db.PrimaryKeyConstraint('post_id', 'flair_id')
                         )
 
 
@@ -531,6 +535,7 @@ class Community(db.Model):
     icon = db.relationship('File', foreign_keys=[icon_id], single_parent=True, backref='community', cascade="all, delete-orphan")
     image = db.relationship('File', foreign_keys=[image_id], single_parent=True, cascade="all, delete-orphan")
     languages = db.relationship('Language', lazy='dynamic', secondary=community_language, backref=db.backref('communities', lazy='dynamic'))
+    flair = db.relationship('CommunityFlair', backref=db.backref('community'), cascade="all, delete-orphan")
 
     __table_args__ = (
         db.Index(
@@ -714,6 +719,17 @@ class Community(db.Model):
             return 1
         else:
             return 0
+
+    def flair_for_ap(self):
+        result = []
+        for flair in self.flair:
+            result.append({'type': 'lemmy:CommunityTag',
+                           'id': f'https://{current_app.config["SERVER_NAME"]}/c/{self.link()}/tag/{flair.id}',
+                           'display_name': flair.flair,
+                           'text_color': flair.text_color,
+                           'background_color': flair.background_color
+                           })
+        return result
 
     def delete_dependencies(self):
         for post in self.posts:
@@ -1246,6 +1262,7 @@ class Post(db.Model):
     domain_id = db.Column(db.Integer, db.ForeignKey('domain.id'), index=True)
     instance_id = db.Column(db.Integer, db.ForeignKey('instance.id'), index=True)
     licence_id = db.Column(db.Integer, db.ForeignKey('licence.id'), index=True)
+    status = db.Column(db.Integer, index=True, default=1)       # see POST_STATUS_* in constants.py
     slug = db.Column(db.String(255))
     title = db.Column(db.String(255))
     url = db.Column(db.String(2048))
@@ -1278,7 +1295,11 @@ class Post(db.Model):
     reports = db.Column(db.Integer, default=0)                          # how many times this post has been reported. Set to -1 to ignore reports
     language_id = db.Column(db.Integer, db.ForeignKey('language.id'), index=True)
     cross_posts = db.Column(MutableList.as_mutable(ARRAY(db.Integer)))
+    scheduled_for = db.Column(db.DateTime, index=True)  # The first (or only) occurrence of this post
+    repeat = db.Column(db.String(20), default='')   # 'daily', 'weekly', 'monthly'. Empty string = no repeat, just post once.
+    stop_repeating = db.Column(db.DateTime, index=True)  # No more repeats after this datetime
     tags = db.relationship('Tag', lazy='joined', secondary=post_tag, backref=db.backref('posts', lazy='dynamic'))
+    flair = db.relationship('CommunityFlair', lazy='joined', secondary=post_flair, backref=db.backref('posts', lazy='dynamic'))
 
     ap_id = db.Column(db.String(255), index=True, unique=True)
     ap_create_id = db.Column(db.String(100))
@@ -1328,7 +1349,7 @@ class Post(db.Model):
     @classmethod
     def new(cls, user: User, community: Community, request_json: dict, announce_id=None):
         from app.activitypub.util import instance_weight, find_language_or_create, find_language, find_hashtag_or_create, \
-            find_licence_or_create, make_image_sizes, notify_about_post
+            find_licence_or_create, make_image_sizes, notify_about_post, find_flair_or_create
         from app.utils import allowlist_html, markdown_to_html, html_to_text, microblog_content_to_title, blocked_phrases, \
             is_image_url, is_video_url, domain_from_url, opengraph_parse, shorten_string, fixup_url, \
             is_video_hosting_site, communities_banned_from, recently_upvoted_posts, blocked_users
@@ -1480,18 +1501,24 @@ class Post(db.Model):
             # notify about links to banned websites.
             already_notified = set()  # often admins and mods are the same people - avoid notifying them twice
             if domain.notify_mods:
+                targets_data = {'post_id': post.id}
                 for community_member in post.community.moderators():
                     notify = Notification(title='Suspicious content', url=post.ap_id,
                                           user_id=community_member.user_id,
-                                          author_id=user.id, notif_type=NOTIF_REPORT)
+                                          author_id=user.id, notif_type=NOTIF_REPORT,
+                                          subtype='post_from_suspicious_domain',
+                                          targets=targets_data)
                     db.session.add(notify)
                     already_notified.add(community_member.user_id)
             if domain.notify_admins:
+                targets_data = {'post_id': post.id}
                 for admin in Site.admins():
                     if admin.id not in already_notified:
                         notify = Notification(title='Suspicious content',
                                               url=post.ap_id, user_id=admin.id,
-                                              author_id=user.id, notif_type=NOTIF_REPORT)
+                                              author_id=user.id, notif_type=NOTIF_REPORT,
+                                              subtype='post_from_suspicious_domain',
+                                              targets=targets_data)
                         db.session.add(notify)
             if domain.banned or domain.name.endswith('.pages.dev'):
                 raise Exception(domain.name + ' is blocked by admin')
@@ -1543,6 +1570,10 @@ class Post(db.Model):
                             hashtag = find_hashtag_or_create(json_tag['name'])
                             if hashtag:
                                 post.tags.append(hashtag)
+                    if json_tag and json_tag['type'] == 'lemmy:CommunityTag':
+                        flair = find_flair_or_create(json_tag, post.community_id)
+                        if flair:
+                            post.flair.append(flair)
             if 'searchableBy' in request_json['object'] and request_json['object']['searchableBy'] != 'https://www.w3.org/ns/activitystreams#Public':
                 post.indexable = False
 
@@ -1570,9 +1601,12 @@ class Post(db.Model):
                             if recipient:
                                 blocked_senders = blocked_users(recipient.id)
                                 if post.user_id not in blocked_senders:
+                                    targets_data = {'post_id': post.id}
                                     notification = Notification(user_id=recipient.id, title=_(f"You have been mentioned in post {post.id}"),
                                                                 url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
-                                                                author_id=post.user_id, notif_type=NOTIF_MENTION)
+                                                                author_id=post.user_id, notif_type=NOTIF_MENTION,
+                                                                subtype='post_mention',
+                                                                targets=targets_data)
                                     recipient.unread_notifications += 1
                                     db.session.add(notification)
                                     db.session.commit()
@@ -1641,7 +1675,7 @@ class Post(db.Model):
             return
 
         limit = 9
-        new_cross_posts = Post.query.filter(Post.id != self.id, Post.url == self.url, Post.deleted == False).order_by(desc(Post.id)).limit(limit)
+        new_cross_posts = Post.query.filter(Post.id != self.id, Post.url == self.url, Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.id)).limit(limit)
 
         # other posts: update their cross_posts field with this post.id if they have less than the limit
         for ncp in new_cross_posts:
@@ -1764,6 +1798,12 @@ class Post(db.Model):
 
     def tags_for_activitypub(self):
         return_value = []
+        for flair in self.flair:
+            return_value.append({'type': 'lemmy:CommunityTag',
+                                 'id': f'https://{current_app.config["SERVER_NAME"]}/c/{self.community.link()}/tag/{flair.id}',
+                                 'display_name': flair.flair,
+                                 'text_color': flair.text_color,
+                                 'background_color': flair.background_color})
         for tag in self.tags:
             return_value.append({'type': 'Hashtag',
                                  'href': f'https://{current_app.config["SERVER_NAME"]}/tag/{tag.name}',
@@ -1793,6 +1833,9 @@ class Post(db.Model):
         return round(sign * order + seconds / 45000, 7)
 
     def vote(self, user: User, vote_direction: str):
+        if vote_direction == 'downvote':
+            if self.author.has_blocked_user(user.id) or self.author.has_blocked_instance(user.instance_id):
+                return None
         existing_vote = PostVote.query.filter_by(user_id=user.id, post_id=self.id).first()
         if existing_vote and vote_direction == 'reversal':                            # api sends '1' for upvote, '-1' for downvote, and '0' for reversal
             if existing_vote.effect == 1:
@@ -2263,6 +2306,33 @@ class PostReply(db.Model):
         return undo
 
 
+class ScheduledPost(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), index=True)
+    image_id = db.Column(db.Integer, db.ForeignKey('file.id'), index=True)
+    domain_id = db.Column(db.Integer, db.ForeignKey('domain.id'), index=True)
+    licence_id = db.Column(db.Integer, db.ForeignKey('licence.id'), index=True)
+    title = db.Column(db.String(255))
+    url = db.Column(db.String(2048))
+    body = db.Column(db.Text)
+    microblog = db.Column(db.Boolean, default=False)
+    nsfw = db.Column(db.Boolean, default=False, index=True)
+    nsfl = db.Column(db.Boolean, default=False, index=True)
+    sticky = db.Column(db.Boolean, default=False, index=True)
+    indexable = db.Column(db.Boolean, default=True)
+    from_bot = db.Column(db.Boolean, default=False, index=True)
+    created_at = db.Column(db.DateTime, index=True, default=utcnow)
+    language_id = db.Column(db.Integer, db.ForeignKey('language.id'), index=True)
+    scheduled_for = db.Column(db.DateTime, index=True)  # The first (or only) occurrence of this post
+    repeat = db.Column(db.String(20), default='')   # 'daily', 'weekly', 'monthly'. Empty string = no repeat, just post once.
+
+    @classmethod
+    def new(cls, user, community: Community, request_json: dict):
+        ...
+        # use Post.new() for inspiration
+
+
 class Domain(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(255), index=True)
@@ -2505,7 +2575,9 @@ class Notification(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)       # who the notification should go to
     author_id = db.Column(db.Integer, db.ForeignKey('user.id'))     # the person who caused the notification to happen
     created_at = db.Column(db.DateTime, default=utcnow)
-    notif_type = db.Column(db.Integer, default=NOTIF_DEFAULT)   # see constants.py for possible values: NOTIF_*
+    notif_type = db.Column(db.Integer, default=NOTIF_DEFAULT, index=True)   # see constants.py for possible values: NOTIF_*
+    subtype = db.Column(db.String(50), index=True)
+    targets = db.Column(db.JSON)
 
 
 class Report(db.Model):
@@ -2689,6 +2761,7 @@ class Site(db.Model):
     logo_16 = db.Column(db.String(40), default='')
     show_inoculation_block = db.Column(db.Boolean, default=True)
     additional_css = db.Column(db.Text)
+    private_instance = db.Column(db.Boolean, default=False)
 
     @staticmethod
     def admins() -> List[User]:
@@ -2929,6 +3002,21 @@ class FeedJoinRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     feed_id = db.Column(db.Integer, db.ForeignKey('feed.id'), index=True)
+
+
+class CommunityFlair(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), index=True)
+    flair = db.Column(db.String(50), index=True)
+    text_color = db.Column(db.String(50))
+    background_color = db.Column(db.String(50))
+
+
+class UserFlair(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), index=True)
+    flair = db.Column(db.String(50), index=True)
 
 
 class SendQueue(db.Model):

@@ -1,3 +1,4 @@
+import json
 from sqlalchemy import text
 
 from app import cache, db
@@ -14,8 +15,6 @@ from flask_babel import _
 from flask_login import current_user
 
 
-# function can be shared between WEB and API (only API calls it for now)
-# comment_vote in app/post/routes would just need to do 'return vote_for_reply(reply_id, vote_direction, SRC_WEB)'
 def vote_for_reply(reply_id: int, vote_direction, src, auth=None):
     if src == SRC_API:
         reply = PostReply.query.filter_by(id=reply_id).one()
@@ -38,7 +37,7 @@ def vote_for_reply(reply_id: int, vote_direction, src, auth=None):
         elif vote_direction == 'downvote' and undo is None:
             recently_downvoted = [reply_id]
 
-        return render_template('post/_reply_voting_buttons.html', comment=reply,
+        return render_template('post/_comment_voting_buttons.html', comment=reply,
                                recently_upvoted_replies=recently_upvoted,
                                recently_downvoted_replies=recently_downvoted,
                                community=reply.community)
@@ -150,8 +149,13 @@ def make_reply(input, post, parent_id, src, auth=None):
 
     if parent_id:
         parent_reply = PostReply.query.filter_by(id=parent_id).one()
+        if parent_reply.author.has_blocked_user(user.id) or parent_reply.author.has_blocked_instance(user.instance_id):
+            raise Exception('The author of the parent reply has blocked the author or instance of the new reply.')
     else:
         parent_reply = None
+
+    if post.author.has_blocked_user(user.id) or post.author.has_blocked_instance(user.instance_id):
+        raise Exception('The author of the parent post has blocked the author or instance of the new reply.')
 
     if not can_create_post_reply(user, post.community):
         raise Exception('You are not permitted to comment in this community')
@@ -290,12 +294,15 @@ def report_reply(reply_id, input, src, auth=None):
 
     # Notify moderators
     already_notified = set()
+    targets_data = {'suspect_comment_id':reply.id,'suspect_user_id':reply.author.id,'reporter_id':user_id}
     for mod in reply.community.moderators():
         moderator = User.query.get(mod.user_id)
         if moderator and moderator.is_local():
             notification = Notification(user_id=mod.user_id, title=_('A comment has been reported'),
                                         url=f"https://{current_app.config['SERVER_NAME']}/comment/{reply.id}",
-                                        author_id=user_id, notif_type=NOTIF_REPORT)
+                                        author_id=user_id, notif_type=NOTIF_REPORT,
+                                        subtype='comment_reported',
+                                        targets=targets_data)
             db.session.add(notification)
             already_notified.add(mod.user_id)
     reply.reports += 1
@@ -303,7 +310,9 @@ def report_reply(reply_id, input, src, auth=None):
     for admin in Site.admins():
         if admin.id not in already_notified:
             notify = Notification(title='Suspicious content', url='/admin/reports', user_id=admin.id, 
-                                  author_id=user_id, notif_type=NOTIF_REPORT)
+                                  author_id=user_id, notif_type=NOTIF_REPORT,
+                                  subtype='comment_reported',
+                                  targets=targets_data)
             db.session.add(notify)
             admin.unread_notifications += 1
     db.session.commit()

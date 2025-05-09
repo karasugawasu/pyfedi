@@ -1,7 +1,7 @@
 from flask_login import current_user
 from flask_wtf import FlaskForm
 from wtforms import StringField, SubmitField, PasswordField, BooleanField, EmailField, TextAreaField, FileField, \
-    RadioField, DateField, SelectField, IntegerField, SelectMultipleField
+    RadioField, DateField, SelectField, IntegerField, SelectMultipleField, HiddenField
 from wtforms.validators import ValidationError, DataRequired, Email, EqualTo, Length, Optional
 from flask_babel import _, lazy_gettext as _l
 
@@ -27,6 +27,7 @@ class ProfileForm(FlaskForm):
     profile_file = FileField(_l('Avatar image'), render_kw={'accept': 'image/*'})
     banner_file = FileField(_l('Top banner image'), render_kw={'accept': 'image/*'})
     bot = BooleanField(_l('This profile is a bot'))
+    timezone = HiddenField(render_kw={'id': 'timezone'})
     submit = SubmitField(_l('Save profile'))
 
     def validate_email(self, field):
@@ -41,8 +42,8 @@ class ProfileForm(FlaskForm):
 class SettingsForm(FlaskForm):
     interface_language = SelectField(_l('Interface language'), coerce=str, validators=[Optional()],
                                      render_kw={'class': 'form-select'})
-    read_languages = SelectMultipleField(_l('Content language'), coerce=int, validators=[Optional()],
-                                         render_kw={'class': 'form-select'})
+    read_languages = MultiCheckboxField(_l('Content language'), coerce=int, validators=[Optional()],
+                                        render_kw={'class':'form-multicheck-columns'})
     newsletter = BooleanField(_l('Subscribe to email newsletter'))
     email_unread = BooleanField(_l('Receive email about missed notifications'))
     ignore_bots = BooleanField(_l('Hide posts by bots'))

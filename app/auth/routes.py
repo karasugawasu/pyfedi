@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime
 from random import randint
 from flask import redirect, url_for, flash, request, make_response, session, Markup, current_app, g
@@ -68,6 +69,7 @@ def login():
         session['ui_language'] = user.interface_language
         current_user.last_seen = utcnow()
         current_user.ip_address = ip_address()
+        current_user.timezone = form.timezone.data
         ip_address_info = ip2location(current_user.ip_address)
         current_user.ip_address_country = ip_address_info['country'] if ip_address_info else current_user.ip_address_country
         db.session.commit()
@@ -148,6 +150,7 @@ def register():
                             referrer=session.get('Referer', ''), alt_user_name=gibberish(randint(8, 20)))
                 user.set_password(form.password.data)
                 user.ip_address_country = ip_address_info['country'] if ip_address_info else ''
+                user.timezone = form.timezone.data
                 if get_setting('email_verification', True):
                     user.verified = False
                 else:
@@ -160,9 +163,12 @@ def register():
                 if g.site.registration_mode == 'RequireApplication' and g.site.application_question:
                     application = UserRegistration(user_id=user.id, answer=form.question.data)
                     db.session.add(application)
+                    targets_data = {'application_id':application.id,'user_id':user.id}
                     for admin in Site.admins():
                         notify = Notification(title='New registration', url=f'/admin/approve_registrations?account={user.id}', user_id=admin.id,
-                                          author_id=user.id, notif_type=NOTIF_REGISTRATION)
+                                          author_id=user.id, notif_type=NOTIF_REGISTRATION,
+                                          subtype='new_registration_for_approval',
+                                          targets=targets_data)
                         admin.unread_notifications += 1
                         db.session.add(notify)
                         # todo: notify everyone with the "approve registrations" permission, instead of just all admins
@@ -325,10 +331,13 @@ def google_authorize():
         if g.site.registration_mode == 'RequireApplication' and g.site.application_question:
             application = UserRegistration(user_id=user.id, answer='Signed in with Google')
             db.session.add(application)
+            targets_data = {'application_id':application.id,'user_id':user.id}
             for admin in Site.admins():
                 notify = Notification(title='New registration', url=f'/admin/approve_registrations?account={user.id}',
                                       user_id=admin.id,
-                                      author_id=user.id, notif_type=NOTIF_REGISTRATION)
+                                      author_id=user.id, notif_type=NOTIF_REGISTRATION,
+                                      subtype='new_registration_for_approval',
+                                      targets=targets_data)
                 admin.unread_notifications += 1
                 db.session.add(notify)
                 # todo: notify everyone with the "approve registrations" permission, instead of just all admins
