@@ -1452,9 +1452,11 @@ class Post(db.Model):
         if not post.url:
             if post.microblog:
                 soup = BeautifulSoup(post.body_html, 'html.parser')
-                first_a_tag = soup.find('a')
-                if first_a_tag and 'class' not in first_a_tag.attrs:
-                    post.url = first_a_tag['href']
+                for a_tag in soup.find_all('a'):
+                    class_attr = a_tag.get('class', [])
+                    if not any(cls in ['mention', 'hashtag'] for cls in class_attr):
+                        post.url = a_tag.get('href')
+                        break
 
         if post.url:
             thumbnail_url, embed_url = fixup_url(post.url)
