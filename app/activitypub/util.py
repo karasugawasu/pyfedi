@@ -2215,9 +2215,11 @@ def update_post_from_activity(post: Post, request_json: dict):
     if not new_url:
         if post.microblog:
             soup = BeautifulSoup(post.body_html, 'html.parser')
-            first_a_tag = soup.find('a')
-            if first_a_tag and 'class' not in first_a_tag.attrs:
-                new_url = first_a_tag['href']
+            for a_tag in soup.find_all('a'):
+                class_attr = a_tag.get('class', [])
+                if not any(cls in ['mention', 'hashtag'] for cls in class_attr):
+                    new_url = a_tag.get('href')
+                    break
 
     if new_url:
         new_domain = domain_from_url(new_url)
