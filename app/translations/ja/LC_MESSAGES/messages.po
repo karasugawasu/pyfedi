@@ -3,7 +3,7 @@ msgstr ""
 "Project-Id-Version: piefed\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
 "POT-Creation-Date: 2025-04-12 08:47+1200\n"
-"PO-Revision-Date: 2025-05-06 00:47+0000\n"
+"PO-Revision-Date: 2025-05-16 08:36+0000\n"
 "Last-Translator: 鴉河雛 <takeuchinomori@gmail.com>\n"
 "Language-Team: Japanese <http://translate.piefed.social/projects/piefed/"
 "main-web-app/ja/>\n"
@@ -241,14 +241,12 @@ msgid "Provide a list of topics to subscribe to"
 msgstr ""
 
 #: app/admin/forms.py:40
-#, fuzzy
 msgid "Trump Musk filter setup"
-msgstr "今すぐリセット"
+msgstr "政治フィルターのセットアップ"
 
 #: app/admin/forms.py:41
-#, fuzzy
 msgid "Ignore registrations from these countries"
-msgstr "コミュニティの投稿"
+msgstr "登録を無視する国の設定"
 
 #: app/admin/forms.py:42
 msgid "Block registrations from these referrers (one per line)"
@@ -674,17 +672,17 @@ msgstr "半透明にする"
 
 #: app/admin/forms.py:177 app/user/forms.py:48 app/user/forms.py:131
 msgid "Hide posts by bots"
-msgstr "ボットによる投稿を非表示にする"
+msgstr "ボットによる投稿の表示"
 
 #: app/admin/forms.py:179 app/admin/forms.py:240 app/user/forms.py:49
 #: app/user/forms.py:133
 msgid "Show NSFW posts"
-msgstr "NSFW投稿を表示する"
+msgstr "NSFW投稿の表示"
 
 #: app/admin/forms.py:181 app/admin/forms.py:242 app/user/forms.py:50
 #: app/user/forms.py:135
 msgid "Show NSFL posts"
-msgstr "NSFL投稿を表示する"
+msgstr "NSFL投稿の表示"
 
 #: app/admin/forms.py:184 app/admin/forms.py:244
 msgid "User"
@@ -2957,9 +2955,8 @@ msgid "Choose a topic"
 msgstr "トピックを選択"
 
 #: app/templates/list_topics.html:38 app/templates/topic/suggest_topics.html:14
-#, fuzzy
 msgid "Suggest a topic"
-msgstr "トピックを選択"
+msgstr "トピックを提案"
 
 #: app/templates/modlog.html:10
 msgid "Moderation log"
@@ -2969,7 +2966,7 @@ msgstr "モデレーションログ"
 #: app/templates/community/community_wiki_revisions.html:30
 #: app/templates/modlog.html:16
 msgid "When"
-msgstr ""
+msgstr "いつ"
 
 #: app/templates/community/community_modlog.html:31
 #: app/templates/modlog.html:17
@@ -4929,9 +4926,8 @@ msgid "Blocks & Filters"
 msgstr "ブロックとフィルター"
 
 #: app/templates/user/_user_nav.html:14 app/user/routes.py:510
-#, fuzzy
 msgid "Import & Export"
-msgstr "投稿を報告"
+msgstr "インポートとエクスポート"
 
 #: app/templates/user/alerts.html:15
 #, fuzzy
@@ -5391,16 +5387,14 @@ msgid "Continue"
 msgstr "参加済み"
 
 #: app/templates/user/user_feeds.html:13
-#, fuzzy
 msgid "New Feed"
-msgstr "ホームフィード"
+msgstr "新規フィード"
 
 #: app/templates/user/user_feeds.html:38
 msgid "You do not have any Feeds yet.."
 msgstr ""
 
 #: app/templates/user/user_preview.html:15
-#, fuzzy
 msgid "Roles"
 msgstr "ロール"
 
@@ -5468,13 +5462,12 @@ msgid "Only Others"
 msgstr "その他"
 
 #: app/templates/user/alerts/_filter.html:9
-#, fuzzy
 msgid "Others"
 msgstr "その他"
 
 #: app/templates/user/alerts/_posts.html:3
 msgid "You will be notified of top-level replies to these posts"
-msgstr ""
+msgstr "以下投稿のトップレベルの返信が通知されます"
 
 #: app/templates/user/alerts/_posts.html:16
 msgid ""
@@ -5539,7 +5532,6 @@ msgid "Comma seperated list of community suggestions"
 msgstr "コミュニティの提案のカンマ区切りリスト"
 
 #: app/topic/forms.py:12
-#, fuzzy
 msgid "Submit"
 msgstr "送信"
 
@@ -5550,9 +5542,8 @@ msgid ""
 msgstr ""
 
 #: app/topic/routes.py:221
-#, fuzzy
 msgid "Suggest a topic\""
-msgstr "トピックを選択"
+msgstr "トピックを提案"
 
 #: app/user/forms.py:12
 msgid "Display name"
@@ -5625,7 +5616,6 @@ msgid "Interface language"
 msgstr "表示言語"
 
 #: app/user/forms.py:44
-#, fuzzy
 msgid "Content language"
 msgstr "表示言語"
 
@@ -5634,14 +5624,12 @@ msgid "Receive email about missed notifications"
 msgstr "不在時にメールで通知を受け取る"
 
 #: app/user/forms.py:51 app/user/forms.py:137
-#, fuzzy
 msgid "Reply collapse threshold"
-msgstr "返信の折りたたみ閾値"
+msgstr "返信を折りたたむ閾値"
 
 #: app/user/forms.py:52 app/user/forms.py:138
-#, fuzzy
 msgid "Reply hide threshold"
-msgstr "返信の非表示閾値"
+msgstr "返信を非表示にする閾値"
 
 #: app/user/forms.py:53
 msgid "Use markdown editor GUI when writing"
@@ -5659,7 +5647,7 @@ msgstr "自分の投稿の検索を許可する"
 msgid ""
 "Do not display posts with which I have already interacted "
 "(opened/upvoted/downvoted)"
-msgstr "すでに対話した（開いた/アップボートした/ダウンボートした）投稿は表示しないでください"
+msgstr "既読投稿（投票含む）を表示しない"
 
 #: app/user/forms.py:57
 msgid "Manually approve followers"
@@ -5667,20 +5655,19 @@ msgstr "フォロワーを手動で承認する"
 
 #: app/user/forms.py:58
 msgid "Vote privately"
-msgstr "プライバシーを守って投票してください"
+msgstr "匿名投票"
 
 #: app/user/forms.py:59
 msgid "Enable Automatic Follow of Feed Communities."
-msgstr "フィードコミュニティの自動フォローを有効にします。"
+msgstr "フィード内コミュニティへの自動フォローを有効にする"
 
 #: app/user/forms.py:60
 msgid "Enable Automatic Leave of Feed Communities."
-msgstr "フィードコミュニティの自動退会を有効にします。"
+msgstr "フィード内コミュニティの自動退会を有効にする"
 
 #: app/user/forms.py:67
-#, fuzzy
 msgid "Default post sort"
-msgstr "全ての投稿"
+msgstr "投稿のデフォルトフィルター"
 
 #: app/user/forms.py:76
 msgid "Theme"
@@ -5698,7 +5685,7 @@ msgstr "5 年"
 
 #: app/user/forms.py:82
 msgid "Compact UI"
-msgstr ""
+msgstr "コンパクトUI"
 
 #: app/user/forms.py:83 app/user/forms.py:139
 msgid "Save settings"
@@ -6250,12 +6237,3 @@ msgstr "新しいコミュニティが作成されました。"
 
 #~ msgid "This comment has already been bookmarked"
 #~ msgstr "そのコメントはすでに報告されています。ありがとうございます！"
-
-msgid "More topics"
-msgstr "すべてのトピック"
-
-msgid "Suggest a topic"
-msgstr "トピックを提案"
-
-msgid "New communities"
-msgstr "新規コミュニティ"
