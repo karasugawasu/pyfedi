@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.mutable import MutableList
 from flask_sqlalchemy import BaseQuery
 from sqlalchemy_searchable import SearchQueryMixin
+from sqlalchemy.dialects.postgresql import BIT
 from app import db, login, cache, celery, httpx_client, constants
 import jwt
 import os
@@ -24,7 +25,8 @@ import math
 
 from app.constants import SUBSCRIPTION_NONMEMBER, SUBSCRIPTION_MEMBER, SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER, \
     SUBSCRIPTION_BANNED, SUBSCRIPTION_PENDING, NOTIF_USER, NOTIF_COMMUNITY, NOTIF_TOPIC, NOTIF_POST, NOTIF_REPLY, \
-    ROLE_ADMIN, ROLE_STAFF, NOTIF_FEED, NOTIF_DEFAULT, NOTIF_REPORT, NOTIF_MENTION, POST_STATUS_REVIEWING
+    ROLE_ADMIN, ROLE_STAFF, NOTIF_FEED, NOTIF_DEFAULT, NOTIF_REPORT, NOTIF_MENTION, POST_STATUS_REVIEWING, \
+    POST_STATUS_PUBLISHED
 
 from bs4 import BeautifulSoup
 
@@ -292,7 +294,7 @@ class File(db.Model):
     thumbnail_path = db.Column(db.String(255))
     thumbnail_width = db.Column(db.Integer)
     thumbnail_height = db.Column(db.Integer)
-    hash = db.Column(db.String(64), index=True)
+    hash = db.Column(BIT(256), index=True)
 
     def view_url(self, resize=False):
         if self.source_url:
@@ -810,6 +812,7 @@ class User(UserMixin, db.Model):
     default_sort = db.Column(db.String(25), default='hot')
     default_filter = db.Column(db.String(25), default='subscribed')
     theme = db.Column(db.String(20), default='')
+    font = db.Column(db.String(25), default='')
     referrer = db.Column(db.String(256))
     markdown_editor = db.Column(db.Boolean, default=True)
     interface_language = db.Column(db.String(10))           # a locale that the translation system understands e.g. 'en' or 'en-us'. If empty, use browser default
@@ -933,6 +936,10 @@ class User(UserMixin, db.Model):
 
     def vote_privately(self):
         return self.alt_user_name is not None and self.alt_user_name != ''
+
+    def community_flair(self, community_id: int):
+        user_flair = UserFlair.query.filter(UserFlair.community_id == community_id, UserFlair.user_id == self.id).first()
+        return user_flair.flair.strip() if user_flair else ''
 
     def num_content(self):
         content = 0
@@ -1423,6 +1430,7 @@ class Post(db.Model):
                     return None
 
         file_path = None
+        alt_text = None
         if ('attachment' in request_json['object'] and
             isinstance(request_json['object']['attachment'], list) and
             len(request_json['object']['attachment']) > 0 and
@@ -1484,7 +1492,16 @@ class Post(db.Model):
             post.url = embed_url
             if is_image_url(post.url):
                 post.type = constants.POST_TYPE_IMAGE
-                image = File(source_url=post.url)
+
+                # PDQ hash of image
+                image_hash = None
+                if current_app.config['IMAGE_HASHING_ENDPOINT']:
+                    from app.utils import retrieve_image_hash, hash_matches_blocked_image
+                    image_hash = retrieve_image_hash(post.url)
+                    if image_hash and hash_matches_blocked_image(image_hash):
+                        return None
+
+                image = File(source_url=post.url, hash=image_hash)
                 if alt_text:
                     image.alt_text = alt_text
                 if file_path:
@@ -1634,7 +1651,7 @@ class Post(db.Model):
             if post.url:
                 post.calculate_cross_posts()
 
-            if post.community_id not in communities_banned_from(user.id):
+            if post.community_id not in communities_banned_from(user.id) and post.status == POST_STATUS_PUBLISHED:
                 notify_about_post(post)
 
             # attach initial upvote to author
@@ -1656,7 +1673,7 @@ class Post(db.Model):
             return
 
         if self.cross_posts and (url_changed or delete_only):
-            old_cross_posts = Post.query.filter(Post.id.in_(self.cross_posts)).all()
+            old_cross_posts = Post.query.filter(Post.id.in_(self.cross_posts), Post.status == POST_STATUS_PUBLISHED).all()
             self.cross_posts.clear()
             for ocp in old_cross_posts:
                 if ocp.cross_posts and self.id in ocp.cross_posts:
@@ -3031,6 +3048,13 @@ class SendQueue(db.Model):
     retry_reason = db.Column(db.String(255))
     created = db.Column(db.DateTime, default=utcnow)
     send_after = db.Column(db.DateTime, default=utcnow, index=True)
+
+
+class BlockedImage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    file_name = db.Column(db.String(255), index=True)
+    note = db.Column(db.String(255))
+    hash = db.Column(BIT(256), index=True)
 
 
 def _large_community_subscribers() -> float:

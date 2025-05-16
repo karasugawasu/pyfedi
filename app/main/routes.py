@@ -13,7 +13,7 @@ from app.activitypub.util import users_total, active_month, local_posts, local_c
 from app.activitypub.signature import default_context, LDSignature
 from app.constants import SUBSCRIPTION_PENDING, SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, \
     POST_STATUS_REVIEWING
-from app.email import send_email
+from app.email import send_email, send_registration_approved_email
 from app.inoculation import inoculation
 from app.main import bp
 from flask import g, session, flash, request, current_app, url_for, redirect, make_response, jsonify
@@ -27,7 +27,8 @@ from app.utils import render_template, get_setting, request_etag_matches, return
     menu_topics, blocked_communities, \
     permission_required, debug_mode_only, ip_address, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, \
     feed_tree_public, gibberish, get_deduped_post_ids, paginate_post_ids, post_ids_to_models, html_to_text, \
-    get_redis_connection, subscribed_feeds, joined_or_modding_communities, login_required_if_private_instance
+    get_redis_connection, subscribed_feeds, joined_or_modding_communities, login_required_if_private_instance, \
+    pending_communities, retrieve_image_hash
 from app.models import Community, CommunityMember, Post, Site, User, utcnow, Topic, Instance, \
     Notification, Language, community_language, ModLog, read_posts, Feed, FeedItem, CommunityFlair
 
@@ -211,7 +212,7 @@ def list_communities():
     communities = communities.order_by(text('community.' + sort_by))
 
     # Pagination
-    communities = communities.paginate(page=page, per_page=250 if current_user.is_authenticated and not low_bandwidth else 50,
+    communities = communities.paginate(page=page, per_page=100 if current_user.is_authenticated and not low_bandwidth else 50,
                            error_out=False)
     next_url = url_for('main.list_communities', page=communities.next_num, sort_by=sort_by, language_id=language_id) if communities.has_next else None
     prev_url = url_for('main.list_communities', page=communities.prev_num, sort_by=sort_by, language_id=language_id) if communities.has_prev and page != 1 else None
@@ -221,6 +222,8 @@ def list_communities():
                            SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                            next_url=next_url, prev_url=prev_url, current_user=current_user,
                            topics=topics, languages=languages, topic_id=topic_id, language_id=language_id, sort_by=sort_by,
+                           joined_communities=joined_or_modding_communities(current_user.get_id()),
+                           pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
                            site=g.site, feed_id=feed_id,
                            server_has_feeds=server_has_feeds, public_feeds=public_feeds,
@@ -292,6 +295,8 @@ def list_local_communities():
                            SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                            next_url=next_url, prev_url=prev_url, current_user=current_user,
                            topics=topics, languages=languages, topic_id=topic_id, language_id=language_id, sort_by=sort_by,
+                           joined_communities=joined_or_modding_communities(current_user.get_id()),
+                           pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
                            site=g.site,
                            feed_id=feed_id, server_has_feeds=server_has_feeds, public_feeds=public_feeds,
@@ -370,6 +375,8 @@ def list_subscribed_communities():
                            SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                            next_url=next_url, prev_url=prev_url, current_user=current_user,
                            topics=topics, languages=languages, topic_id=topic_id, language_id=language_id, sort_by=sort_by,
+                           joined_communities=joined_or_modding_communities(current_user.get_id()),
+                           pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
                            site=g.site, feed_id=feed_id,
                            server_has_feeds=server_has_feeds, public_feeds=public_feeds,
@@ -449,6 +456,8 @@ def list_not_subscribed_communities():
                            SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                            next_url=next_url, prev_url=prev_url, current_user=current_user,
                            topics=topics, languages=languages, topic_id=topic_id, language_id=language_id, sort_by=sort_by,
+                           joined_communities=joined_or_modding_communities(current_user.get_id()),
+                           pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
                            feed_id=feed_id, server_has_feeds=server_has_feeds, public_feeds=public_feeds,
                            site=g.site,
@@ -565,6 +574,8 @@ def replay_inbox():
 @bp.route('/test')
 @debug_mode_only
 def test():
+    user = User.query.get(1)
+    send_registration_approved_email(user)
 
     markdown = """What light novels have you read in the past week? Something good? Bad? Let us know about it. 
 
@@ -705,6 +716,16 @@ def test_s3():
     s3.upload_file('babel.cfg', current_app.config['S3_BUCKET'], 'babel.cfg')
     s3.delete_object(Bucket=current_app.config['S3_BUCKET'], Key='babel.cfg')
     return 'Ok'
+
+
+@bp.route('/test_hashing')
+@debug_mode_only
+def test_hashing():
+    hash = retrieve_image_hash(f'https://{current_app.config["SERVER_NAME"]}/static/images/apple-touch-icon.png')
+    if hash:
+        return 'Ok'
+    else:
+        return 'Error'
 
 
 @bp.route('/find_voters')

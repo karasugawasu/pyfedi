@@ -13,7 +13,7 @@ from app.auth import bp
 from app.auth.forms import LoginForm, RegistrationForm, ResetPasswordRequestForm, ResetPasswordForm
 from app.auth.util import random_token, normalize_utf, ip2location, no_admins_logged_in_recently
 from app.constants import NOTIF_REGISTRATION
-from app.email import send_verification_email, send_password_reset_email
+from app.email import send_verification_email, send_password_reset_email, send_registration_approved_email
 from app.models import User, utcnow, IpBan, UserRegistration, Notification, Site
 from app.utils import render_template, ip_address, user_ip_banned, user_cookie_banned, banned_ip_addresses, \
     finalize_user_setup, blocked_referrers, gibberish, get_setting
@@ -144,10 +144,13 @@ def register():
                 form.user_name.data = normalize_utf(form.user_name.data)
                 if before_normalize != form.user_name.data:
                     flash(_('Your username contained special letters so it was changed to %(name)s.', name=form.user_name.data), 'warning')
+                font = ''
+                if 'Windows' in request.user_agent.string:
+                    font = 'inter'
                 user = User(user_name=form.user_name.data, title=form.user_name.data, email=form.real_email.data,
                             verification_token=verification_token, instance_id=1, ip_address=ip_address(),
                             banned=user_ip_banned() or user_cookie_banned(), email_unread_sent=False,
-                            referrer=session.get('Referer', ''), alt_user_name=gibberish(randint(8, 20)))
+                            referrer=session.get('Referer', ''), alt_user_name=gibberish(randint(8, 20)), font=font)
                 user.set_password(form.password.data)
                 user.ip_address_country = ip_address_info['country'] if ip_address_info else ''
                 user.timezone = form.timezone.data
@@ -267,6 +270,13 @@ def verify_email(token):
         if user.waiting_for_approval():
             return redirect(url_for('auth.please_wait'))
         else:
+            # Two things need to happen - email verification and (usually) admin approval. They can happen in any order.
+            if g.site.registration_mode == 'RequireApplication':
+                send_registration_approved_email(user)
+            else:
+                ...
+                #send_welcome_email(user) #not written yet
+
             login_user(user, remember=True)
             if len(user.communities()) == 0:
                 return redirect(url_for('auth.trump_musk'))

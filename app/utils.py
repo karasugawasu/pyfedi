@@ -48,7 +48,7 @@ from captcha.image import ImageCaptcha
 
 from app.models import Settings, Domain, Instance, BannedInstances, User, Community, DomainBlock, ActivityPubLog, IpBan, \
     Site, Post, PostReply, utcnow, Filter, CommunityMember, InstanceBlock, CommunityBan, Topic, UserBlock, Language, \
-    File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair
+    File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair, CommunityJoinRequest
 
 
 # Flask's render_template function, with support for themes added
@@ -960,7 +960,7 @@ def can_downvote(user, community: Community, site=None) -> bool:
     if community.local_only and not user.is_local():
         return False
 
-    if (user.attitude and user.attitude < -0.40) or user.reputation < -10:  # this should exclude about 3.7% of users.
+    if (user.attitude is not None and user.attitude < 0.0) or user.reputation < -10:
         return False
 
     if community.downvote_accept_mode != DOWNVOTE_ACCEPT_ALL:
@@ -1178,6 +1178,15 @@ def joined_or_modding_communities(user_id):
         return []
     return db.session.execute(text('SELECT c.id FROM "community" as c INNER JOIN "community_member" as cm on c.id = cm.community_id WHERE c.banned = false AND cm.user_id = :user_id'),
                               {'user_id': user_id}).scalars().all()
+
+
+def pending_communities(user_id):
+    if user_id is None or user_id == 0:
+        return []
+    result = []
+    for join_request in CommunityJoinRequest.query.filter_by(user_id=user_id).all():
+        result.append(join_request.community_id)
+    return result
 
 
 @cache.memoize(timeout=3000)
@@ -2049,6 +2058,17 @@ def move_file_to_s3(file_id, s3):
                     db.session.commit()
 
 
+def find_next_occurrence(post: Post) -> timedelta:
+    if post.repeat is not None and post.repeat != 'none':
+        if post.repeat == 'daily':
+            return timedelta(days=1)
+        elif post.repeat == 'weekly':
+            return timedelta(days=7)
+        elif post.repeat == 'monthly':
+            return timedelta(days=28)
+    return timedelta(seconds=0)
+
+
 def notif_id_to_string(notif_id) -> str:
     # -- user level ---
     if notif_id == NOTIF_USER:
@@ -2087,3 +2107,61 @@ def notif_id_to_string(notif_id) -> str:
     # --model/db default--
     if notif_id == NOTIF_DEFAULT:
         return _('All')
+
+
+@cache.memoize(timeout=300)
+def retrieve_image_hash(image_url):
+    def fetch_hash(retries_left):
+        try:
+            response = get_request(current_app.config['IMAGE_HASHING_ENDPOINT'], {'image_url': image_url})
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('quality', 0) >= 70:
+                    return result.get('pdq_hash_binary', '')
+            elif response.status_code == 429 and retries_left > 0:
+                sleep(random.uniform(1, 3))
+                return fetch_hash(retries_left - 1)
+        except httpx.HTTPError as e:
+            current_app.logger.warning(f"Error retrieving image hash: {e}")
+        except httpx.ReadError as e:
+            current_app.logger.warning(f"Error retrieving image hash: {e}")
+        finally:
+            try:
+                response.close()
+            except:
+                pass
+        return None
+
+    return fetch_hash(retries_left=2)
+
+
+BINARY_RE = re.compile(r'^[01]+$')  # used in hash_matches_blocked_image()
+
+
+def hash_matches_blocked_image(hash: str) -> bool:
+    # calculate hamming distance between the provided hash and the hashes of all the blocked images.
+    # the hamming distance is a value between 0 and 256 indicating how many bits are different.
+    # 15 is the number of different bits we will accept. Anything less than that and we consider the images to be the same.
+
+    # only accept a string with 0 and 1 in it. This makes it safe to use sql injection-prone code below, which greatly simplifies the conversion of binary strings
+    if not BINARY_RE.match(hash):
+        current_app.logger.warning(f"Invalid binary hash: {hash}")
+        return False
+
+    sql = f"""SELECT id FROM blocked_image WHERE length(replace((hash # B'{hash}')::text, '0', '')) < 15;"""
+    blocked_images = db.session.execute(text(sql)).scalars().first()
+    return blocked_images is not None
+
+
+def posts_with_blocked_images() -> List[int]:
+    sql = """
+    SELECT DISTINCT post.id
+    FROM post
+    JOIN file ON post.image_id = file.id
+    JOIN blocked_image ON (
+        length(replace((file.hash # blocked_image.hash)::text, '0', ''))
+    ) < 15
+    WHERE post.deleted = false AND file.hash is not null
+    """
+
+    return list(db.session.execute(text(sql)).scalars())
