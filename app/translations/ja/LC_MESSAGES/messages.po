@@ -3,7 +3,7 @@ msgstr ""
 "Project-Id-Version: piefed\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
 "POT-Creation-Date: 2025-04-12 08:47+1200\n"
-"PO-Revision-Date: 2025-05-16 14:37+0000\n"
+"PO-Revision-Date: 2025-05-16 15:09+0000\n"
 "Last-Translator: 鴉河雛 <takeuchinomori@gmail.com>\n"
 "Language-Team: Japanese <http://translate.piefed.social/projects/piefed/"
 "main-web-app/ja/>\n"
@@ -2695,7 +2695,7 @@ msgstr "ブックマーク"
 
 #: app/templates/base.html:254 app/templates/themes/dillo/base.html:221
 msgid "Activity Alerts"
-msgstr "投稿への通知設定"
+msgstr "投稿からの通知設定"
 
 #: app/templates/base.html:257
 #, fuzzy
@@ -4533,9 +4533,8 @@ msgid "Provide a URL ending with .mp4 or .webm."
 msgstr ".mp4 または .webm で終わるURLを指定してください。"
 
 #: app/templates/post/post_edit.html:49
-#, fuzzy
 msgid "Preview"
-msgstr "表示"
+msgstr "投稿のプレビュー"
 
 #: app/templates/post/post_edit.html:78
 msgid "Poll choices"
@@ -4550,9 +4549,8 @@ msgid "Separate each tag with a comma."
 msgstr "タグはコンマで区切ることができます。"
 
 #: app/templates/post/post_edit.html:120
-#, fuzzy
 msgid "More options"
-msgstr "トピックを見る"
+msgstr "追加のオプション"
 
 #: app/templates/post/post_mea_culpa.html:15
 msgid ""
@@ -4580,23 +4578,20 @@ msgstr "新規登録"
 
 #: app/templates/post/post_options.html:11
 #: app/templates/post/post_reply_options.html:13
-#, fuzzy
 msgid "Purge"
-msgstr "Ban + パージ"
+msgstr "パージ"
 
 #: app/templates/post/post_options.html:20
 msgid "Un-sticky"
 msgstr "ピン留めを解除"
 
 #: app/templates/post/post_options.html:27
-#, fuzzy
 msgid "Lock"
-msgstr "ブロック"
+msgstr "ロック"
 
 #: app/templates/post/post_options.html:30
-#, fuzzy
 msgid "Unlock"
-msgstr "ブロック解除"
+msgstr "アンロック"
 
 #: app/templates/post/post_options.html:35
 #: app/templates/post/post_reply_options.html:23
@@ -4613,24 +4608,23 @@ msgid "I made a mistake with this post and have changed my mind about the topic"
 msgstr "投稿の内容に誤りがあり、このトピックについては考え直すことにしました"
 
 #: app/templates/post/post_options.html:47
-#, fuzzy
 msgid "Cross-post to another community"
-msgstr "コミュニティに投稿"
+msgstr "他のコミュニティへクロスポスト"
 
 #: app/templates/post/post_options.html:50
 #, python-format
 msgid "Block post author @%(author_name)s"
-msgstr ""
+msgstr "投稿者 @%(author_name)s をブロック"
 
 #: app/templates/post/post_options.html:55
 #, python-format
 msgid "Ban post author @%(author_name)s from %(community_name)s"
-msgstr ""
+msgstr "%(community_name)s から投稿者 @%(author_name)s をBAN"
 
 #: app/templates/post/post_options.html:59
 #, python-format
 msgid "Block domain %(domain)s"
-msgstr ""
+msgstr "ドメイン %(domain)s をブロック"
 
 #: app/templates/post/post_options.html:63
 #, python-format
@@ -4654,17 +4648,17 @@ msgstr "リモートの情報で更新"
 #: app/templates/post/post_reply_options.html:30
 #, python-format
 msgid "Block author @%(author_name)s"
-msgstr ""
+msgstr "投稿者 @%(author_name)s をブロック"
 
 #: app/templates/post/post_reply_options.html:33
-#, fuzzy, python-format
+#, python-format
 msgid "Ban @%(author_name)s from %(community_name)s"
-msgstr "%(community_name)s を編集"
+msgstr "%(community_name)sから%(author_name)sをBAN"
 
 #: app/templates/post/post_reply_options.html:37
 #, python-format
 msgid "Hide content from author's instance: %(name)s"
-msgstr ""
+msgstr "投稿者のインスタンス %(name)s を非表示"
 
 #: app/templates/post/post_reply_report.html:13
 #, python-format
@@ -4674,17 +4668,17 @@ msgstr ""
 #: app/templates/post/post_reply_voting_activity.html:10
 #, python-format
 msgid "Voting Activity for \"%(reply_text)s\""
-msgstr ""
+msgstr "\"%(reply_text)s\" の投票一覧"
 
 #: app/templates/post/post_report.html:13
 #, python-format
 msgid "Report \"%(post_title)s\""
-msgstr ""
+msgstr "\"%(post_title)s\" を通報"
 
 #: app/templates/post/post_voting_activity.html:10
-#, fuzzy, python-format
+#, python-format
 msgid "Voting Activity for \"%(post_title)s\""
-msgstr "\"%(post_title)s\"のオプション"
+msgstr "\"%(post_title)s\"の投票一覧"
 
 #: app/templates/post/post_teaser/_article.html:5
 #: app/templates/post/post_teaser/_article.html:7
@@ -4736,9 +4730,8 @@ msgid "Keyword"
 msgstr "キーワード"
 
 #: app/templates/search/start.html:25
-#, fuzzy
 msgid "optional"
-msgstr "オプション"
+msgstr "任意"
 
 #: app/templates/search/start.html:54
 msgid "Instance Software"
@@ -4750,12 +4743,11 @@ msgstr "ソート"
 
 #: app/templates/search/start.html:66
 msgid "Relevance"
-msgstr ""
+msgstr "関連性"
 
 #: app/templates/search/start.html:67
-#, fuzzy
 msgid "Recent first"
-msgstr "今すぐリセット"
+msgstr "最新"
 
 #: app/templates/search/start.html:73
 msgid "Example searches:"
@@ -4826,7 +4818,7 @@ msgstr "タグ管理"
 
 #: app/templates/tag/tag.html:66
 msgid "RSS"
-msgstr ""
+msgstr "RSS"
 
 #: app/templates/tag/tags.html:14 app/templates/tag/tags_blocked.html:14
 #, python-format
@@ -4856,9 +4848,8 @@ msgstr "サブトピック"
 
 #: app/templates/topic/show_topic.html:41
 #: app/templates/topic/show_topic.html:95
-#, fuzzy
 msgid "Create feed"
-msgstr "作成"
+msgstr "フィードの作成"
 
 #: app/templates/topic/show_topic.html:68
 msgid "No posts in this topic yet."
@@ -4884,24 +4875,20 @@ msgid "Notify about every new post by this person."
 msgstr "このユーザの新しい投稿をすべて通知する。"
 
 #: app/templates/user/_read_posts_nav.html:2
-#, fuzzy
 msgid "Newest posts"
-msgstr "投稿を作成"
+msgstr "新しい投稿"
 
 #: app/templates/user/_read_posts_nav.html:3
-#, fuzzy
 msgid "Newest"
-msgstr "新規"
+msgstr "新しい順"
 
 #: app/templates/user/_read_posts_nav.html:5
-#, fuzzy
 msgid "Oldest posts"
-msgstr "投稿を作成"
+msgstr "古い投稿"
 
 #: app/templates/user/_read_posts_nav.html:6
-#, fuzzy
 msgid "Oldest"
-msgstr "ロール"
+msgstr "古い順"
 
 #: app/templates/user/_user_nav.html:8 app/templates/user/notifications.html:54
 #: app/templates/user/show_profile.html:204
@@ -4917,9 +4904,8 @@ msgid "Import & Export"
 msgstr "インポートとエクスポート"
 
 #: app/templates/user/alerts.html:15
-#, fuzzy
 msgid "Alerts"
-msgstr "通報"
+msgstr "投稿からの通知"
 
 #: app/templates/user/bookmarks.html:24
 msgid ""
@@ -4940,9 +4926,9 @@ msgstr "ブックマークされたコメントがありません。投稿の3�
 "クすることができます。"
 
 #: app/templates/user/choose_plan.html:10
-#, fuzzy, python-format
+#, python-format
 msgid "Donate to %(instance_name)s"
-msgstr "%(topic_name)s を編集"
+msgstr "%(instance_name)s へ寄付"
 
 #: app/templates/user/choose_plan.html:12
 #, python-format
@@ -4974,7 +4960,6 @@ msgid "Update credit card details"
 msgstr ""
 
 #: app/templates/user/choose_plan.html:39
-#, fuzzy
 msgid "Donation"
 msgstr "寄付"
 
