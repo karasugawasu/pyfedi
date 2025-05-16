@@ -3,7 +3,7 @@ msgstr ""
 "Project-Id-Version: piefed\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
 "POT-Creation-Date: 2025-04-12 08:47+1200\n"
-"PO-Revision-Date: 2025-05-16 12:45+0000\n"
+"PO-Revision-Date: 2025-05-16 14:37+0000\n"
 "Last-Translator: 鴉河雛 <takeuchinomori@gmail.com>\n"
 "Language-Team: Japanese <http://translate.piefed.social/projects/piefed/"
 "main-web-app/ja/>\n"
@@ -302,7 +302,7 @@ msgstr "デバッグ用のActivityPub JSON ログ"
 
 #: app/admin/forms.py:53
 msgid "Show moderation actions publicly"
-msgstr "モデレーション操作の公開する"
+msgstr "モデレーション操作を公開する"
 
 #: app/admin/forms.py:54
 msgid "Show Rational Discourse Toolkit in sidebar"
@@ -1825,11 +1825,11 @@ msgstr ""
 
 #: app/dev/forms.py:12
 msgid "Populate Communities"
-msgstr "人気なコミュニティ"
+msgstr "トレンドコミュニティ"
 
 #: app/dev/forms.py:15
 msgid "Populate Topics"
-msgstr "人気なトピック"
+msgstr "トレンドトピック"
 
 #: app/dev/forms.py:18
 #, fuzzy
@@ -2274,7 +2274,7 @@ msgstr "トレンドの投稿"
 #: app/templates/themes/dillo/_home_nav.html:4
 #: app/templates/user/_read_posts_nav.html:9 app/user/forms.py:61
 msgid "Hot"
-msgstr "人気"
+msgstr "トレンド"
 
 #: app/templates/_home_nav.html:4 app/templates/_home_nav.html:32
 #: app/templates/themes/dillo/_home_nav.html:9
@@ -2588,7 +2588,7 @@ msgstr "作成者"
 #: app/templates/themes/dillo/base.html:32
 #, python-format
 msgid "User note: %(note)s"
-msgstr ""
+msgstr "ユーザーメモ: %(note)s"
 
 #: app/templates/base.html:51 app/templates/post/post_teaser/_title.html:28
 #: app/templates/themes/dillo/base.html:38
@@ -3029,7 +3029,7 @@ msgstr "ニュースレター"
 #: app/templates/admin/_nav.html:16 app/templates/admin/_tabbed_nav.html:17
 #: app/templates/admin/permissions.html:15
 msgid "Permissions"
-msgstr ""
+msgstr "権限"
 
 #: app/templates/admin/_nav.html:17 app/templates/admin/_tabbed_nav.html:18
 #: app/templates/admin/activities.html:14
@@ -3608,7 +3608,7 @@ msgstr ""
 #: app/templates/community/_community_nav.html:34
 #: app/templates/feed/_feed_nav.html:32
 msgid "Sort by hot"
-msgstr "人気順に並び替え"
+msgstr "トレンド順に並び替え"
 
 #: app/templates/community/_community_moderation_nav.html:11
 #: app/templates/community/community_mod_list.html:16
@@ -3625,7 +3625,7 @@ msgstr "参加者"
 #: app/templates/community/community_wiki_list.html:16
 #: app/templates/community/community_wiki_revisions.html:16
 msgid "Wiki"
-msgstr ""
+msgstr "Wiki"
 
 #: app/templates/community/_community_moderation_nav.html:20
 msgid "Appeals"
@@ -3637,9 +3637,8 @@ msgstr "モデレーションログ"
 
 #: app/templates/community/_community_nav.html:13
 #: app/templates/feed/_feed_nav.html:11
-#, fuzzy
 msgid "About community"
-msgstr "コミュニティを報告"
+msgstr "コミュニティの概要"
 
 #: app/templates/community/_community_nav.html:37
 #: app/templates/feed/_feed_nav.html:35
@@ -3709,11 +3708,11 @@ msgstr "リンク"
 
 #: app/templates/community/add_post.html:14
 msgid "Share an image"
-msgstr ""
+msgstr "画像を共有する"
 
 #: app/templates/community/add_post.html:15
 msgid "Share a video"
-msgstr ""
+msgstr "ビデオを共有する"
 
 #: app/templates/community/add_post.html:15 app/templates/search/start.html:42
 msgid "Video"
@@ -3721,7 +3720,7 @@ msgstr "動画"
 
 #: app/templates/community/add_post.html:16
 msgid "Create a poll"
-msgstr "投票を作成"
+msgstr "投票を作成する"
 
 #: app/templates/community/add_post.html:16 app/templates/search/start.html:43
 msgid "Poll"
@@ -3797,9 +3796,8 @@ msgstr "画像を表示"
 
 #: app/templates/community/community_edit.html:43
 #: app/templates/community/community_edit.html:53
-#, fuzzy
 msgid "Delete image"
-msgstr "削除"
+msgstr "画像を削除"
 
 #: app/templates/community/community_edit.html:45
 #: app/templates/user/edit_profile.html:82
@@ -3849,32 +3847,29 @@ msgid "See and handle all reports made about %(community)s"
 msgstr "%(community)s に関するすべてのレポートを表示および処理する"
 
 #: app/templates/community/community_moderate.html:37
-#, fuzzy
 msgid "Local/Remote"
-msgstr "リモートを追加"
+msgstr "ローカル/リモート"
 
 #: app/templates/community/community_moderate.html:38
-#, fuzzy
 msgid "Reasons"
 msgstr "理由"
 
 #: app/templates/community/community_moderate.html:40
 #: app/templates/search/start.html:36
 msgid "Type"
-msgstr ""
+msgstr "タイプ"
 
 #: app/templates/community/community_moderate.html:41
-#, fuzzy
 msgid "Created"
-msgstr "作成"
+msgstr "作成日"
 
 #: app/templates/community/community_moderate.html:67
 msgid "Escalate"
-msgstr ""
+msgstr "エスカレーション"
 
 #: app/templates/community/community_moderate.html:68
 msgid "Resolve"
-msgstr ""
+msgstr "理由"
 
 #: app/templates/community/community_moderate.html:70
 msgid "Ignore"
@@ -3892,7 +3887,8 @@ msgstr "管理者に通報をエスカレーション"
 msgid ""
 "For reports that could potentially involve legal issues or where you are "
 "unsure how to respond, you may prefer to let admins handle it."
-msgstr ""
+msgstr "法的な問題が関わる可能性がある通報や、対応に迷う通報については、管理者に処理"
+"を任せることもできます。"
 
 #: app/templates/community/community_moderate_subscribers.html:27
 #, python-format
@@ -3900,9 +3896,8 @@ msgid "See who is subscribed to %(community)s"
 msgstr "%(community)s の参加者を見る"
 
 #: app/templates/community/community_moderate_subscribers.html:56
-#, fuzzy
 msgid "Kick"
-msgstr "告知"
+msgstr "キック"
 
 #: app/templates/community/community_moderate_subscribers.html:78
 msgid "This community has no subscribers"
@@ -3915,7 +3910,7 @@ msgstr "BANされたユーザー"
 #: app/templates/community/community_moderate_subscribers.html:81
 #, python-format
 msgid "See and manage who is banned from %(community)s"
-msgstr ""
+msgstr "%(community)s からBANされたユーザーの確認と管理"
 
 #: app/templates/community/community_moderate_subscribers.html:115
 #: app/templates/domain/domain.html:64
@@ -3929,42 +3924,38 @@ msgid "No banned people yet"
 msgstr "BANされた人はいません"
 
 #: app/templates/community/community_modlog.html:22
-#, fuzzy, python-format
+#, python-format
 msgid "Moderation actions in %(community)s"
-msgstr "モデレーターを %(community)sに追加"
+msgstr "%(community)s のモデレーション操作"
 
 #: app/templates/community/community_modlog.html:24
-#, fuzzy
 msgid "See things moderators have done in this community."
-msgstr "コミュニティモデレーターの変更と表示"
+msgstr "このコミュニティでモデレーターが行った操作を確認する。"
 
 #: app/templates/community/community_modlog.html:55
-#, fuzzy
 msgid "This community has had no moderation actions yet."
-msgstr "このコミュニティには参加者はいません。"
+msgstr "このコミュニティにはまだモデレーション操作はありません。"
 
 #: app/templates/community/community_wiki_list.html:22
-#, fuzzy, python-format
+#, python-format
 msgid "Wiki pages for %(community)s"
-msgstr "%(community)s を編集"
+msgstr "%(community)s のウィキ"
 
 #: app/templates/community/community_wiki_list.html:48
-#, fuzzy
 msgid "View page"
-msgstr "画像を表示"
+msgstr "ページを表示"
 
 #: app/templates/community/community_wiki_list.html:49
 msgid "View revisions"
-msgstr ""
+msgstr "履歴を表示"
 
 #: app/templates/community/community_wiki_list.html:63
 msgid "Add a link to the wiki in the community description."
-msgstr ""
+msgstr "コミュニティの説明にウィキへのリンクを追加する。"
 
 #: app/templates/community/community_wiki_list.html:65
-#, fuzzy
 msgid "There are no wiki pages in this community."
-msgstr "まだこのコミュニティに投稿はありません。"
+msgstr "このコミュニティにはまだウィキはありません。"
 
 #: app/templates/community/community_wiki_revisions.html:22
 #, python-format
@@ -3972,9 +3963,8 @@ msgid "Revisions of %(title)s"
 msgstr "%(title)s の変更履歴"
 
 #: app/templates/community/community_wiki_revisions.html:48
-#, fuzzy
 msgid "Revert"
-msgstr "無期限"
+msgstr "戻す"
 
 #: app/templates/community/invite.html:20
 #, python-format
@@ -3988,9 +3978,8 @@ msgid ""
 msgstr ""
 
 #: app/templates/community/retrieve_remote_post.html:30
-#, fuzzy
 msgid "Found a post:"
-msgstr "コミュニティを探す："
+msgstr "投稿を探す:"
 
 #: app/templates/dev/tools.html:11
 msgid ""
@@ -5070,19 +5059,20 @@ msgid "Stop applying this filter after this date. Optional."
 msgstr "この日付以降はフィルターの適用を停止します。これは任意です。"
 
 #: app/templates/user/edit_note.html:13
-#, fuzzy, python-format
+#, python-format
 msgid "Edit note for \"%(user_name)s\""
-msgstr "\"%(user_name)s\" を報告"
+msgstr "%(user_name)s のユーザーメモを編集"
 
 #: app/templates/user/edit_note.html:15
 msgid "Emoji quick access"
-msgstr ""
+msgstr "絵文字ショートカット"
 
 #: app/templates/user/edit_note.html:49
 msgid ""
 "This note appears next to their username. It's meant just for you and not"
 " displayed to anyone else."
-msgstr ""
+msgstr "このメモは相手のユーザー名の横に表示され、あなただけに見えるものです。他のユ"
+"ーザーには表示されません。"
 
 #: app/templates/user/edit_profile.html:19
 #, python-format
@@ -5091,17 +5081,16 @@ msgstr "%(name)s のプロフィールを編集"
 
 #: app/templates/user/edit_profile.html:48
 msgid "Extra fields"
-msgstr ""
+msgstr "追加の情報"
 
 #: app/templates/user/edit_profile.html:49
 msgid "Your homepage, pronouns, age, etc."
-msgstr ""
+msgstr "ホームページ、代名詞、年齢などなど..."
 
 #: app/templates/user/edit_profile.html:80
 #: app/templates/user/edit_profile.html:91
-#, fuzzy
 msgid "Remove image"
-msgstr "画像を表示"
+msgstr "画像を削除"
 
 #: app/templates/user/edit_profile.html:98
 #: app/templates/user/edit_settings.html:54
@@ -5110,7 +5099,7 @@ msgstr "アカウントの削除"
 
 #: app/templates/user/edit_settings.html:35
 msgid "This is used for menus and labels in the user interface"
-msgstr ""
+msgstr "これはUIやラベルなどに適用されます"
 
 #: app/templates/user/edit_settings.html:37
 msgid "Posts and replies in these languages will be visible"
@@ -5287,9 +5276,8 @@ msgstr ""
 
 #: app/templates/user/show_profile.html:105
 #: app/templates/user/user_preview.html:59 app/user/routes.py:1425
-#, fuzzy
 msgid "Edit note"
-msgstr "投稿の編集"
+msgstr "メモを編集"
 
 #: app/templates/user/show_profile.html:113
 #: app/templates/user/user_preview.html:21
@@ -5298,9 +5286,8 @@ msgstr "Botアカウント"
 
 #: app/templates/user/show_profile.html:114
 #: app/templates/user/user_preview.html:22
-#, fuzzy
 msgid "Note"
-msgstr "該当なし"
+msgstr "メモ"
 
 #: app/templates/user/show_profile.html:116
 #: app/templates/user/user_preview.html:24
@@ -5672,14 +5659,12 @@ msgid "Theme"
 msgstr "テーマ"
 
 #: app/user/forms.py:78
-#, fuzzy
 msgid "No"
-msgstr "該当なし"
+msgstr "いいえ"
 
 #: app/user/forms.py:80
-#, fuzzy
 msgid "YEESSS"
-msgstr "5 年"
+msgstr "もちろん！！！"
 
 #: app/user/forms.py:82
 msgid "Compact UI"
@@ -5695,7 +5680,7 @@ msgstr "Lemmy からコミュニティの登録情報とユーザーブロック
 
 #: app/user/forms.py:93
 msgid "Yes, delete my account"
-msgstr "はい、アカウントを削除します。"
+msgstr "はい、アカウントを削除します"
 
 #: app/user/forms.py:104
 msgid "Malicious reporting"
@@ -5767,14 +5752,12 @@ msgid "View profile on remote instance"
 msgstr "リモートインスタンスでプロフィールを表示"
 
 #: app/user/forms.py:172
-#, fuzzy
 msgid "User note"
-msgstr "ユーザー名"
+msgstr "ユーザーメモ"
 
 #: app/user/forms.py:173
-#, fuzzy
 msgid "Save note"
-msgstr "プロフィールを保存"
+msgstr "メモを保存"
 
 #: app/user/routes.py:57
 msgid "This user has been deleted."
@@ -5792,9 +5775,8 @@ msgid ""
 msgstr "メールアドレスが変更されたため、確認が必要です。確認リンクが含まれたメールを受信トレイでご確認ください。"
 
 #: app/user/routes.py:228
-#, fuzzy
 msgid "Avatar removed!"
-msgstr "アバター画像"
+msgstr "アバターを削除しました！"
 
 #: app/user/routes.py:398
 msgid "Auto-detect"
@@ -5805,9 +5787,8 @@ msgid "Catalan"
 msgstr "Catalan"
 
 #: app/user/routes.py:400
-#, fuzzy
 msgid "Chinese"
-msgstr "選択"
+msgstr "Chinese"
 
 #: app/user/routes.py:401
 msgid "English"
@@ -5830,9 +5811,8 @@ msgid "Spanish"
 msgstr "スペイン語"
 
 #: app/user/routes.py:478
-#, fuzzy
 msgid "Export Complete."
-msgstr "コメントを通報する"
+msgstr "エクスポート完了。"
 
 #: app/user/routes.py:503
 msgid ""
@@ -5850,7 +5830,7 @@ msgstr ""
 
 #: app/user/routes.py:550
 msgid "Banned user with role permissions."
-msgstr ""
+msgstr "権限を持つユーザーをBANしました。"
 
 #: app/user/routes.py:551
 #, python-format
