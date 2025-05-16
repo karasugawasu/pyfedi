@@ -35,6 +35,7 @@ class SiteMiscForm(FlaskForm):
     types = [('Open', _l('Open')), ('RequireApplication', _l('Require application')), ('Closed', _l('Closed'))]
     registration_mode = SelectField(_l('Registration mode'), choices=types, default=1, coerce=str, render_kw={'class': 'form-select'})
     application_question = TextAreaField(_l('Question to ask people applying for an account'))
+    registration_approved_email = TextAreaField(_l('Registration approved email'), render_kw={'rows': '5'})
 
     choose_topics = BooleanField(_l('Provide a list of topics to subscribe to'))
     filter_selection = BooleanField(_l('Trump Musk filter setup'))
@@ -153,6 +154,22 @@ class EditInstanceForm(FlaskForm):
     gone_forever = BooleanField(_l('Gone forever'))
     trusted = BooleanField(_l('Trusted'))
     posting_warning = TextAreaField(_l('Posting warning'))
+    inbox = StringField(_l('Inbox'))
+    submit = SubmitField(_l('Save'))
+
+
+class EditBlockedImageForm(FlaskForm):
+    hash = TextAreaField(_l('Hash'), validators=[DataRequired(), Length(min=256, max=256)])
+    file_name = StringField(_l('Filename'), validators=[Optional(), Length(max=256)])
+    note = StringField(_l('Note'), validators=[Optional(), Length(max=256)])
+    submit = SubmitField(_l('Save'))
+
+
+class AddBlockedImageForm(FlaskForm):
+    url = StringField(_l('Url'), validators=[Optional()])
+    hash = TextAreaField(_l('Hash'), validators=[Optional(), Length(min=256, max=256)])
+    file_name = StringField(_l('Filename'), validators=[Optional(), Length(max=256)])
+    note = StringField(_l('Note'), validators=[Optional(), Length(max=256)])
     submit = SubmitField(_l('Save'))
 
 

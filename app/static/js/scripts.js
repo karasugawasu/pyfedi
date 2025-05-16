@@ -38,6 +38,8 @@ document.addEventListener("DOMContentLoaded", function () {
     setupSelectNavigation();
     setupUserPopup();
     preventDoubleFormSubmissions();
+    setupSelectAllCheckbox();
+    setupFontSizeChangers();
 
     // save user timezone into a timezone field, if it exists
     const timezoneField = document.getElementById('timezone');
@@ -879,6 +881,49 @@ function preventDoubleFormSubmissions() {
       } else {
         submitting = true;
       }
+    });
+}
+
+function setupSelectAllCheckbox() {
+    const selectAllCheckbox = document.getElementById("select_all");
+
+    if(selectAllCheckbox) {
+        selectAllCheckbox.addEventListener("change", function() {
+            const checkboxes = document.querySelectorAll("input.can_select_all");
+            checkboxes.forEach(cb => {
+                cb.checked = selectAllCheckbox.checked;
+            });
+        });
+    }
+}
+
+function setupFontSizeChangers() {
+    document.getElementById('increase_font_size').addEventListener('click', (e) => {
+        e.preventDefault();
+        let current = getCurrentFontSize();
+        current += 0.1;
+        applyFontSize(current);
+        setCookie('fontSize', current, 100000);
+    });
+    document.getElementById('decrease_font_size').addEventListener('click', (e) => {
+        e.preventDefault();
+        let current = getCurrentFontSize();
+        current = Math.max(0.5, current - 0.1); // Prevent too small
+        applyFontSize(current);
+        setCookie('fontSize', current, 100000);
+    });
+}
+
+function getCurrentFontSize() {
+    const fontSize = getComputedStyle(document.body).fontSize;
+    return parseFloat(fontSize) / parseFloat(getComputedStyle(document.documentElement).fontSize);
+}
+
+// Apply font size to target elements
+function applyFontSize(sizeRem) {
+    document.body.style.fontSize = sizeRem + 'rem';
+    document.querySelectorAll('.form-control').forEach(el => {
+        el.style.fontSize = sizeRem + 'rem';
     });
 }
 

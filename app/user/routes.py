@@ -29,7 +29,8 @@ from app.utils import render_template, markdown_to_html, user_access, markdown_t
     blocked_users, add_to_modlog, \
     blocked_communities, piefed_markdown_to_lemmy_markdown, \
     read_language_choices, request_etag_matches, return_304, mimetype_from_url, notif_id_to_string, \
-    login_required_if_private_instance
+    login_required_if_private_instance, recently_upvoted_posts, recently_downvoted_posts, recently_upvoted_post_replies, \
+    recently_downvoted_post_replies
 from sqlalchemy import desc, or_, text, asc
 from sqlalchemy.orm.exc import NoResultFound
 import os
@@ -73,14 +74,14 @@ def show_profile(user):
     subscribed = Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id).all()
     if current_user.is_anonymous or (user.id != current_user.id and not current_user.is_admin()):
         moderates = moderates.filter(Community.private_mods == False)
-        posts = Post.query.filter_by(user_id=user.id).filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=50, error_out=False)
-        post_replies = PostReply.query.filter_by(user_id=user.id, deleted=False).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=50, error_out=False)
+        posts = Post.query.filter_by(user_id=user.id).filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
+        post_replies = PostReply.query.filter_by(user_id=user.id, deleted=False).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
     elif current_user.is_admin():
-        posts = Post.query.filter_by(user_id=user.id).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=50, error_out=False)
-        post_replies = PostReply.query.filter_by(user_id=user.id).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=50, error_out=False)
+        posts = Post.query.filter_by(user_id=user.id).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
+        post_replies = PostReply.query.filter_by(user_id=user.id).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
     elif current_user.id == user.id:
-        posts = Post.query.filter_by(user_id=user.id).filter(or_(Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Post.deleted_by == user.id)).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=50, error_out=False)
-        post_replies = PostReply.query.filter_by(user_id=user.id).filter(or_(PostReply.deleted == False, PostReply.deleted_by == user.id)).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=50, error_out=False)
+        posts = Post.query.filter_by(user_id=user.id).filter(or_(Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Post.deleted_by == user.id)).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
+        post_replies = PostReply.query.filter_by(user_id=user.id).filter(or_(PostReply.deleted == False, PostReply.deleted_by == user.id)).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
 
     # profile info
     canonical = user.ap_public_url if user.ap_public_url else None
@@ -423,6 +424,7 @@ def user_settings():
         current_user.feed_auto_leave = form.feed_auto_leave.data
         current_user.read_language_ids = form.read_languages.data
         current_user.accept_private_messages = form.accept_private_messages.data
+        current_user.font = form.font.data
         session['ui_language'] = form.interface_language.data
         session['compact_level'] = form.compaction.data
         if form.vote_privately.data:
@@ -456,6 +458,7 @@ def user_settings():
         form.read_languages.data = current_user.read_language_ids
         form.compaction.data = session.get('compact_level', '')
         form.accept_private_messages.data = current_user.accept_private_messages
+        form.font.data = current_user.font
 
     return render_template('user/edit_settings.html', title=_('Edit profile'), form=form, user=current_user,
                            site=g.site,
@@ -884,7 +887,8 @@ def notifications():
 
     notification_types = defaultdict(int)
     notification_links = defaultdict(set)
-    notification_list = Notification.query.filter_by(user_id=current_user.id).order_by(desc(Notification.created_at)).all()
+    notification_list = Notification.query.filter_by(user_id=current_user.id).order_by(desc(Notification.created_at)).limit(100).all()
+    # Build a list of the types of notifications this person has, by going through all their notifications
     for notification in notification_list:
         has_notifications = True
         if notification.notif_type != NOTIF_DEFAULT:
@@ -1175,9 +1179,13 @@ def user_bookmarks():
     next_url = url_for('user.user_bookmarks', page=posts.next_num) if posts.has_next else None
     prev_url = url_for('user.user_bookmarks', page=posts.prev_num) if posts.has_prev and page != 1 else None
 
+    # Voting history
+    recently_upvoted = recently_upvoted_posts(current_user.id)
+    recently_downvoted = recently_downvoted_posts(current_user.id)
+
     return render_template('user/bookmarks.html', title=_('Bookmarks'), posts=posts, show_post_community=True,
                            low_bandwidth=low_bandwidth, user=current_user,
-                           site=g.site,
+                           site=g.site, recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
                            next_url=next_url, prev_url=prev_url,
                            
                            )
@@ -1197,9 +1205,13 @@ def user_bookmarks_comments():
     next_url = url_for('user.user_bookmarks_comments', page=post_replies.next_num) if post_replies.has_next else None
     prev_url = url_for('user.user_bookmarks_comments', page=post_replies.prev_num) if post_replies.has_prev and page != 1 else None
 
+    # Voting history
+    recently_upvoted_replies = recently_upvoted_post_replies(current_user.id)
+    recently_downvoted_replies = recently_downvoted_post_replies(current_user.id)
+
     return render_template('user/bookmarks_comments.html', title=_('Comment bookmarks'), post_replies=post_replies, show_post_community=True,
                            low_bandwidth=low_bandwidth, user=current_user,
-                           site=g.site,
+                           site=g.site, recently_upvoted_replies=recently_upvoted_replies, recently_downvoted_replies=recently_downvoted_replies,
                            next_url=next_url, prev_url=prev_url,
                            
                            )
@@ -1251,6 +1263,12 @@ def user_alerts(type='posts', filter='all'):
         entities = Topic.query.join(NotificationSubscription, NotificationSubscription.entity_id == Topic.id).\
                         filter_by(type=NOTIF_TOPIC, user_id=current_user.id).order_by(desc(NotificationSubscription.created_at))
         title = _('Topic Alerts')
+
+    elif type == 'feeds':
+        # ignore filter
+        entities = Feed.query.join(NotificationSubscription, NotificationSubscription.entity_id == Feed.id).\
+                        filter_by(type=NOTIF_FEED, user_id=current_user.id).order_by(desc(NotificationSubscription.created_at))
+        title = _('Feed Alerts')
 
     elif type == 'users':
         # ignore filter

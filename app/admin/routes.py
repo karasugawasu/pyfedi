@@ -12,6 +12,7 @@ from slugify import slugify
 from sqlalchemy import text, desc, or_
 from PIL import Image
 from urllib.parse import urlparse
+from furl import furl
 
 from app import db, celery, cache
 from app.activitypub.routes import process_inbox_request, process_delete_request, replay_inbox_request
@@ -19,21 +20,22 @@ from app.activitypub.signature import post_request, default_context, RsaKeys
 from app.activitypub.util import instance_allowed, extract_domain_and_actor
 from app.admin.forms import FederationForm, SiteMiscForm, SiteProfileForm, EditCommunityForm, EditUserForm, \
     EditTopicForm, SendNewsletterForm, AddUserForm, PreLoadCommunitiesForm, ImportExportBannedListsForm, \
-    EditInstanceForm, RemoteInstanceScanForm, MoveCommunityForm
+    EditInstanceForm, RemoteInstanceScanForm, MoveCommunityForm, EditBlockedImageForm, AddBlockedImageForm
 from app.admin.util import unsubscribe_from_everything_then_delete, unsubscribe_from_community, send_newsletter, \
     topics_for_form, move_community_images_to_here
 from app.community.util import save_icon_file, save_banner_file, search_for_community
 from app.community.routes import do_subscribe
 from app.constants import REPORT_STATE_NEW, REPORT_STATE_ESCALATED, POST_STATUS_REVIEWING
-from app.email import send_welcome_email
+from app.email import send_registration_approved_email
 from app.models import AllowedInstances, BannedInstances, ActivityPubLog, utcnow, Site, Community, CommunityMember, \
     User, Instance, File, Report, Topic, UserRegistration, Role, Post, PostReply, Language, RolePermission, Domain, \
-    Tag, DefederationSubscription
+    Tag, DefederationSubscription, BlockedImage
+from app.shared.tasks import task_selector
 from app.utils import render_template, permission_required, set_setting, get_setting, gibberish, markdown_to_html, \
     moderating_communities, joined_communities, finalize_user_setup, theme_list, blocked_phrases, blocked_referrers, \
     topic_tree, languages_for_form, menu_topics, ensure_directory_exists, add_to_modlog, get_request, file_get_contents, \
     download_defeds, instance_banned, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, referrer, \
-    community_membership
+    community_membership, retrieve_image_hash, posts_with_blocked_images
 from app.admin import bp
 
 
@@ -171,6 +173,7 @@ def admin_misc():
         set_setting('email_verification', form.email_verification.data)
         set_setting('choose_topics', form.choose_topics.data)
         set_setting('filter_selection', form.filter_selection.data)
+        set_setting('registration_approved_email', form.registration_approved_email.data)
         flash(_('Settings saved.'))
     elif request.method == 'GET':
         form.enable_downvotes.data = site.enable_downvotes
@@ -194,6 +197,7 @@ def admin_misc():
         form.choose_topics.data = get_setting('choose_topics', True)
         form.filter_selection.data = get_setting('filter_selection', True)
         form.private_instance.data = site.private_instance
+        form.registration_approved_email.data = get_setting('registration_approved_email', '')
     return render_template('admin/misc.html', title=_('Misc settings'), form=form,
                            
                            site=g.site, )
@@ -1282,7 +1286,7 @@ def admin_approve_registrations_approve(user_id):
         db.session.commit()
         if user.verified:
             finalize_user_setup(user)
-            send_welcome_email(user, True)
+            send_registration_approved_email(user)
 
         flash(_('Registration approved.'))
 
@@ -1555,6 +1559,7 @@ def admin_instance_edit(instance_id):
         instance.gone_forever = form.gone_forever.data
         instance.trusted = form.trusted.data
         instance.posting_warning = form.posting_warning.data
+        instance.inbox = form.inbox.data
 
         db.session.commit()
 
@@ -1566,6 +1571,7 @@ def admin_instance_edit(instance_id):
         form.gone_forever.data = instance.gone_forever
         form.trusted.data = instance.trusted
         form.posting_warning.data = instance.posting_warning
+        form.inbox.data = instance.inbox
 
     return render_template('admin/edit_instance.html', title=_('Edit instance'), form=form, instance=instance,
                            
@@ -1618,3 +1624,97 @@ def admin_community_move(community_id, new_owner):
     form.new_url.data = community.name
 
     return render_template('admin/community_move.html', title=_('Move community'), form=form, community=community, site=g.site)
+
+
+@bp.route('/blocked_images', methods=['GET'])
+@login_required
+@permission_required('change instance settings')
+def admin_blocked_images():
+    low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
+    blocked_images = BlockedImage.query.order_by(desc(BlockedImage.id)).all()
+    return render_template('admin/blocked_images.html', blocked_images=blocked_images,
+                           title=_('Blocked images'),
+                           low_bandwidth=low_bandwidth,
+                           site=g.site,
+                           )
+
+
+@bp.route('/blocked_image/<int:image_id>/edit', methods=['GET', 'POST'])
+@login_required
+@permission_required('change instance settings')
+def admin_blocked_image_edit(image_id):
+    form = EditBlockedImageForm()
+    image = BlockedImage.query.get_or_404(image_id)
+    if form.validate_on_submit():
+        image.hash = form.hash.data
+        image.file_name = form.file_name.data
+        image.note = form.note.data
+        db.session.commit()
+
+        flash(_('Saved'))
+        return redirect(url_for('admin.admin_blocked_images'))
+    else:
+        form.hash.data = image.hash
+        form.file_name.data = image.file_name
+        form.note.data = image.note
+
+    return render_template('admin/edit_blocked_image.html', title=_('Edit blocked image'), form=form, blocked_image=image,
+                           site=g.site, )
+
+
+@bp.route('/blocked_image/add', methods=['GET', 'POST'])
+@login_required
+@permission_required('change instance settings')
+def admin_blocked_image_add():
+    form = AddBlockedImageForm()
+    if form.validate_on_submit():
+        if form.url.data:
+            hash = retrieve_image_hash(form.url.data)
+            file_name = str(furl(form.url.data).path).split('/')
+            file_name = file_name[-1]
+        else:
+            hash = form.hash.data
+            file_name = form.file_name.data
+        image = BlockedImage(hash=hash, file_name=file_name, note=form.note.data)
+        db.session.add(image)
+        db.session.commit()
+
+        flash(_('Saved'))
+        return redirect(url_for('admin.admin_blocked_image_purge_posts'))
+
+    flash(_('Provide the url of an image or the hash (and file name) of it, but not both.'))
+
+    return render_template('admin/edit_blocked_image.html', title=_('Add blocked image'), form=form,
+                           site=g.site, )
+
+
+@bp.route('/block_image_purge_posts', methods=['GET', 'POST'])
+@login_required
+@permission_required('change instance settings')
+def admin_blocked_image_purge_posts():
+    if request.method == 'POST':
+        post_ids = request.form.getlist('post_ids')
+
+        task_selector('delete_posts_with_blocked_images', post_ids=post_ids, user_id=current_user.id, send_async=not current_app.debug)
+
+        flash(_('%(count)s posts deleted.', count=len(post_ids)))
+
+        return redirect(url_for('admin.admin_blocked_images'))
+
+    posts = Post.query.filter(Post.id.in_(posts_with_blocked_images()), Post.deleted == False).order_by(desc(Post.posted_at)).all()
+    return render_template('post/post_block_image_purge_posts.html', posts=posts, title=_('Posts containing blocked images'),
+                           referrer=request.args.get('referrer'))
+
+
+@bp.route('/blocked_image/<int:image_id>/delete', methods=['GET'])
+@login_required
+@permission_required('change instance settings')
+def admin_blocked_image_delete(image_id):
+    image = BlockedImage.query.get_or_404(image_id)
+
+    db.session.delete(image)
+    db.session.commit()
+
+    flash(_('Blocked image deleted'))
+
+    return redirect(url_for('admin.admin_blocked_images'))

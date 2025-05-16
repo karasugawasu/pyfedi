@@ -18,7 +18,7 @@ from app import db, cache, constants, celery
 from app.models import User, Post, Community, BannedInstances, File, PostReply, AllowedInstances, Instance, utcnow, \
     PostVote, PostReplyVote, ActivityPubLog, Notification, Site, CommunityMember, InstanceRole, Report, Conversation, \
     Language, Tag, Poll, PollChoice, UserFollower, CommunityBan, CommunityJoinRequest, NotificationSubscription, \
-    Licence, UserExtraField, Feed, FeedMember, FeedItem, CommunityFlair
+    Licence, UserExtraField, Feed, FeedMember, FeedItem, CommunityFlair, UserFlair
 from app.activitypub.signature import signed_get_request, post_request
 import time
 from app.constants import *
@@ -219,7 +219,8 @@ def comment_model_to_json(reply: PostReply) -> dict:
         'language': {
             'identifier': reply.language_code(),
             'name': reply.language_name()
-        }
+        },
+        'flair': reply.author.community_flair(reply.community_id)
     }
     if reply.edited_at:
         reply_data['updated'] = ap_datetime(reply.edited_at)
@@ -1353,7 +1354,8 @@ def find_instance_id(server):
     else:
         # Our instance does not know about {server} yet. Initially, create a sparse row in the 'instance' table and spawn a background
         # task to update the row with more details later
-        new_instance = Instance(domain=server, software='unknown', created_at=utcnow(), trusted=server == 'piefed.social')
+        new_instance = Instance(domain=server, software='unknown', inbox=f'https://{server}/inbox', created_at=utcnow(),
+                                trusted=server == 'piefed.social')
         try:
             db.session.add(new_instance)
             db.session.commit()
@@ -1801,6 +1803,13 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
                         if profile_id != reply_parent.author.ap_profile_id:
                             local_users_to_notify.append(profile_id)
 
+        if 'flair' in request_json['object'] and request_json['object']['flair']:
+            existing_flair = UserFlair.query.filter(UserFlair.user_id == user.id, UserFlair.community_id == community.id).first()
+            if existing_flair:
+                existing_flair.flair = request_json['object']['flair']
+            else:
+                db.session.add(UserFlair(user_id=user.id, community_id=community.id, flair=request_json['object']['flair'].strip()))
+            db.session.commit()
         try:
             post_reply = PostReply.new(user, post, parent_comment, notify_author=False, body=body, body_html=body_html,
                                        language_id=language_id, request_json=request_json, announce_id=announce_id)
@@ -2118,6 +2127,7 @@ def update_post_from_activity(post: Post, request_json: dict):
     # Tags
     if 'tag' in request_json['object'] and isinstance(request_json['object']['tag'], list):
         post.tags.clear()
+        post.flair.clear()
         for json_tag in request_json['object']['tag']:
             if json_tag['type'] == 'Hashtag':
                 if post.microblog or json_tag['name'][1:].lower() != post.community.name.lower():             # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
