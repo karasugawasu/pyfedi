@@ -3,7 +3,7 @@ msgstr ""
 "Project-Id-Version: piefed\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
 "POT-Creation-Date: 2025-04-12 08:47+1200\n"
-"PO-Revision-Date: 2025-05-16 15:09+0000\n"
+"PO-Revision-Date: 2025-05-16 15:27+0000\n"
 "Last-Translator: 鴉河雛 <takeuchinomori@gmail.com>\n"
 "Language-Team: Japanese <http://translate.piefed.social/projects/piefed/"
 "main-web-app/ja/>\n"
@@ -236,7 +236,7 @@ msgstr "アカウントを申請する人への質問内容"
 
 #: app/admin/forms.py:39
 msgid "Provide a list of topics to subscribe to"
-msgstr "購読するトピック一覧を表示する"
+msgstr "参加するトピック一覧を表示する"
 
 #: app/admin/forms.py:40
 msgid "Trump Musk filter setup"
@@ -262,7 +262,7 @@ msgstr "追加のCSS"
 #: app/templates/_view_filter_nav.html:12
 #: app/templates/themes/dillo/_view_filter_nav.html:5 app/user/forms.py:69
 msgid "Subscribed"
-msgstr "購読済み"
+msgstr "参加済み"
 
 #: app/admin/forms.py:46 app/templates/_view_filter_nav.html:4
 #: app/templates/_view_filter_nav.html:14
@@ -803,8 +803,8 @@ msgid ""
 "admin/activities for details"
 msgstr ""
 "%(parsed_communities_sorted)d 件中 %(communities_to_add)d "
-"件のコミュニティの購読処理がバックグラウンドで実行されました。詳細は管理画面"
-"「アクティビティ」をご確認ください"
+"件のコミュニティへの参加処理がバックグラウンドで実行されました。詳細は管理画"
+"面「アクティビティ」をご確認ください"
 
 #: app/admin/routes.py:583
 #, python-format
@@ -815,7 +815,7 @@ msgid ""
 msgstr ""
 "現在のフィルターに基づき、候補コミュニティ %(candidate_communities)d "
 "件のうち %(communities_to_join)d "
-"件の購読処理がバックグラウンドで実行されました。詳細は管理画面「アクティビテ"
+"件の参加処理がバックグラウンドで実行されました。詳細は管理画面「アクティビテ"
 "ィ」をご確認ください"
 
 #: app/admin/routes.py:608
@@ -1074,7 +1074,7 @@ msgstr "興味のあるトピックを選択してください"
 msgid ""
 "You have joined some communities relating to those interests. Find more "
 "on the Topics menu or browse the home page."
-msgstr "あなたの興味に関連するいくつかのコミュニティに参加しました。さらに探したい場"
+msgstr "あなたの興味に関連するいくつかのコミュニティへ参加しました。さらに探したい場"
 "合は、トピックメニューやホームをご覧ください。"
 
 #: app/auth/onboarding.py:59
@@ -1916,7 +1916,7 @@ msgstr ""
 #: app/feed/routes.py:869
 #, python-format
 msgid "You subscribed to %(feed_title)s"
-msgstr "%(feed_title)s を購読しました"
+msgstr "%(feed_title)s に参加しました"
 
 #: app/feed/routes.py:933
 #, python-format
@@ -1983,14 +1983,12 @@ msgid "Local Communities"
 msgstr "ローカルコミュニティ"
 
 #: app/main/routes.py:380
-#, fuzzy
 msgid "Joined Communities"
 msgstr "参加しているコミュニティ"
 
 #: app/main/routes.py:462
-#, fuzzy
 msgid "Not Joined Communities"
-msgstr "参加しているコミュニティ"
+msgstr "不参加のコミュニティ"
 
 #: app/main/routes.py:498
 #, fuzzy
@@ -2882,14 +2880,12 @@ msgid "Joined"
 msgstr "参加済み"
 
 #: app/templates/list_communities.html:36
-#, fuzzy
 msgid "Not Joined communities"
-msgstr "参加しているコミュニティ"
+msgstr "不参加のコミュニティ"
 
 #: app/templates/list_communities.html:37
-#, fuzzy
 msgid "Not Joined"
-msgstr "参加済み"
+msgstr "不参加"
 
 #: app/templates/list_communities.html:49
 msgid "Choose a topic to filter communities by"
@@ -4155,9 +4151,8 @@ msgstr ""
 #: app/templates/feed/public_feeds.html:28
 #: app/templates/feed/public_feeds.html:31
 #: app/templates/feed/show_feed.html:146
-#, fuzzy
 msgid "Subscribe"
-msgstr "参加者"
+msgstr "参加"
 
 #: app/templates/feed/_feed_table_row.html:5
 #: app/templates/feed/public_feeds.html:26
@@ -4515,9 +4510,9 @@ msgid "Community options"
 msgstr "コメントオプション"
 
 #: app/templates/post/post.html:110 app/templates/post/post_options.html:52
-#, fuzzy, python-format
+#, python-format
 msgid "Block community %(community_name)s"
-msgstr "%(community_name)s を編集"
+msgstr "コミュニティ %(community_name)s をブロック"
 
 #: app/templates/post/post_cross_post.html:12
 #, python-format
@@ -4629,7 +4624,7 @@ msgstr "ドメイン %(domain)s をブロック"
 #: app/templates/post/post_options.html:63
 #, python-format
 msgid "Hide every post from author's instance: %(name)s"
-msgstr ""
+msgstr "投稿者の所属インスタンス %(name)s からの投稿をすべて非表示にする"
 
 #: app/templates/post/post_options.html:69
 #, python-format
@@ -5095,21 +5090,25 @@ msgid ""
 "Votes will be sent to <a href=\"/instances?filter=trusted\">untrusted "
 "instances</a> using an alt"
 msgstr ""
+"<a href=\"/instances?filter=trusted\""
+">信頼されていないインスタンス</a>への投票は、代替アカウントを使って送信されま"
+"す"
 
 #: app/templates/user/edit_settings.html:49
 msgid "Communities joined outside of a feed will not be auto unsubscribed."
-msgstr ""
+msgstr "自分で参加したコミュニティは、自動的に外れることはありません。"
 
 #: app/templates/user/email_notifs_unsubscribed.html:9
 #: app/templates/user/newsletter_unsubscribed.html:9
 msgid "Unsubscribed"
-msgstr ""
+msgstr "購読解除"
 
 #: app/templates/user/email_notifs_unsubscribed.html:10
 msgid ""
 "You have unsubscribed from emails about unread notifications. We might "
 "email you for other reasons, though."
-msgstr ""
+msgstr "未読通知に関するメール通知は解除されていますが、他の理由でメールをお送りする"
+"ことがあります。"
 
 #: app/templates/user/email_notifs_unsubscribed.html:11
 #: app/templates/user/newsletter_unsubscribed.html:11
@@ -5129,11 +5128,11 @@ msgstr "フォローしたいインスタンスを選択してください。そ
 
 #: app/templates/user/filters.html:28
 msgid "Collapse replies with a score at or below this level - click to view."
-msgstr ""
+msgstr "このスコア以下の返信は折りたたまれて非表示になります。"
 
 #: app/templates/user/filters.html:30
 msgid "Hide replies with a score at or below this level."
-msgstr ""
+msgstr "スコアがこの値以下の返信は完全に非表示になります。"
 
 #: app/templates/user/filters.html:39
 msgid ""
@@ -5178,11 +5177,11 @@ msgid "No blocked instances"
 msgstr "ブロックしたインスタンスはありません"
 
 #: app/templates/user/newsletter_unsubscribed.html:10
-#, fuzzy
 msgid ""
 "You have unsubscribed from the email newsletter. We might email you for "
 "other reasons, though."
-msgstr "メールニュースレターの購読を解除しました。ただし、他の理由でメールをお送りすることがあるかもしれません。"
+msgstr "メールニュースレターの購読を解除しました。ただし、他の理由でメールをお送りす"
+"ることがあるかもしれません。"
 
 #: app/templates/user/notifications.html:25
 msgid "Mark all as read"
@@ -5476,11 +5475,11 @@ msgid "Visit User"
 msgstr "ユーザーの編集"
 
 #: app/templates/user/alerts/_users.html:15
-#, fuzzy
 msgid ""
 "You have not subscribed to an alert for new content from any users. Use "
 "the bell icon on each person to do so."
-msgstr "あなたは、どのユーザーからの新しいコンテンツに対するアラートを購読していません。各ユーザーのベルアイコンを使用して購読してください。"
+msgstr "どのユーザーの新着投稿にも通知設定をしていません。通知を受け取りたい場合は、"
+"各ユーザーのベルアイコンをクリックしてください。"
 
 #: app/topic/forms.py:8
 #, fuzzy
@@ -5595,11 +5594,11 @@ msgstr "不在時にメールで通知を受け取る"
 
 #: app/user/forms.py:51 app/user/forms.py:137
 msgid "Reply collapse threshold"
-msgstr "返信を折りたたむ閾値"
+msgstr "このスコア以下の返信を折りたたむ"
 
 #: app/user/forms.py:52 app/user/forms.py:138
 msgid "Reply hide threshold"
-msgstr "返信を非表示にする閾値"
+msgstr "このスコア以下の返信を非表示にする"
 
 #: app/user/forms.py:53
 msgid "Use markdown editor GUI when writing"
