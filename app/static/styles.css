@@ -759,6 +759,10 @@ div.navbar {
   max-width: 100%;
 }
 
+.card.mt-5 {
+  max-width: 500px;
+}
+
 #breadcrumb_nav {
   font-size: 87%;
 }
