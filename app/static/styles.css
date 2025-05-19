@@ -67,56 +67,6 @@
   src: url("/static/fonts/feather/feather.ttf?cb") format("truetype"), url("/static/fonts/feather/feather.woff?cb") format("woff"), url("/static/fonts/feather/feather.svg?cb#Feather") format("svg");
   font-weight: normal;
   font-style: normal;
-  font-display: block;
-}
-@font-face {
-  font-family: Inter;
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
-  src: url("/static/fonts/inter/InterVariable.woff2") format("woff2");
-}
-@font-face {
-  font-family: "Roboto";
-  src: url("/static/fonts/roboto/Roboto-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Roboto";
-  src: url("/static/fonts/roboto/Roboto-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Atkinson Hyperlegible";
-  src: url("/static/fonts/atkinson/AtkinsonHyperlegible-Regular.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Atkinson Hyperlegible";
-  src: url("/static/fonts/atkinson/AtkinsonHyperlegible-Italic.woff2") format("woff2");
-  font-weight: 400;
-  font-style: italic;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Atkinson Hyperlegible";
-  src: url("/static/fonts/atkinson/AtkinsonHyperlegible-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-@font-face {
-  font-family: "Atkinson Hyperlegible";
-  src: url("/static/fonts/atkinson/AtkinsonHyperlegible-BoldItalic.woff2") format("woff2");
-  font-weight: 700;
-  font-style: italic;
-  font-display: swap;
 }
 .fe {
   font-family: "Feather" !important;
@@ -156,6 +106,14 @@
 
 .fe-external::before {
   content: "\e95b";
+}
+
+.fe-external-noimg::before {
+  font-size: 40px;
+  opacity: 0.4;
+  float: right;
+  position: relative;
+  top: 10px;
 }
 
 .fe-circle::before {
@@ -1298,6 +1256,7 @@ time {
   height: 20px;
   border-radius: 50%;
   vertical-align: bottom;
+  object-fit: cover;
 }
 .render_username .text-muted {
   font-size: 13px;
@@ -1993,6 +1952,9 @@ h1 .warning_badge {
   width: 100%;
   height: auto;
 }
+.main_pane > h1 {
+  overflow: hidden;
+}
 
 .side_pane img {
   max-width: 100%;
@@ -2043,6 +2005,7 @@ h1 .warning_badge {
   width: 20px;
   height: 20px;
   margin-right: 3px;
+  object-fit: cover;
 }
 
 .bump_up {

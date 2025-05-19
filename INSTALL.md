@@ -185,6 +185,10 @@ If it does not work check the log file at logs/pyfedi.log for clues.
 will be treated as bounces and deleted after extracting the email addresses in them. Use a dedicated inbox
 for bounces, not a inbox you also use for other purposes.
 
+* Set FLAG_THROWAWAY_EMAILS = 1 to see a warning on throwaway email addresses during registration approvals - https://piefed.social/post/758768
+
+* Enable [image blocking](https://piefed.social/post/751901) by setting IMAGE_HASHING_ENDPOINT to the url of [a PDQ hashing instance](https://piefed.social/post/759065).
+
 ### Development mode
 
 Setting `FLASK_DEBUG=1` in the `.env` file will enable the `<your-site>/dev/tools` page. It will expose some various testing routes as well. See the [testing section](#testing).
@@ -572,6 +576,18 @@ Also set an environment variable `FLASK_DEBUG` to '1' ( `export FLASK_DEBUG="1"`
 Log into Piefed then go to https://yourdomain/test_email to trigger a test email. It will use SES or SMTP depending on
 which environment variables you defined in .env. If `MAIL_SERVER` is empty it will try SES. Then if `AWS_REGION` is empty it'll
 silently do nothing.
+
+
+#### Log in with Google (OAuth)
+
+You need to set these two environment variables:
+
+ - GOOGLE_OAUTH_CLIENT_ID
+ - GOOGLE_OAUTH_SECRET
+
+The values for them are found by registering your instance with Google as 'an app'. Go to https://console.cloud.google.com/
+to begin. Create a new project, enable the People API, go to APIs & Services > Credentials and create a new OAuth client ID.
+Under "Authorized Redirect URIs", use `https://yourdomain.tld/auth/google_authorize`.
 
 ---
 

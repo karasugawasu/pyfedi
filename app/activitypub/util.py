@@ -1871,7 +1871,7 @@ def notify_about_post_task(post_id):
     for notify_id in user_send_notifs_to:
         if notify_id != post.user_id and notify_id not in notifications_sent_to:
             targets_data = {'post_id': post.id,'author_id':post.user_id}
-            new_notification = Notification(title=shorten_string(post.title, 50), url=f"/post/{post.id}",
+            new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                             user_id=notify_id, author_id=post.user_id,
                                             notif_type=NOTIF_USER, 
                                             subtype='new_post_from_followed_user',
@@ -1887,7 +1887,7 @@ def notify_about_post_task(post_id):
     for notify_id in community_send_notifs_to:
         if notify_id != post.user_id and notify_id not in notifications_sent_to:
             targets_data = {'post_id': post.id,'community_id':post.community_id}
-            new_notification = Notification(title=shorten_string(post.title, 50), url=f"/post/{post.id}",
+            new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                             user_id=notify_id, author_id=post.user_id,
                                             notif_type=NOTIF_COMMUNITY,
                                             subtype='new_post_in_followed_community',
@@ -1903,7 +1903,7 @@ def notify_about_post_task(post_id):
     for notify_id in topic_send_notifs_to:
         if notify_id != post.user_id and notify_id not in notifications_sent_to:
             targets_data = {'post_id': post.id,'author_id':post.user_id}
-            new_notification = Notification(title=shorten_string(post.title, 50), url=f"/post/{post.id}",
+            new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                             user_id=notify_id, author_id=post.user_id,
                                             notif_type=NOTIF_TOPIC,
                                             subtype='new_post_in_followed_topic',
@@ -1924,7 +1924,7 @@ def notify_about_post_task(post_id):
         for notify_id in feed_send_notifs_to:
             if notify_id != post.user_id and notify_id not in notifications_sent_to:
                 targets_data = {'post_id':post.id,'feed_id':feed.id}
-                new_notification = Notification(title=shorten_string(post.title, 50), url=f"/post/{post.id}",
+                new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                                 user_id=notify_id, author_id=post.user_id,
                                                 notif_type=NOTIF_FEED,
                                                 subtype='new_post_in_followed_feed',
@@ -1944,7 +1944,7 @@ def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: Pos
             if new_reply.user_id != notify_id:
                 targets_data = {'post_id':new_reply.post.id,'comment_id':new_reply.id}
                 new_notification = Notification(title=shorten_string(_('Reply to %(post_title)s',
-                                                                       post_title=new_reply.post.title), 50),
+                                                                       post_title=new_reply.post.title), 150),
                                                 url=f"/post/{new_reply.post.id}#comment_{new_reply.id}",
                                                 user_id=notify_id, author_id=new_reply.user_id,
                                                 notif_type=NOTIF_POST,
@@ -1962,7 +1962,7 @@ def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: Pos
                 if new_reply.depth <= THREAD_CUTOFF_DEPTH:
                     targets_data = {'post_id':parent_reply.post.id,'comment_id':new_reply.id,'author_id':new_reply.user_id}
                     new_notification = Notification(title=shorten_string(_('Reply to comment on %(post_title)s',
-                                                                           post_title=parent_reply.post.title), 50),
+                                                                           post_title=parent_reply.post.title), 150),
                                                     url=f"/post/{parent_reply.post.id}#comment_{new_reply.id}",
                                                     user_id=notify_id, author_id=new_reply.user_id,
                                                     notif_type=NOTIF_REPLY,
@@ -1971,7 +1971,7 @@ def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: Pos
                 else:
                     targets_data = {'post_id':parent_reply.post.id,'parent_comment_id':parent_reply.id,'comment_id':new_reply.id,'author_id':new_reply.user_id}
                     new_notification = Notification(title=shorten_string(_('Reply to comment on %(post_title)s',
-                                                                           post_title=parent_reply.post.title), 50),
+                                                                           post_title=parent_reply.post.title), 150),
                                                     url=f"/post/{parent_reply.post.id}/comment/{parent_reply.id}#comment_{new_reply.id}",
                                                     user_id=notify_id, author_id=new_reply.user_id,
                                                     notif_type=NOTIF_REPLY,

@@ -836,6 +836,7 @@ time {
     height: 20px;
     border-radius: 50%;
     vertical-align: bottom;
+    object-fit: cover;
   }
 
   .text-muted {
@@ -1633,6 +1634,10 @@ h1 .warning_badge {
       height: auto;
     }
   }
+
+  > h1 {
+    overflow: hidden;
+  }
 }
 
 .side_pane {
@@ -1688,6 +1693,7 @@ h1 .warning_badge {
   width: 20px;
   height: 20px;
   margin-right: 3px;
+  object-fit: cover;
 }
 
 .bump_up {
