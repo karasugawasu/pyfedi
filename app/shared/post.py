@@ -1,4 +1,7 @@
 import os
+import sys
+from zoneinfo import ZoneInfo
+
 from app import db, cache
 from app.activitypub.util import make_image_sizes, notify_about_post
 from app.constants import *
@@ -257,6 +260,9 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
         else:
             flair = []
         scheduled_for = input.scheduled_for.data
+        if scheduled_for and hasattr(input, 'timezone') and input.timezone.data:
+            scheduled_for = scheduled_for.replace(tzinfo=ZoneInfo(input.timezone.data))
+            scheduled_for = scheduled_for.astimezone(ZoneInfo('UTC'))
         repeat = input.repeat.data
     post.indexable = user.indexable
     post.sticky = False if src == SRC_API else input.sticky.data
@@ -272,7 +278,7 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
     post.scheduled_for = scheduled_for
     post.repeat = repeat
 
-    if post.scheduled_for and post.scheduled_for > utcnow():
+    if post.scheduled_for and post.scheduled_for.replace(tzinfo=None) > utcnow():
         post.status = POST_STATUS_SCHEDULED
 
     url_changed = False
@@ -345,7 +351,7 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
             if '.' + img.format.lower() in allowed_extensions:
                 img = ImageOps.exif_transpose(img)
 
-                img.thumbnail((2000, 2000))
+                img.thumbnail((2000, sys.maxsize))
                 img.save(final_place)
             else:
                 raise Exception('filetype not allowed')
@@ -414,7 +420,10 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
             db.session.add(file)
             db.session.commit()
             post.image_id = file.id
-            make_image_sizes(post.image_id, 170, 512, 'posts', post.community.low_quality)
+            if post.type == POST_TYPE_IMAGE:
+                make_image_sizes(post.image_id, 512, 1200, 'posts', post.community.low_quality)
+            else:
+                make_image_sizes(post.image_id, 170, 512, 'posts', post.community.low_quality)
             post.url = url
             post.type = POST_TYPE_IMAGE
         else:

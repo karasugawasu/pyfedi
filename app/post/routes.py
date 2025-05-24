@@ -1,5 +1,5 @@
 from collections import namedtuple, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from random import randint
 
 from flask import redirect, url_for, flash, current_app, abort, request, g, make_response, jsonify
@@ -12,12 +12,12 @@ from furl import furl
 from app import db, constants, cache, limiter, celery
 from app.activitypub.signature import default_context, send_post_request
 from app.activitypub.util import update_post_from_activity
-from app.community.util import send_to_remote_instance
+from app.community.util import send_to_remote_instance, flair_from_form
 from app.inoculation import inoculation
 from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm, ConfirmationForm, \
-    ConfirmationMultiDeleteForm
+    ConfirmationMultiDeleteForm, EditReplyForm, FlairPostForm
 from app.community.forms import CreateLinkForm, CreateDiscussionForm, CreateVideoForm, CreatePollForm, EditImageForm
-from app.constants import NOTIF_REPORT, POST_STATUS_SCHEDULED
+from app.constants import NOTIF_REPORT, POST_STATUS_SCHEDULED, POST_STATUS_PUBLISHED
 from app.post.util import post_replies, get_comment_branch, tags_to_string, url_needs_archive, \
     generate_archive_link, body_has_no_archive_link
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, POST_TYPE_LINK, \
@@ -88,6 +88,10 @@ def show_post(post_id: int):
         if current_user.is_authenticated and (current_user.id == post.user_id or current_user.is_admin() or current_user.is_staff()):
             if post.status == POST_STATUS_SCHEDULED:
                 flash(_('This post is scheduled to be published at %(when)s', when=str(post.scheduled_for)))    # todo: convert into current_user.timezone
+
+        if current_user.is_authenticated:
+            if not post.community.is_moderator() and not post.community.is_owner() and not current_user.is_staff() and not current_user.is_admin():
+                form.distinguished.render_kw = {'disabled': True}
 
         if current_user.is_authenticated and current_user.verified and form.validate_on_submit():
             try:
@@ -531,7 +535,7 @@ def add_reply_inline(post_id: int, comment_id: int):
             return f'<div id="reply_to_{comment_id}" class="hidable"></div>' # do nothing, just hide the form
         reply = PostReply.new(current_user, post, in_reply_to=in_reply_to, body=piefed_markdown_to_lemmy_markdown(content),
                               body_html=markdown_to_html(content), notify_author=True,
-                              language_id=language_id)
+                              language_id=language_id, distinguished=False)
 
         current_user.language_id = language_id
         reply.ap_id = reply.profile_id()
@@ -1067,6 +1071,30 @@ def post_sticky(post_id: int, mode):
     return redirect(referrer(url_for('activitypub.post_ap', post_id=post.id)))
 
 
+@bp.route('/post/<int:post_id>/set_flair', methods=['GET', 'POST'])
+@login_required
+def post_set_flair(post_id):
+    post = Post.query.get_or_404(post_id)
+    if post.user_id == current_user.id or post.community.is_moderator(current_user) or current_user.is_staff() or current_user.is_admin():
+        form = FlairPostForm()
+        flair_choices = flair_for_form(post.community.id)
+        if len(flair_choices):
+            form.flair.choices = flair_choices
+
+        if form.validate_on_submit():
+            post.flair.clear()
+            post.flair = flair_from_form(form.flair.data)
+            db.session.commit()
+            if post.status == POST_STATUS_PUBLISHED:
+                task_selector('edit_post', post_id=post.id)
+            return redirect(url_for('activitypub.community_profile', actor=post.community.link()))
+        form.referrer.data = referrer()
+        form.flair.data = [flair.id for flair in post.flair]
+        return render_template('generic_form.html', form=form, title=_('Set flair for %(post_title)s', post_title=post.title))
+    else:
+        abort(401)
+
+
 @bp.route('/post/<int:post_id>/lock/<mode>', methods=['GET', 'POST'])
 @login_required
 def post_lock(post_id: int, mode):
@@ -1199,7 +1227,7 @@ def post_reply_edit(post_id: int, comment_id: int):
         comment = PostReply.query.get_or_404(post_reply.parent_id)
     else:
         comment = None
-    form = NewReplyForm()
+    form = EditReplyForm()
     form.language_id.choices = languages_for_form()
     if post_reply.user_id == current_user.id or post.community.is_moderator():
         if form.validate_on_submit():
@@ -1209,6 +1237,9 @@ def post_reply_edit(post_id: int, comment_id: int):
             form.body.data = post_reply.body
             form.notify_author.data = post_reply.notify_author
             form.language_id.data = post_reply.language_id
+            form.distinguished.data = post_reply.distinguished
+            if not post.community.is_moderator() and not post.community.is_owner() and not current_user.is_staff() and not current_user.is_admin():
+                form.distinguished.render_kw = {'disabled': True}
             return render_template('post/post_reply_edit.html', title=_('Edit comment'), form=form, post=post, post_reply=post_reply,
                                    comment=comment, markdown_editor=current_user.markdown_editor,
                                    community=post.community, site=g.site,
@@ -1538,6 +1569,7 @@ def post_cross_post(post_id: int):
         community = Community.query.get_or_404(form.which_community.data)
         post_type = post_type_to_form_url_type(post.type, post.url)
         response = make_response(redirect(url_for('community.add_post', actor=community.link(), type=post_type, source=str(post.id))))
+        response.set_cookie('cross_post_community_id', str(community.id), max_age=timedelta(days=28))
         response.delete_cookie('post_title')
         response.delete_cookie('post_description')
         response.delete_cookie('post_tags')
@@ -1552,6 +1584,9 @@ def post_cross_post(post_id: int):
         breadcrumb.text = _('Communities')
         breadcrumb.url = '/communities'
         breadcrumbs.append(breadcrumb)
+
+        if request.cookies.get('cross_post_community_id'):
+            form.which_community.data = int(request.cookies.get('cross_post_community_id'))
 
         return render_template('post/post_cross_post.html', title=_('Cross post'), form=form, post=post,
                                breadcrumbs=breadcrumbs,

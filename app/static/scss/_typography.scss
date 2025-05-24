@@ -187,10 +187,12 @@
 
 .fe-arrow-up::before {
   content: "\e914";
+  font-weight: normal;
 }
 
 .fe-arrow-down::before {
   content: "\e90c";
+  font-weight: normal;
 }
 
 .fe-reply {
@@ -203,6 +205,10 @@
 
 .fe-discussion::before {
   content: "\e991";
+}
+
+.fe-label::before {
+  content: "\e9db";
 }
 
 .fe-link::before {
@@ -301,6 +307,10 @@ h1 {
 
 .fe-magnify::before {
   content: "\ea08";
+}
+
+.fe-distinguished::before {
+  content: "\e9c7";
 }
 
 .imageVisible {

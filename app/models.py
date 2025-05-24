@@ -817,6 +817,7 @@ class User(UserMixin, db.Model):
     searchable = db.Column(db.Boolean, default=True)
     indexable = db.Column(db.Boolean, default=False)
     bot = db.Column(db.Boolean, default=False)
+    vote_privately = db.Column(db.Boolean, default=False)
     ignore_bots = db.Column(db.Integer, default=0)
     unread_notifications = db.Column(db.Integer, default=0)
     ip_address = db.Column(db.String(50))
@@ -952,9 +953,6 @@ class User(UserMixin, db.Model):
         if self.cover_id:
             size += self.cover.filesize()
         return size
-
-    def vote_privately(self):
-        return self.alt_user_name is not None and self.alt_user_name != ''
 
     def community_flair(self, community_id: int):
         user_flair = UserFlair.query.filter(UserFlair.community_id == community_id, UserFlair.user_id == self.id).first()
@@ -1666,8 +1664,12 @@ class Post(db.Model):
                 db.session.commit()
 
             if post.image_id and not post.type == constants.POST_TYPE_VIDEO:
-                make_image_sizes(post.image_id, 170, 512, 'posts',
-                                 community.low_quality)  # the 512 sized image is for masonry view
+                if post.type == constants.POST_TYPE_IMAGE:
+                    make_image_sizes(post.image_id, 512, 1200, 'posts',
+                                     community.low_quality)  # the 512 sized image is for masonry view
+                else:
+                    make_image_sizes(post.image_id, 170, None, 'posts',
+                                     community.low_quality)  # the 512 sized image is for masonry view
 
             # Update list of cross posts
             if post.url:
@@ -1998,7 +2000,7 @@ class PostReply(db.Model):
     body_html_safe = db.Column(db.Boolean, default=False)
     score = db.Column(db.Integer, default=0, index=True)    # used for 'top' sorting
     nsfw = db.Column(db.Boolean, default=False, index=True)
-    nsfl = db.Column(db.Boolean, default=False, index=True)
+    distinguished = db.Column(db.Boolean, default=False)
     notify_author = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, index=True, default=utcnow)
     posted_at = db.Column(db.DateTime, index=True, default=utcnow)
@@ -2043,7 +2045,7 @@ class PostReply(db.Model):
     )
 
     @classmethod
-    def new(cls, user: User, post: Post, in_reply_to, body, body_html, notify_author, language_id, request_json: dict = None, announce_id=None):
+    def new(cls, user: User, post: Post, in_reply_to, body, body_html, notify_author, language_id, distinguished, request_json: dict = None, announce_id=None):
 
         from app.utils import shorten_string, blocked_phrases, recently_upvoted_post_replies, reply_already_exists, reply_is_just_link_to_gif_reaction, reply_is_stupid
         from app.activitypub.util import notify_about_post_reply
@@ -2065,9 +2067,10 @@ class PostReply(db.Model):
                           depth=depth,
                           community_id=post.community.id, body=body,
                           body_html=body_html, body_html_safe=True,
-                          from_bot=user.bot, nsfw=post.nsfw, nsfl=post.nsfl,
+                          from_bot=user.bot, nsfw=post.nsfw,
                           notify_author=notify_author, instance_id=user.instance_id,
                           language_id=language_id,
+                          distinguished=distinguished,
                           ap_id=request_json['object']['id'] if request_json else None,
                           ap_create_id=request_json['id'] if request_json else None,
                           ap_announce_id=announce_id)
@@ -2533,6 +2536,7 @@ class UserRegistration(db.Model):
     created_at = db.Column(db.DateTime, default=utcnow)
     approved_at = db.Column(db.DateTime)
     approved_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    warning = db.Column(db.String(100))
     user = db.relationship('User', foreign_keys=[user_id], lazy='joined')
 
 
@@ -2813,6 +2817,7 @@ class Site(db.Model):
     contact_email = db.Column(db.String(255), default='')
     about = db.Column(db.Text, default='')
     logo = db.Column(db.String(40), default='')
+    logo_180 = db.Column(db.String(40), default='')
     logo_152 = db.Column(db.String(40), default='')
     logo_32 = db.Column(db.String(40), default='')
     logo_16 = db.Column(db.String(40), default='')

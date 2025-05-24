@@ -3,6 +3,7 @@ from collections import namedtuple
 from random import randint
 
 import flask
+from bs4 import BeautifulSoup
 
 from flask import redirect, url_for, flash, request, make_response, session, Markup, current_app, abort, g, json
 from flask_login import current_user, login_required
@@ -11,7 +12,7 @@ from slugify import slugify
 from sqlalchemy import or_, desc, text
 from sqlalchemy.orm.exc import NoResultFound
 
-from app import db, cache, celery
+from app import db, cache, celery, httpx_client
 from app.activitypub.signature import RsaKeys, post_request, send_post_request
 from app.activitypub.util import extract_domain_and_actor
 from app.chat.util import send_message
@@ -320,14 +321,12 @@ def show_community(community: Community):
 
         # filter out nsfw and nsfl if desired
         if current_user.is_anonymous:
-            comments = comments.filter(PostReply.from_bot == False, PostReply.nsfw == False, PostReply.nsfl == False, PostReply.deleted == False)
+            comments = comments.filter(PostReply.from_bot == False, PostReply.nsfw == False, PostReply.deleted == False)
             user = None
         else:
             user = current_user
             if current_user.ignore_bots == 1:
                 comments = comments.filter(PostReply.from_bot == False)
-            if current_user.hide_nsfl == 1:
-                comments = comments.filter(PostReply.nsfl == False)
             if current_user.hide_nsfw == 1:
                 comments = comments.filter(PostReply.nsfw == False)
 
@@ -514,16 +513,21 @@ def show_community_rss(actor):
         abort(404)
 
 
-@bp.route('/<actor>/subscribe', methods=['GET'])
+@bp.route('/<actor>/subscribe', methods=['GET', 'POST'])
 @login_required
 @validation_required
 def subscribe(actor):
-    do_subscribe(actor, current_user.id)
-    referrer = request.headers.get('Referer', None)
-    if referrer is not None and current_app.config['SERVER_NAME'] in referrer:
-        return redirect(referrer)
+    # POST is used by htmx, GET when JS is disabled
+    do_subscribe(actor, current_user.id, admin_preload=request.method == 'POST')
+    if request.method == 'POST':
+        community = actor_to_community(actor)
+        return render_template('community/_leave_button.html', community=community)
     else:
-        return redirect('/c/' + actor)
+        referrer = request.headers.get('Referer', None)
+        if referrer is not None and current_app.config['SERVER_NAME'] in referrer:
+            return redirect(referrer)
+        else:
+            return redirect('/c/' + actor)
 
 
 # this is separated out from the subscribe route so it can be used by the 
@@ -606,9 +610,10 @@ def do_subscribe(actor, user_id, admin_preload=False, joined_via_feed=False):
             return pre_load_message
 
 
-@bp.route('/<actor>/unsubscribe', methods=['GET'])
+@bp.route('/<actor>/unsubscribe', methods=['GET', 'POST'])
 @login_required
 def unsubscribe(actor):
+    # POST is used by htmx, GET when JS is disabled
     community = actor_to_community(actor)
 
     if community is not None:
@@ -646,20 +651,24 @@ def unsubscribe(actor):
                 community.subscriptions_count -= 1
                 db.session.commit()
 
-                flash(Markup(_('You left %(community_name)s',
-                               community_name=f'<a href="/c/{community.link()}">{community.display_name()}</a>')))
+                if request.method == 'GET':
+                    flash(Markup(_('You left %(community_name)s',
+                                   community_name=f'<a href="/c/{community.link()}">{community.display_name()}</a>')))
                 cache.delete_memoized(community_membership, current_user, community)
                 cache.delete_memoized(joined_communities, current_user.id)
             else:
                 # todo: community deletion
                 flash(_('You need to make someone else the owner before unsubscribing.'), 'warning')
 
-        # send them back where they came from
-        referrer = request.headers.get('Referer', None)
-        if referrer is not None and current_app.config['SERVER_NAME'] in referrer:
-            return redirect(referrer)
+        if request.method == 'POST':
+            return render_template('community/_join_button.html', community=community)
         else:
-            return redirect('/c/' + actor)
+            # send them back where they came from
+            referrer = request.headers.get('Referer', None)
+            if referrer is not None and current_app.config['SERVER_NAME'] in referrer:
+                return redirect(referrer)
+            else:
+                return redirect('/c/' + actor)
     else:
         abort(404)
 
@@ -2006,8 +2015,30 @@ def check_url_already_posted():
     if url:
         url = remove_tracking_from_link(url.strip())
         communities = Community.query.filter_by(banned=False).join(Post).filter(Post.url == url, Post.deleted == False, Post.status > POST_STATUS_REVIEWING).all()
-        return flask.render_template('community/check_url_posted.html', communities=communities)
+        return flask.render_template('community/check_url_posted.html', communities=communities, title=retrieve_title_of_url(url))
     else:
         abort(404)
 
+
+def retrieve_title_of_url(url):
+    try:
+        response = httpx_client.get(url, timeout=10, follow_redirects=True)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Try og:title first
+            og_title = soup.find('meta', property='og:title')
+            if og_title and og_title.get('content'):
+                return og_title.get('content').strip()
+
+            # Fall back to HTML title
+            title_tag = soup.find('title')
+            if title_tag:
+                return title_tag.get_text().strip()
+
+            return ""
+        else:
+            return ""
+    except Exception as e:
+        return ""
 

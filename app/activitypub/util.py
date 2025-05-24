@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import timedelta, datetime, timezone
 from json import JSONDecodeError
 from random import randint
@@ -214,7 +215,7 @@ def comment_model_to_json(reply: PostReply) -> dict:
         'mediaType': 'text/html',
         'source': {'content': reply.body, 'mediaType': 'text/markdown'},
         'published': ap_datetime(reply.created_at),
-        'distinguished': False,
+        'distinguished': reply.distinguished,
         'audience': reply.community.public_url(),
         'language': {
             'identifier': reply.language_code(),
@@ -921,7 +922,7 @@ def actor_json_to_model(activity_json, address, server):
                               public_key=activity_json['publicKey']['publicKeyPem'],
                               # language=community_json['language'][0]['identifier'] # todo: language
                               instance_id=find_instance_id(server),
-                              low_quality='memes' in activity_json['preferredUsername']
+                              low_quality='memes' in activity_json['preferredUsername'] or 'shitpost' in activity_json['preferredUsername']
                               )
 
         description_html = ''
@@ -1213,7 +1214,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                             # Resize the image to medium
                             if medium_width:
                                 if img_width > medium_width:
-                                    image.thumbnail((medium_width, medium_width))
+                                    image.thumbnail((medium_width, sys.maxsize))
                                 image.save(final_place)
                                 if store_files_in_s3():
                                     content_type = guess_mime_type(final_place)
@@ -1772,6 +1773,8 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             from app.utils import english_language_id
             language_id = english_language_id()
 
+        distinguished = request_json['object']['distinguished'] if 'distinguished' in request_json['object'] else False
+
         if 'attachment' in request_json['object']:
             attachment_list = []
             if isinstance(request_json['object']['attachment'], dict):
@@ -1812,7 +1815,7 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             db.session.commit()
         try:
             post_reply = PostReply.new(user, post, parent_comment, notify_author=False, body=body, body_html=body_html,
-                                       language_id=language_id, request_json=request_json, announce_id=announce_id)
+                                       language_id=language_id, distinguished=distinguished, request_json=request_json, announce_id=announce_id)
             for lutn in local_users_to_notify:
                 recipient = User.query.filter_by(ap_profile_id=lutn, ap_id=None).first()
                 if recipient:
@@ -2006,6 +2009,11 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
     if 'language' in request_json['object'] and isinstance(request_json['object']['language'], dict):
         language = find_language_or_create(request_json['object']['language']['identifier'], request_json['object']['language']['name'])
         reply.language_id = language.id
+
+    # Distinguished
+    if 'distinguished' in request_json['object']:
+        reply.distinguished = request_json['object']['distinguished']
+
     reply.edited_at = utcnow()
 
     if 'attachment' in request_json['object']:
