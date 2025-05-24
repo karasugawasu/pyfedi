@@ -219,7 +219,7 @@ div.navbar {
   margin-bottom: 1.1rem;
 
   &.required {
-    label {
+    > label {
       &:after {
         content: '*';
         color: red;
@@ -230,6 +230,14 @@ div.navbar {
       }
     }
   }
+}
+
+.post_reply_form {
+  margin-bottom: 25px;
+}
+
+.dropdown-menu.show {
+  z-index: 1022;
 }
 
 .card {
@@ -372,13 +380,15 @@ div.navbar {
   }
 
   .form-check {
-    position: absolute;
-    bottom: -14px;
-    left: 122px;
-
     label {
       display: inherit;
     }
+  }
+}
+
+#post_reply_more_options {
+  &.expanded {
+    margin-bottom: 15px;
   }
 }
 
@@ -396,11 +406,6 @@ ul.form-multicheck-columns {
     display: none;
   }
 
-  .form-check {
-    position: absolute;
-    bottom: -14px;
-    left: 122px;
-  }
 }
 
 .sort_methods, .view_filter {
@@ -580,6 +585,8 @@ ul.form-multicheck-columns {
   a {
     display: inline-block;
     max-width: 512px;
+    max-height: 575px;
+    overflow: hidden;
   }
   img {
     max-width: 100%;
@@ -825,7 +832,6 @@ time {
 .post_image {
   img {
     max-width: 100%;
-    max-height: 90vh;
   }
 }
 
@@ -950,12 +956,18 @@ time {
       color: green;
       .fe {
         font-weight: bold;
+        &:before {
+          font-weight: bold;
+        }
       }
     }
     &.voted_down {
       color: darkred;
       .fe {
         font-weight: bold;
+        &:before {
+          font-weight: bold;
+        }
       }
     }
   }
@@ -1077,6 +1089,12 @@ time {
   padding-left: 0;
   padding-top: 8px;
   padding-right: 8px;
+
+  &.distinguished {
+    > .row:first-child {
+      background-color: $lightest-grey;
+    }
+  }
 
   .limit_height {
     position: relative;
@@ -1771,13 +1789,25 @@ form {
   }
 }
 
+#search_community {
+  margin-top: 16px;
+}
+
 .post_flair_sidepane {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+
   .post_flair {
     font-size: 90%;
     padding: 2px 4px;
-    line-height: 27px;
+    line-height: 20px;
+    display: inline-block;
+    border-radius: 4px;
+    white-space: nowrap;
+    text-align: center;
   }
-  margin-bottom: 17px;
+  margin-top: 12px;
 }
 
 .user_flair {
@@ -2018,6 +2048,23 @@ form {
 #typeTab {
   a:not(.btn):active {
     border-width: 1px;
+  }
+}
+
+.blink {
+  animation: blink-animation 1s steps(2, start) infinite;
+  -webkit-animation: blink-animation 1s steps(2, start) infinite;
+}
+
+@keyframes blink-animation {
+  to {
+    visibility: hidden;
+  }
+}
+
+@-webkit-keyframes blink-animation {
+  to {
+    visibility: hidden;
   }
 }
 

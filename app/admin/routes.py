@@ -77,6 +77,8 @@ def admin_site():
             # Remove existing logo files
             if os.path.isfile(f'app{site.logo}'):
                 os.unlink(f'app{site.logo}')
+            if os.path.isfile(f'app{site.logo_180}'):
+                os.unlink(f'app{site.logo_180}')
             if os.path.isfile(f'app{site.logo_152}'):
                 os.unlink(f'app{site.logo_152}')
             if os.path.isfile(f'app{site.logo_32}'):
@@ -89,7 +91,7 @@ def admin_site():
             uploaded_icon.save(f'{directory}/{base_filename}{file_ext}')
             if file_ext == '.svg':
                 delete_original = False
-                site.logo = site.logo_152 = site.logo_32 = site.logo_16 = f'/static/media/{base_filename}{file_ext}'
+                site.logo = site.logo_180 = site.logo_152 = site.logo_32 = site.logo_16 = f'/static/media/{base_filename}{file_ext}'
             else:
                 img = Image.open(f'{directory}/{base_filename}{file_ext}')
                 if img.width > 100:
@@ -102,6 +104,11 @@ def admin_site():
                     delete_original = False
 
                 # Save multiple copies of the logo - different sizes
+                img = Image.open(f'{directory}/{base_filename}{file_ext}')
+                img.thumbnail((180, 180))
+                img.save(f'{directory}/{base_filename}_180{file_ext}')
+                site.logo_180 = f'/static/media/{base_filename}_180{file_ext}'
+
                 img = Image.open(f'{directory}/{base_filename}{file_ext}')
                 img.thumbnail((152, 152))
                 img.save(f'{directory}/{base_filename}_152{file_ext}')
@@ -173,6 +180,7 @@ def admin_misc():
         set_setting('choose_topics', form.choose_topics.data)
         set_setting('filter_selection', form.filter_selection.data)
         set_setting('registration_approved_email', form.registration_approved_email.data)
+        set_setting('ban_check_servers', form.ban_check_servers.data)
         flash(_('Settings saved.'))
     elif request.method == 'GET':
         form.enable_downvotes.data = site.enable_downvotes
@@ -197,6 +205,7 @@ def admin_misc():
         form.filter_selection.data = get_setting('filter_selection', True)
         form.private_instance.data = site.private_instance
         form.registration_approved_email.data = get_setting('registration_approved_email', '')
+        form.ban_check_servers.data = get_setting('ban_check_servers', 'piefed.social')
     return render_template('admin/misc.html', title=_('Misc settings'), form=form,
                            
                            site=g.site, )
