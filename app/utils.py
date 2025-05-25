@@ -641,6 +641,8 @@ def digits(input: int) -> int:
 
 @cache.memoize(timeout=50)
 def user_access(permission: str, user_id: int) -> bool:
+    if user_id == 0:
+        return False
     has_access = db.session.execute(text('SELECT * FROM "role_permission" as rp ' +
                                     'INNER JOIN user_role ur on rp.role_id = ur.role_id ' +
                                     'WHERE ur.user_id = :user_id AND rp.permission = :permission'),
@@ -797,7 +799,7 @@ def permission_required(permission):
     def decorator(func):
         @wraps(func)
         def decorated_view(*args, **kwargs):
-            if user_access(permission, current_user.id):
+            if user_access(permission, current_user.get_id()):
                 return func(*args, **kwargs)
             else:
                 # Handle the case where the user doesn't have the required permission
@@ -2179,3 +2181,37 @@ def notify_admin(title, url, author_id, notif_type, subtype, targets):
         admin.unread_notifications += 1
         db.session.add(notify)
     db.session.commit()
+
+
+def possible_communities():
+    which_community = {}
+    joined = joined_communities(current_user.get_id())
+    moderating = moderating_communities(current_user.get_id())
+    comms = []
+    already_added = set()
+    for c in moderating:
+        if c.id not in already_added:
+            comms.append((c.id, c.display_name()))
+            already_added.add(c.id)
+    if len(comms) > 0:
+        which_community['Moderating'] = comms
+    comms = []
+    for c in joined:
+        if c.id not in already_added:
+            comms.append((c.id, c.display_name()))
+            already_added.add(c.id)
+    if len(comms) > 0:
+        which_community['Joined communities'] = comms
+    comms = []
+    for c in db.session.query(Community.id, Community.ap_id, Community.title, Community.ap_domain).filter(
+            Community.banned == False).order_by(Community.title).all():
+        if c.id not in already_added:
+            if c.ap_id is None:
+                display_name = c.title
+            else:
+                display_name = f"{c.title}@{c.ap_domain}"
+            comms.append((c.id, display_name))
+            already_added.add(c.id)
+    if len(comms) > 0:
+        which_community['Others'] = comms
+    return which_community
