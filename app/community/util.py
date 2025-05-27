@@ -586,3 +586,7 @@ def community_in_list(community_id, community_list):
 def find_local_users(search: str) -> List[User]:
     return User.query.filter(User.banned == False, User.deleted == False, User.ap_id == None, User.user_name.ilike(f"%{search}%")).\
         order_by(desc(User.reputation)).all()
+
+def find_all_users(search: str) -> List[User]:
+    return User.query.filter(User.banned == False, User.deleted == False, User.user_name.ilike(f"%{search}%")).\
+        order_by(desc(User.reputation)).all()
