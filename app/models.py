@@ -1619,7 +1619,7 @@ class Post(db.Model):
             post.ranking_scaled = int(post.ranking + community.scale_by())
             community.post_count += 1
             community.last_active = utcnow()
-            user.post_count += 1
+            db.session.execute(text('UPDATE "user" SET post_count = post_count + 1 WHERE id = :user_id'), {'user_id': user.id})
             db.session.execute(text('UPDATE "site" SET last_active = NOW()'))
             try:
                 db.session.commit()
@@ -1684,7 +1684,6 @@ class Post(db.Model):
             if user.is_local():
                 cache.delete_memoized(recently_upvoted_posts, user.id)
             if user.reputation > 100:
-                post.up_votes += 1
                 post.score += 1
                 post.ranking = post.post_ranking(post.score, post.posted_at)
                 post.ranking_scaled = int(post.ranking + community.scale_by())
@@ -1887,7 +1886,9 @@ class Post(db.Model):
         undo = None
         if existing_vote:
             if not self.community.low_quality:
-                self.author.reputation -= existing_vote.effect
+                with db.session.begin_nested():
+                    db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
+                                       {'effect': existing_vote.effect, 'user_id': self.user_id})
             if existing_vote.effect > 0:  # previous vote was up
                 if vote_direction == 'upvote':  # new vote is also up, so remove it
                     db.session.delete(existing_vote)
@@ -2134,7 +2135,6 @@ class PostReply(db.Model):
 
         reply.ap_id = reply.profile_id()
         if user.reputation > 100:
-            reply.up_votes += 1
             reply.score += 1
             reply.ranking += 1
         elif user.reputation < -100:
@@ -2144,7 +2144,7 @@ class PostReply(db.Model):
             post.reply_count += 1
             post.community.post_reply_count += 1
             post.community.last_active = post.last_active = utcnow()
-        user.post_reply_count += 1
+        db.session.execute(text('UPDATE "user" SET post_reply_count = post_reply_count + 1 WHERE id = :user_id'), {'user_id': user.id})
         db.session.execute(text('UPDATE "site" SET last_active = NOW()'))
         db.session.commit()
 
@@ -2281,6 +2281,9 @@ class PostReply(db.Model):
         assert vote_direction == 'upvote' or vote_direction == 'downvote'
         undo = None
         if existing_vote:
+            with db.session.begin_nested():
+                db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
+                                   {'effect': existing_vote.effect, 'user_id': self.user_id})
             if existing_vote.effect > 0:  # previous vote was up
                 if vote_direction == 'upvote':  # new vote is also up, so remove it
                     db.session.delete(existing_vote)
