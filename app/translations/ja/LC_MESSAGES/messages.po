@@ -3,7 +3,7 @@ msgstr ""
 "Project-Id-Version: piefed\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
 "POT-Creation-Date: 2025-05-19 20:23+1200\n"
-"PO-Revision-Date: 2025-05-20 14:02+0000\n"
+"PO-Revision-Date: 2025-05-28 23:47+0000\n"
 "Last-Translator: 鴉河雛 <takeuchinomori@gmail.com>\n"
 "Language-Team: Japanese <http://translate.piefed.social/projects/piefed/"
 "main-web-app/ja/>\n"
@@ -472,7 +472,7 @@ msgstr "ローカルユーザーからの投稿のみ許可する"
 
 #: app/admin/forms.py:101 app/community/forms.py:58
 msgid "Only moderators can post"
-msgstr "モデレータのみ投稿できます"
+msgstr "モデレーターのみ投稿できます"
 
 #: app/admin/forms.py:102 app/community/forms.py:59
 msgid "New moderators wanted"
@@ -668,7 +668,7 @@ msgstr "メモ"
 #: app/admin/forms.py:177 app/auth/forms.py:13 app/auth/forms.py:21
 #: app/community/forms.py:90
 msgid "User name"
-msgstr "ユーザー名"
+msgstr "ユーザー名 (英字（a～z）や数字（0～9）で入力してください)"
 
 #: app/admin/forms.py:179 app/user/forms.py:13
 msgid "Email address"
@@ -1859,7 +1859,7 @@ msgstr "%(community_name)s に参加しました"
 #: app/community/routes.py:649 app/feed/routes.py:584
 #, python-format
 msgid "You left %(community_name)s"
-msgstr "%(community_name)s から脱退しました"
+msgstr "%(community_name)s の参加をやめました"
 
 #: app/community/routes.py:655 app/feed/routes.py:589 app/feed/routes.py:920
 #: app/shared/community.py:68
@@ -2473,7 +2473,7 @@ msgstr "リモートの投稿を取得"
 
 #: app/shared/community.py:62
 msgid "You have left the community"
-msgstr "コミュニティから脱退しました"
+msgstr "コミュニティの参加をやめました"
 
 #: app/shared/community.py:378
 #, python-format
@@ -3364,7 +3364,7 @@ msgstr "メールの認証が完了しました"
 #: app/templates/admin/approve_registrations.html:25
 #: app/templates/admin/approve_registrations.html:64
 msgid "Answer"
-msgstr "答え"
+msgstr "回答"
 
 #: app/templates/admin/approve_registrations.html:26
 #: app/templates/admin/approve_registrations.html:65
@@ -4340,8 +4340,8 @@ msgid ""
 "            will not copy posts so having an account on this instance "
 "subscribed to it for a while is the only way to get old posts here."
 msgstr ""
-"このインスタンス上にあるコミュニティのコピーある程度投稿があるか確認してくだ"
-"さい。\n"
+"このインスタンス上でコミュニティを開き、ある程度投稿があるか確認してください"
+"。\n"
 "移行では投稿が引き継がれないため、過去の投稿を読みたい場合は事前に参加してお"
 "くか追加で取得しておく必要があります。"
 
@@ -4430,7 +4430,7 @@ msgstr "メールアドレスと区別するため、Fediverseアカウントの
 
 #: app/templates/community/retrieve_remote_post.html:30
 msgid "Found a post:"
-msgstr "投稿を探す:"
+msgstr "見つけた投稿："
 
 #: app/templates/dev/tools.html:11
 msgid ""
