@@ -18,7 +18,7 @@ from app.models import User, utcnow, IpBan, UserRegistration, Notification, Site
 from app.shared.tasks import task_selector
 from app.utils import render_template, ip_address, user_ip_banned, user_cookie_banned, banned_ip_addresses, \
     finalize_user_setup, blocked_referrers, gibberish, get_setting, notify_admin
-
+import re
 
 @bp.route('/login', methods=['GET', 'POST'])
 @limiter.limit("100 per day;20 per 5 minutes", methods=['POST'])
@@ -120,6 +120,11 @@ def register():
             if form.user_name.data in disallowed_usernames:
                 flash(_('Sorry, you cannot use that user name'), 'error')
             else:
+                if not re.match(r'^[a-zA-Z0-9_]+$', form.user_name.data):
+                    flash(_('Sorry, usernames may only contain English letters, numbers, and "_".'), 'error')
+                    return render_template('auth/register.html', title=_('Register'), form=form, site=g.site,
+                                           google_oauth=current_app.config['GOOGLE_OAUTH_CLIENT_ID'])
+
                 # Nazis use 88 and 14 in their user names very often.
                 if '88' in form.user_name.data or '14' in form.user_name.data:
                     resp = make_response(redirect(url_for('auth.please_wait')))
