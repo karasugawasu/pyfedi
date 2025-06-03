@@ -24,7 +24,7 @@ cli.register(app)
 @app.context_processor
 def app_context_processor():
     return dict(getmtime=getmtime, instance_domain=current_app.config['SERVER_NAME'], debug_mode=current_app.debug,
-                arrow=arrow, locale=g.locale if hasattr(g, 'locale') else None,
+                arrow=arrow, locale=g.locale if hasattr(g, 'locale') else None, notif_server=current_app.config['NOTIF_SERVER'],
                 POST_TYPE_LINK=POST_TYPE_LINK, POST_TYPE_IMAGE=POST_TYPE_IMAGE, notif_id_to_string=notif_id_to_string,
                 POST_TYPE_ARTICLE=POST_TYPE_ARTICLE, POST_TYPE_VIDEO=POST_TYPE_VIDEO, POST_TYPE_POLL=POST_TYPE_POLL,
                 SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR, SUBSCRIPTION_MEMBER=SUBSCRIPTION_MEMBER,
@@ -64,7 +64,9 @@ with app.app_context():
 
 @app.before_request
 def before_request():
-    session['nonce'] = gibberish()
+    # Only regenerate nonce for regular page requests, not HTMX
+    if 'HX-Request' not in request.headers:
+        session['nonce'] = gibberish()
     g.locale = str(get_locale())
     if request.path != '/inbox' and not request.path.startswith('/static/'):        # do not load g.site on shared inbox, to increase chance of duplicate detection working properly
         g.site = Site.query.get(1)
