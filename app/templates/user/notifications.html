@@ -58,13 +58,9 @@
                  <h2>{{ _('Manage') }}</h2>
             </div>
             <div class="card-body">
-                <div class="row">
-                    <div class="col-6">
-                        <a class="w-100 btn btn-primary" href="/u/{{ current_user.link() }}/profile">{{ _('Profile') }}</a>
-                    </div>
-                    <div class="col-6">
-                        <a class="w-100 btn btn-primary" href="/user/settings">{{ _('Settings') }}</a>
-                    </div>
+                <div id="enableNotificationWrapper">
+                    <button id="enableNotifications" class="btn btn-primary" id="">{{ _('Enable popup notifications') }}</button>
+                    <p class="text-sm text-muted">{{ _('These notifications only include replies, mentions, and posts <a href="/alerts">you subscribe to</a>.') }}</p>
                 </div>
             </div>
         </div>

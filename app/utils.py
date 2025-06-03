@@ -32,7 +32,7 @@ from furl import furl
 from flask import current_app, json, redirect, url_for, request, make_response, Response, g, flash, abort
 from flask_babel import _, lazy_gettext as _l
 from flask_login import current_user, logout_user
-from sqlalchemy import text, or_, desc
+from sqlalchemy import text, or_, desc, event
 from sqlalchemy.orm import Session
 from wtforms.fields  import SelectField, SelectMultipleField, StringField
 from wtforms.widgets import Select, html_params, ListWidget, CheckboxInput, TextInput
@@ -234,7 +234,7 @@ def is_video_url(url: str) -> bool:
 def is_video_hosting_site(url: str) -> bool:
     if url is None or url == '':
         return False
-    video_hosting_sites = ['https://youtube.com', 'https://www.youtube.com', 'https://youtu.be', 'https://www.vimeo.com', 'https://www.redgifs.com/watch/']
+    video_hosting_sites = ['https://youtube.com', 'https://www.youtube.com', 'https://youtu.be', 'https://www.vimeo.com', 'https://vimeo.com', 'https://streamable.com', 'https://www.redgifs.com/watch/']
     for starts_with in video_hosting_sites:
         if url.startswith(starts_with):
             return True
@@ -2235,3 +2235,14 @@ def possible_communities():
     if len(comms) > 0:
         which_community['Others'] = comms
     return which_community
+
+
+@event.listens_for(User.unread_notifications, 'set')
+def on_unread_notifications_set(target, value, oldvalue, initiator):
+    if value != oldvalue and current_app.config['NOTIF_SERVER']:
+        publish_sse_event(f"notifications:{target.id}", json.dumps({'num_notifs': value}))
+
+
+def publish_sse_event(key, value):
+    r = get_redis_connection()
+    r.publish(key, value)
