@@ -3,7 +3,7 @@ from __future__ import annotations
 from app import cache, db
 from app.constants import *
 from app.models import ChatMessage, Community, CommunityMember, Language, Instance, Post, PostReply, PostVote, User
-from app.utils import blocked_communities, blocked_instances, blocked_users
+from app.utils import blocked_communities, blocked_instances, blocked_users, communities_banned_from
 
 from flask import current_app, g
 
@@ -12,7 +12,7 @@ from sqlalchemy import text
 # 'stub' param: set to True to exclude optional fields
 
 
-def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0):
+def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0) -> dict:
     if isinstance(post, int):
         post = Post.query.filter_by(id=post, deleted=False).one()
 
@@ -58,9 +58,9 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0):
         else:
             bookmarked = post_sub = followed = False
         if not stub:
-            banned =  db.session.execute(text('SELECT user_id FROM "community_ban" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': post.user_id, 'community_id': post.community_id}).scalar()
-            moderator = db.session.execute(text('SELECT is_moderator FROM "community_member" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': post.user_id, 'community_id': post.community_id}).scalar()
-            admin =  db.session.execute(text('SELECT user_id FROM "user_role" WHERE user_id = :user_id and role_id = 4'), {'user_id': post.user_id}).scalar()
+            banned = post.community_id in communities_banned_from(post.user_id)
+            moderator = post.community.is_moderator(post.author) or post.community.is_owner(post.author)
+            admin = post.author.is_admin()
         else:
             banned = False
             moderator = False
@@ -84,6 +84,12 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0):
 
         creator = user_view(user=post.user_id, variant=1, stub=True)
         community = community_view(community=post.community_id, variant=1, stub=True)
+        if user_id:
+            user = User.query.get(user_id)
+            post_community = Community.query.get(post.community_id)
+            can_auth_user_moderate = post_community.is_moderator(user) or post_community.is_owner(user)
+            v2.update({'canAuthUserModerate':can_auth_user_moderate})
+
         v2.update({'creator': creator, 'community': community})
 
         return v2
@@ -113,7 +119,7 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0):
 
 
 # 'user' param can be anyone (including the logged in user), 'user_id' param belongs to the user making the request
-def user_view(user: User | int, variant, stub=False, user_id=None):
+def user_view(user: User | int, variant, stub=False, user_id=None) -> dict:
     if isinstance(user, int):
         user = User.query.filter_by(id=user).one()
 
@@ -128,9 +134,9 @@ def user_view(user: User | int, variant, stub=False, user_id=None):
         if user.about and not stub:
             v1['about'] = user.about
         if user.avatar_id:
-            v1['avatar'] = user.avatar.view_url()
+            v1['avatar'] = user.avatar.medium_url()
         if user.cover_id and not stub:
-            v1['banner'] = user.cover.view_url()
+            v1['banner'] = user.cover.medium_url()
 
         return v1
 
@@ -185,11 +191,14 @@ def user_view(user: User | int, variant, stub=False, user_id=None):
               "user_name": user.user_name,
               "banned": user.banned,
               "published": user.created.isoformat() + 'Z',
-              "actor_id": user.public_url()[8:],
+              "actor_id": user.public_url(),
               "local": True,
               "deleted": user.deleted,
               "bot": user.bot,
-              "instance_id": 1
+              "instance_id": 1,
+              "title": user.display_name(),
+              "avatar": user.avatar.medium_url() if user.avatar_id else None,
+              "banner": user.cover.medium_url() if user.cover_id else None,
             },
             "counts": {
               "person_id": user.id,
@@ -207,7 +216,7 @@ def user_view(user: User | int, variant, stub=False, user_id=None):
         return v6
 
 
-def community_view(community: Community | int | str, variant, stub=False, user_id=None):
+def community_view(community: Community | int | str, variant, stub=False, user_id=None) -> dict:
     if isinstance(community, int):
         community = Community.query.filter_by(id=community).one()
     elif isinstance(community, str):
@@ -306,7 +315,7 @@ def calculate_child_count(reply):
     db.session.commit()
 
 
-def reply_view(reply: PostReply | int, variant: int, user_id=None, my_vote=0, read=False):
+def reply_view(reply: PostReply | int, variant: int, user_id=None, my_vote=0, read=False) -> dict:
     if isinstance(reply, int):
         reply = PostReply.query.filter_by(id=reply).one()
 
@@ -342,9 +351,9 @@ def reply_view(reply: PostReply | int, variant: int, user_id=None, my_vote=0, re
 
         bookmarked = db.session.execute(text('SELECT user_id FROM "post_reply_bookmark" WHERE post_reply_id = :post_reply_id and user_id = :user_id'), {'post_reply_id': reply.id, 'user_id': user_id}).scalar()
         reply_sub = db.session.execute(text('SELECT user_id FROM "notification_subscription" WHERE type = :type and entity_id = :entity_id and user_id = :user_id'), {'type': NOTIF_REPLY, 'entity_id': reply.id, 'user_id': user_id}).scalar()
-        banned = db.session.execute(text('SELECT user_id FROM "community_ban" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': reply.user_id, 'community_id': reply.community_id}).scalar()
-        moderator = db.session.execute(text('SELECT is_moderator FROM "community_member" WHERE user_id = :user_id and community_id = :community_id'), {'user_id': reply.user_id, 'community_id': reply.community_id}).scalar()
-        admin = db.session.execute(text('SELECT user_id FROM "user_role" WHERE user_id = :user_id and role_id = 4'), {'user_id': reply.user_id}).scalar()
+        banned = reply.community_id in communities_banned_from(user_id)
+        moderator = reply.community.is_moderator(reply.author) or reply.community.is_owner(reply.author)
+        admin = reply.author.is_admin()
         if my_vote == 0 and user_id is not None:
             reply_vote = db.session.execute(text('SELECT effect FROM "post_reply_vote" WHERE post_reply_id = :post_reply_id and user_id = :user_id'), {'post_reply_id': reply.id, 'user_id': user_id}).scalar()
             effect = reply_vote if reply_vote else 0
@@ -361,9 +370,15 @@ def reply_view(reply: PostReply | int, variant: int, user_id=None, my_vote=0, re
         v2 = {'comment': reply_view(reply=reply, variant=1), 'counts': counts, 'banned_from_community': False, 'subscribed': 'NotSubscribed',
               'saved': saved, 'creator_blocked': False, 'my_vote': my_vote, 'activity_alert': activity_alert,
               'creator_banned_from_community': creator_banned_from_community, 'creator_is_moderator': creator_is_moderator, 'creator_is_admin': creator_is_admin}
-        creator = user_view(user=reply.user_id, variant=1, stub=True)
-        community = community_view(community=reply.community_id, variant=1, stub=True)
+        creator = user_view(user=reply.author, variant=1, stub=True)
+        community = community_view(community=reply.community, variant=1, stub=True)
         post = post_view(post=reply.post_id, variant=1)
+        if user_id:
+            user = User.query.get(user_id)
+            post_community = Community.query.get(post['community_id'])
+            can_auth_user_moderate = post_community.is_moderator(user) or post_community.is_owner(user)
+            v2.update({'canAuthUserModerate':can_auth_user_moderate})
+
         v2.update({'creator': creator, 'community': community, 'post': post})
 
         return v2
@@ -416,7 +431,7 @@ def reply_view(reply: PostReply | int, variant: int, user_id=None, my_vote=0, re
         return v5
 
 
-def reply_report_view(report, reply_id, user_id):
+def reply_report_view(report, reply_id, user_id) -> dict:
     # views/comment_report_view.dart - /comment/report api endpoint
     reply_json = reply_view(reply=reply_id, variant=2, user_id=user_id)
     post_json = post_view(post=reply_json['comment']['post_id'], variant=1, stub=True)
@@ -458,7 +473,7 @@ def reply_report_view(report, reply_id, user_id):
     return v1
 
 
-def post_report_view(report, post_id, user_id):
+def post_report_view(report, post_id, user_id) -> dict:
     # views/post_report_view.dart - /post/report api endpoint
     post_json = post_view(post=post_id, variant=2, user_id=user_id)
     community_json = community_view(community=post_json['post']['community_id'], variant=1, stub=True)
@@ -499,7 +514,7 @@ def post_report_view(report, post_id, user_id):
     return v1
 
 
-def search_view(type):
+def search_view(type) -> dict:
     v1 = {
       'type_': type,
       'comments': [],
@@ -510,7 +525,7 @@ def search_view(type):
     return v1
 
 
-def instance_view(instance: Instance | int, variant):
+def instance_view(instance: Instance | int, variant) -> dict:
     if isinstance(instance, int):
         instance = Instance.query.filter_by(id=instance).one()
 
@@ -524,7 +539,7 @@ def instance_view(instance: Instance | int, variant):
         return v1
 
 
-def private_message_view(cm: ChatMessage, user_id, ap_id):
+def private_message_view(cm: ChatMessage, user_id, ap_id) -> dict:
     creator = user_view(cm.sender_id, variant=1)
     recipient = user_view(cm.recipient_id, variant=1)
     is_local = creator['instance_id'] == 1
@@ -548,7 +563,7 @@ def private_message_view(cm: ChatMessage, user_id, ap_id):
     return v1
 
 
-def site_view(user):
+def site_view(user) -> dict:
     logo = g.site.logo if g.site.logo else '/static/images/piefed_logo_icon_t_75.png'
     site = {
       "enable_downvotes": g.site.enable_downvotes,
@@ -634,7 +649,7 @@ def joined_communities(user):
 
 
 # @cache.memoize(timeout=86400)
-def blocked_people_view(user):
+def blocked_people_view(user) -> list[dict]:
     blocked_ids = blocked_users(user.id)
     blocked = []
     for blocked_id in blocked_ids:
@@ -643,7 +658,7 @@ def blocked_people_view(user):
 
 
 # @cache.memoize(timeout=86400)
-def blocked_communities_view(user):
+def blocked_communities_view(user) -> list[dict]:
     blocked_ids = blocked_communities(user.id)
     blocked = []
     for blocked_id in blocked_ids:
@@ -652,7 +667,7 @@ def blocked_communities_view(user):
 
 
 # @cache.memoize(timeout=86400)
-def blocked_instances_view(user):
+def blocked_instances_view(user) -> list[dict]:
     blocked_ids = blocked_instances(user.id)
     blocked = []
     for blocked_id in blocked_ids:

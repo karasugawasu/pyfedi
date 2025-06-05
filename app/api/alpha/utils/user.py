@@ -16,23 +16,29 @@ def get_user(auth, data):
         raise Exception('missing_parameters')
 
     # user_id = logged in user, person_id = person who's posts, comments etc are being fetched
-    # when 'username' is requested, user_id and person_id are the same
+    # 'username' can be provided instead, to populate person_id
 
     person_id = None
     if 'person_id' in data:
         person_id = int(data['person_id'])
+    elif 'username' in data:
+        if '@' in data['username']:
+            person_id = User.query.filter(func.lower(User.ap_id) == data['username'].lower(), User.deleted == False).first().id
+        else:
+            person_id = User.query.filter(func.lower(User.user_name) == data['username'].lower(), User.ap_id == None, User.deleted == False).first().id
+
+        data['person_id'] = person_id
+
+    include_content = data.get('include_content', False)
 
     user_id = None
     if auth:
         user_id = authorise_api_user(auth)
-        if 'username' in data:
-            data['person_id'] = user_id
-            person_id = int(user_id)
         auth = None                 # avoid authenticating user again in get_post_list and get_reply_list
 
     # bit unusual. have to help construct the json here rather than in views, to avoid circular dependencies
-    post_list = get_post_list(auth, data, user_id)
-    reply_list = get_reply_list(auth, data, user_id)
+    post_list = get_post_list(auth, data, user_id) if include_content else {'posts': []}
+    reply_list = get_reply_list(auth, data, user_id) if include_content else {'comments': []}
 
     user_json = user_view(user=person_id, variant=3, user_id=user_id)
     user_json['posts'] = post_list['posts']
@@ -69,7 +75,8 @@ def get_user_list(auth, data):
     for user in users:
         user_list.append(user_view(user, variant=2, stub=True, user_id=user_id))
     list_json = {
-        "users": user_list
+        "users": user_list,
+        'next_page': str(users.next_num) if users.next_num else None
     }
 
     return list_json
@@ -129,7 +136,8 @@ def get_user_replies(auth, data):
     for reply in replies:
         reply_list.append(reply_view(reply=reply, variant=5, user_id=user_id))
     list_json = {
-        "replies": reply_list
+        "replies": reply_list,
+        'next_page': str(replies.next_num) if replies.next_num else None
     }
 
     return list_json
@@ -261,7 +269,7 @@ def get_user_notifications(auth, data):
     res['status'] = status
     res['counts'] = counts
     res['items'] = items
-    res['next_page'] = str(user_notifications.next_num)
+    res['next_page'] = str(user_notifications.next_num) if user_notifications.next_num is not None else None
     return res
 
 
