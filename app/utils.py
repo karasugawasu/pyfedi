@@ -453,6 +453,10 @@ def convert_soft_breaks(text: str) -> str:
                 line_idx = i
                 break
 
+        # テーブルっぽい行は無視
+        if lines[line_idx].lstrip().startswith('|'):
+            return match.group(0)
+
         # 次の行が空白行または空なら改行を入れない
         if line_idx + 1 < len(lines):
             next_line = lines[line_idx + 1]
