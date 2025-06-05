@@ -103,7 +103,7 @@ def home_page(sort, view_filter):
     prev_url = url_for('main.index', page=page - 1, sort=sort, view_filter=view_filter, result_id=result_id) if page > 0 else None
 
     # Active Communities
-    active_communities = Community.query.filter_by(banned=False)
+    active_communities = Community.query.filter_by(banned=False).filter_by(nsfw=False).filter_by(nsfl=False)
     if current_user.is_authenticated:   # do not show communities current user is banned from
         banned_from = communities_banned_from(current_user.id)
         if banned_from:
@@ -114,7 +114,7 @@ def home_page(sort, view_filter):
     active_communities = active_communities.order_by(desc(Community.last_active)).limit(5).all()
 
     # New Communities
-    new_communities = Community.query.filter_by(banned=False)
+    new_communities = Community.query.filter_by(banned=False).filter_by(nsfw=False).filter_by(nsfl=False)
     if current_user.is_authenticated:   # do not show communities current user is banned from
         banned_from = communities_banned_from(current_user.id)
         if banned_from:
@@ -141,7 +141,7 @@ def home_page(sort, view_filter):
                            description=shorten_string(html_to_text(g.site.sidebar), 150),
                            content_filters=content_filters, sort=sort, view_filter=view_filter,
                            announcement=allowlist_html(get_setting('announcement', '')),
-                           site=g.site, joined_communities=joined_or_modding_communities(current_user.get_id()),
+                            joined_communities=joined_or_modding_communities(current_user.get_id()),
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None
                            )
 
@@ -153,9 +153,7 @@ def list_topics():
     topics = topic_tree()
 
     return render_template('list_topics.html', topics=topics, title=_('Browse by topic'),
-                           low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
-                           site=g.site,
-                           )
+                           low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1')
 
 
 @bp.route('/communities', methods=['GET'])
@@ -232,7 +230,7 @@ def list_communities():
                            joined_communities=joined_or_modding_communities(current_user.get_id()),
                            pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
-                           site=g.site, feed_id=feed_id,
+                            feed_id=feed_id,
                            server_has_feeds=server_has_feeds, public_feeds=public_feeds,
                            )
 
@@ -305,7 +303,7 @@ def list_local_communities():
                            joined_communities=joined_or_modding_communities(current_user.get_id()),
                            pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
-                           site=g.site,
+                           
                            feed_id=feed_id, server_has_feeds=server_has_feeds, public_feeds=public_feeds,
                            )
 
@@ -385,7 +383,7 @@ def list_subscribed_communities():
                            joined_communities=joined_or_modding_communities(current_user.get_id()),
                            pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
-                           site=g.site, feed_id=feed_id,
+                            feed_id=feed_id,
                            server_has_feeds=server_has_feeds, public_feeds=public_feeds,
                            )
 
@@ -466,9 +464,7 @@ def list_not_subscribed_communities():
                            joined_communities=joined_or_modding_communities(current_user.get_id()),
                            pending_communities=pending_communities(current_user.get_id()),
                            low_bandwidth=low_bandwidth,
-                           feed_id=feed_id, server_has_feeds=server_has_feeds, public_feeds=public_feeds,
-                           site=g.site,
-                           )
+                           feed_id=feed_id, server_has_feeds=server_has_feeds, public_feeds=public_feeds)
 
 
 @bp.route('/modlog', methods=['GET'])
@@ -495,7 +491,7 @@ def modlog():
     return render_template('modlog.html',
                            title=_('Moderation Log'), modlog_entries=modlog_entries, can_see_names=can_see_names,
                            next_url=next_url, prev_url=prev_url, low_bandwidth=low_bandwidth,
-                           site=g.site,
+                           
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            )
 
@@ -928,5 +924,4 @@ def list_feeds():
     else:
         # render the page
         return render_template('feed/public_feeds.html', server_has_feeds=server_has_feeds, public_feeds_list=public_feeds,
-                            subscribed_feeds=subscribed_feeds(current_user.get_id()),
-                            )
+                            subscribed_feeds=subscribed_feeds(current_user.get_id()))

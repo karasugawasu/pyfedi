@@ -5,13 +5,14 @@ from app.constants import *
 from app.models import Post, PostVote, Community, CommunityMember, utcnow, User
 from app.shared.post import vote_for_post, bookmark_post, remove_bookmark_post, subscribe_post, make_post, edit_post, \
                             delete_post, restore_post, report_post, lock_post, sticky_post, mod_remove_post, mod_restore_post
-from app.utils import authorise_api_user, blocked_users, blocked_communities, blocked_instances, recently_upvoted_posts
+from app.utils import authorise_api_user, blocked_users, blocked_communities, blocked_instances, recently_upvoted_posts, \
+    english_language_id
 
 from datetime import timedelta
 from sqlalchemy import desc, text
 
 
-def get_post_list(auth, data, user_id=None, search_type='Posts'):
+def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     type = data['type_'] if data and 'type_' in data else "All"
     sort = data['sort'] if data and 'sort' in data else "Hot"
     page = int(data['page_cursor']) if data and 'page_cursor' in data else 1
@@ -125,7 +126,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts'):
             continue
     list_json = {
         "posts": postlist,
-        "next_page": str(posts.next_num)
+        "next_page": str(posts.next_num) if posts.next_num is not None else None
     }
 
     return list_json
@@ -199,9 +200,9 @@ def post_post(auth, data):
     body = data['body'] if 'body' in data else ''
     url = data['url'] if 'url' in data else None
     nsfw = data['nsfw'] if 'nsfw' in data else False
-    language_id = data['language_id'] if 'language_id' in data else 2       # FIXME: use site language
+    language_id = data['language_id'] if 'language_id' in data else english_language_id()
     if language_id < 2:
-        language_id = 2
+        language_id = english_language_id()
 
     # change when Polls are supported
     type = POST_TYPE_ARTICLE
@@ -231,7 +232,7 @@ def put_post(auth, data):
     nsfw = data['nsfw'] if 'nsfw' in data else post.nsfw
     language_id = data['language_id'] if 'language_id' in data else post.language_id
     if language_id < 2:
-        language_id = 2   # FIXME: use site language
+        language_id = english_language_id()   # FIXME: use site language
 
     # change when Polls are supported
     type = POST_TYPE_ARTICLE
