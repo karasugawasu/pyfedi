@@ -177,6 +177,7 @@ def admin_misc():
         cache.delete_memoized(blocked_referrers)
         set_setting('public_modlog', form.public_modlog.data)
         set_setting('email_verification', form.email_verification.data)
+        set_setting('captcha_enabled', form.captcha_enabled.data)
         set_setting('choose_topics', form.choose_topics.data)
         set_setting('filter_selection', form.filter_selection.data)
         set_setting('registration_approved_email', form.registration_approved_email.data)
@@ -201,6 +202,7 @@ def admin_misc():
         form.default_filter.data = site.default_filter if site.default_filter else 'popular'
         form.public_modlog.data = get_setting('public_modlog', False)
         form.email_verification.data = get_setting('email_verification', True)
+        form.captcha_enabled.data = get_setting('captcha_enabled', False)
         form.choose_topics.data = get_setting('choose_topics', True)
         form.filter_selection.data = get_setting('filter_selection', True)
         form.private_instance.data = site.private_instance
@@ -676,14 +678,14 @@ def admin_federation():
 
     # this is the main settings form
     elif form.validate_on_submit():
-        if form.use_allowlist.data:
+        if form.federation_mode.data == 'allowlist':
             set_setting('use_allowlist', True)
             db.session.execute(text('DELETE FROM allowed_instances'))
             for allow in form.allowlist.data.split('\n'):
                 if allow.strip():
                     db.session.add(AllowedInstances(domain=allow.strip()))
                     cache.delete_memoized(instance_allowed, allow.strip())
-        if form.use_blocklist.data:
+        else:  # blocklist mode
             set_setting('use_allowlist', False)
             db.session.execute(text('DELETE FROM banned_instances WHERE subscription_id is null'))
             for banned in form.blocklist.data.split('\n'):
@@ -713,8 +715,8 @@ def admin_federation():
     
     # this is just the regular page load
     elif request.method == 'GET':
-        form.use_allowlist.data = get_setting('use_allowlist', False)
-        form.use_blocklist.data = not form.use_allowlist.data
+        use_allowlist = get_setting('use_allowlist', False)
+        form.federation_mode.data = 'allowlist' if use_allowlist else 'blocklist'
         instances = BannedInstances.query.filter(BannedInstances.subscription_id == None).all()
         form.blocklist.data = '\n'.join([instance.domain for instance in instances])
         instances = AllowedInstances.query.all()
@@ -911,7 +913,7 @@ def admin_communities():
 
     communities = Community.query
     if search:
-        communities = communities.filter(Community.title.ilike(f"%{search}%"))
+        communities = communities.filter(or_(Community.title.ilike(f"%{search}%"), Community.ap_id.ilike(f"%{search}%")))
     communities = communities.order_by(text('"community".' + sort_by))
     communities = communities.paginate(page=page, per_page=1000, error_out=False)
 
@@ -1175,7 +1177,7 @@ def admin_users():
     elif local_remote == 'remote':
         users = users.filter(User.ap_id != None)
     if search:
-        users = users.filter(User.email.ilike(f"%{search}%"))
+        users = users.filter(or_(User.email.ilike(f"%{search}%"), User.user_name.ilike(f"%{search}%")))
     if last_seen > 0:
         users = users.filter(User.last_seen > utcnow() - timedelta(days=last_seen))
     users = users.order_by(text('"user".' + sort_by))
@@ -1259,8 +1261,8 @@ def admin_content():
 @permission_required('approve registrations')
 @login_required
 def admin_approve_registrations():
-    if current_app.config['FLAG_THROWAWAY_EMAILS'] and os.path.isfile('app/static/disposable_domains.txt'):
-        with open('app/static/disposable_domains.txt', 'r', encoding='utf-8') as f:
+    if current_app.config['FLAG_THROWAWAY_EMAILS'] and os.path.isfile('app/static/tmp/disposable_domains.txt'):
+        with open('app/static/tmp/disposable_domains.txt', 'r', encoding='utf-8') as f:
             disposable_domains = [line.rstrip('\n') for line in f]
     else:
         disposable_domains = []
@@ -1587,10 +1589,11 @@ def admin_community_move(community_id, new_owner):
         community.ap_profile_id = 'https://' + current_app.config['SERVER_NAME'] + '/c/' + form.new_url.data.lower()
         community.ap_public_url = 'https://' + current_app.config['SERVER_NAME'] + '/c/' + form.new_url.data
         community.ap_followers_url = 'https://' + current_app.config['SERVER_NAME'] + '/c/' + form.new_url.data + '/followers'
+        community.ap_featured_url = 'https://' + current_app.config['SERVER_NAME'] + '/c/' + form.new_url.data + '/featured'
+        community.ap_moderators_url = 'https://' + current_app.config['SERVER_NAME'] + '/c/' + form.new_url.data + '/moderators'
         community.ap_domain = current_app.config['SERVER_NAME']
         community.instance_id = 1
-        db.session.execute(text('UPDATE "post" SET instance_id = 1 WHERE community_id = :community_id'), {'community_id': community.id})
-        db.session.execute(text('UPDATE "post_reply" SET instance_id = 1 WHERE community_id = :community_id'), {'community_id': community.id})
+
         if form.new_owner.data:
             community.user_id = new_owner_user.id
         db.session.commit()

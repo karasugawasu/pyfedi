@@ -52,6 +52,69 @@ def show_profile_by_id(user_id):
     return show_profile(user)
 
 
+def _get_user_posts(user, post_page):
+    """Get posts for a user based on current user's permissions."""
+    base_query = Post.query.filter_by(user_id=user.id)
+    
+    if current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff()):
+        # Admins see everything
+        return base_query.order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
+    elif current_user.is_authenticated and current_user.id == user.id:
+        # Users see their own posts including soft-deleted ones they deleted
+        return base_query.filter(
+            or_(Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Post.deleted_by == user.id)
+        ).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
+    else:
+        # Everyone else sees only public, non-deleted posts
+        return base_query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
+
+
+def _get_user_post_replies(user, replies_page):
+    """Get post replies for a user based on current user's permissions."""
+    base_query = PostReply.query.filter_by(user_id=user.id)
+    
+    if current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff()):
+        # Admins see everything
+        return base_query.order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
+    elif current_user.is_authenticated and current_user.id == user.id:
+        # Users see their own replies including soft-deleted ones they deleted
+        return base_query.filter(or_(PostReply.deleted == False, PostReply.deleted_by == user.id)).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
+    else:
+        # Everyone else sees only non-deleted replies
+        return base_query.filter(PostReply.deleted == False).order_by(
+            desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
+
+
+def _get_user_moderates(user):
+    """Get communities moderated by user based on current user's permissions."""
+    if not (current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_staff() or current_user.is_admin())):
+        return []
+    
+    moderates = Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id).\
+        filter(or_(CommunityMember.is_moderator, CommunityMember.is_owner))
+    
+    # Hide private mod communities unless user is admin or viewing their own profile
+    if current_user.is_anonymous or (user.id != current_user.id and not current_user.is_admin()):
+        moderates = moderates.filter(Community.private_mods == False)
+    
+    return moderates.all()
+
+
+def _get_user_upvoted_posts(user):
+    """Get posts upvoted by user (only for user themselves or admins)."""
+    if current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_admin()):
+        return Post.query.join(PostVote, PostVote.post_id == Post.id).filter(PostVote.effect > 0, PostVote.user_id == user.id).\
+            order_by(desc(PostVote.created_at)).limit(10).all()
+    return []
+
+
+def _get_user_subscribed_communities(user):
+    """Get communities subscribed to by user."""
+    if current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_staff() or current_user.is_admin()):
+        return Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id).all()
+    return []
+
+
 @login_required_if_private_instance
 def show_profile(user):
     if (user.deleted or user.banned) and current_user.is_anonymous:
@@ -65,23 +128,12 @@ def show_profile(user):
     post_page = request.args.get('post_page', 1, type=int)
     replies_page = request.args.get('replies_page', 1, type=int)
 
-    moderates = Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id)\
-        .filter(or_(CommunityMember.is_moderator, CommunityMember.is_owner))
-    if current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_admin()):
-        upvoted = Post.query.join(PostVote, PostVote.post_id == Post.id).filter(PostVote.effect > 0, PostVote.user_id == user.id).order_by(desc(PostVote.created_at)).limit(10).all()
-    else:
-        upvoted = []
-    subscribed = Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id).all()
-    if current_user.is_anonymous or (user.id != current_user.id and not current_user.is_admin()):
-        moderates = moderates.filter(Community.private_mods == False)
-        posts = Post.query.filter_by(user_id=user.id).filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
-        post_replies = PostReply.query.filter_by(user_id=user.id, deleted=False).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
-    elif current_user.is_admin():
-        posts = Post.query.filter_by(user_id=user.id).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
-        post_replies = PostReply.query.filter_by(user_id=user.id).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
-    elif current_user.id == user.id:
-        posts = Post.query.filter_by(user_id=user.id).filter(or_(Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Post.deleted_by == user.id)).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
-        post_replies = PostReply.query.filter_by(user_id=user.id).filter(or_(PostReply.deleted == False, PostReply.deleted_by == user.id)).order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
+    # Get data using helper functions
+    moderates = _get_user_moderates(user)
+    upvoted = _get_user_upvoted_posts(user)
+    subscribed = _get_user_subscribed_communities(user)
+    posts = _get_user_posts(user, post_page)
+    post_replies = _get_user_post_replies(user, replies_page)
 
     # profile info
     canonical = user.ap_public_url if user.ap_public_url else None
@@ -107,7 +159,7 @@ def show_profile(user):
                        replies_page=post_replies.prev_num) if post_replies.has_prev and replies_page != 1 else None
 
     return render_template('user/show_profile.html', user=user, posts=posts, post_replies=post_replies,
-                           moderates=moderates.all(), canonical=canonical, title=_('Posts by %(user_name)s',
+                           moderates=moderates, canonical=canonical, title=_('Posts by %(user_name)s',
                                                                                    user_name=user.user_name),
                            description=description, subscribed=subscribed, upvoted=upvoted, disable_voting=True,
                            post_next_url=post_next_url, post_prev_url=post_prev_url,
@@ -422,6 +474,7 @@ def user_settings():
         current_user.read_language_ids = form.read_languages.data
         current_user.accept_private_messages = form.accept_private_messages.data
         current_user.font = form.font.data
+        current_user.additional_css = form.additional_css.data
         session['ui_language'] = form.interface_language.data
         session['compact_level'] = form.compaction.data
         current_user.vote_privately = form.vote_privately.data
@@ -455,6 +508,7 @@ def user_settings():
         form.compaction.data = session.get('compact_level', '')
         form.accept_private_messages.data = current_user.accept_private_messages
         form.font.data = current_user.font
+        form.additional_css.data = current_user.additional_css
 
     return render_template('user/edit_settings.html', title=_('Change settings'), form=form, user=current_user,
                            )
@@ -1029,7 +1083,7 @@ def import_settings_task(user_id, filename):
                               "to": [community.public_url()],
                               "object": community.public_url(),
                               "type": "Follow",
-                              "id": f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.id}"
+                              "id": f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.uuid}"
                             }
                             send_post_request(community.ap_inbox_url, follow, user.private_key,
                                               user.public_url() + '#main-key')

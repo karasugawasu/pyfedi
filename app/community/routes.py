@@ -46,7 +46,7 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     blocked_communities, remove_tracking_from_link, piefed_markdown_to_lemmy_markdown, \
     instance_software, domain_from_email, referrer, flair_for_form, find_flair_id, login_required_if_private_instance, \
     possible_communities
-from app.shared.post import make_post
+from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
 from feedgen.feed import FeedGenerator
 from datetime import timezone, timedelta
@@ -75,6 +75,7 @@ def add_local():
                               ap_profile_id='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data.lower(),
                               ap_public_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data,
                               ap_followers_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data + '/followers',
+                              ap_moderators_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data + '/moderators',
                               ap_domain=current_app.config['SERVER_NAME'],
                               subscriptions_count=1, instance_id=1, low_quality='memes' in form.url.data)
         icon_file = request.files['icon_file']
@@ -158,7 +159,7 @@ def community_name_search():
     communities_list = []
     try:
         if g.site.enable_nsfw:
-            with open('app/static/all_communities.json','r') as acj:
+            with open('app/static/tmp/all_communities.json','r') as acj:
                 all_communities_json = json.load(acj)
                 communities_list = all_communities_json['all_communities']
         else:
@@ -585,7 +586,7 @@ def do_subscribe(actor, user_id, admin_preload=False, joined_via_feed=False):
                       "to": [community.public_url()],
                       "object": community.public_url(),
                       "type": "Follow",
-                      "id": f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.id}"
+                      "id": f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.uuid}"
                     }
                     send_post_request(community.ap_inbox_url, follow, user.private_key, user.public_url() + '#main-key', timeout=10)
 
@@ -628,7 +629,7 @@ def unsubscribe(actor):
                         if community.instance.domain == 'a.gup.pe':
                             join_request = CommunityJoinRequest.query.filter_by(user_id=current_user.id, community_id=community.id).first()
                             if join_request:
-                                follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.id}"
+                                follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.uuid}"
                         undo_id = f"https://{current_app.config['SERVER_NAME']}/activities/undo/" + gibberish(15)
                         follow = {
                           "actor": current_user.public_url(),
@@ -691,7 +692,7 @@ def join_then_add(actor):
                   "to": [community.public_url()],
                   "object": community.public_url(),
                   "type": "Follow",
-                  "id": f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.id}"
+                  "id": f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.uuid}"
                 }
                 send_post_request(community.ap_inbox_url, follow, current_user.private_key,
                                   current_user.public_url() + '#main-key')
@@ -766,6 +767,9 @@ def add_post(actor, type):
             db.session.execute(text('UPDATE "user" SET timezone = :timezone WHERE id = :user_id'),
                                {'user_id': current_user.id, 'timezone': form.timezone.data})
             db.session.commit()
+
+        if post.sticky:
+            sticky_post(post.id, True, SRC_WEB)     # federating post's stickiness is separate from creating it
 
         resp = make_response(redirect(f"/post/{post.id}"))
         # remove cookies used to maintain state when switching post type
@@ -912,6 +916,9 @@ def community_edit(community_id: int):
                         topic.num_communities = topic.communities.count()
                 db.session.commit()
             flash(_('Saved'))
+
+            cache.delete_memoized(moderating_communities, current_user.id)
+            cache.delete_memoized(joined_communities, current_user.id)
 
             # just borrow federation code for now (replacing most of this function with a call to edit_community in app.shared.community can be done "later")
             task_selector('edit_community', user_id=current_user.id, community_id=community.id)
@@ -1907,6 +1914,59 @@ def community_flair_delete(community_id, flair_id):
         return redirect(url_for('community.community_flair', actor=community.link()))
     else:
         abort(401)
+
+
+@bp.route('/community/leave_all')
+@login_required
+def community_leave_all():
+    all_communities = Community.query.filter_by(banned=False)
+    user_joined_communities = joined_communities(current_user.id)
+    user_moderating_communities = moderating_communities(current_user.id)
+    # get the joined community ids list
+    joined_ids = []
+    for jc in user_joined_communities:
+        joined_ids.append(jc.id)
+    for mc in user_moderating_communities:
+        joined_ids.append(mc.id)
+    # filter down to just the joined communities
+    communities = all_communities.filter(Community.id.in_(joined_ids))
+
+    for community in communities.all():
+        subscription = community_membership(current_user, community)
+        if subscription:
+            if subscription != SUBSCRIPTION_OWNER:
+                # Undo the Follow
+                if not community.is_local():
+                    if not community.instance.gone_forever:
+                        follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{gibberish(15)}"
+                        if community.instance.domain == 'a.gup.pe':
+                            join_request = CommunityJoinRequest.query.filter_by(user_id=current_user.id, community_id=community.id).first()
+                            if join_request:
+                                follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.uuid}"
+                        undo_id = f"https://{current_app.config['SERVER_NAME']}/activities/undo/" + gibberish(15)
+                        follow = {
+                          "actor": current_user.public_url(),
+                          "to": [community.public_url()],
+                          "object": community.public_url(),
+                          "type": "Follow",
+                          "id": follow_id
+                        }
+                        undo = {
+                          'actor': current_user.public_url(),
+                          'to': [community.public_url()],
+                          'type': 'Undo',
+                          'id': undo_id,
+                          'object': follow
+                        }
+                        send_post_request(community.ap_inbox_url, undo, current_user.private_key,
+                                          current_user.public_url() + '#main-key', timeout=10)
+
+                db.session.query(CommunityMember).filter_by(user_id=current_user.id, community_id=community.id).delete()
+                db.session.query(CommunityJoinRequest).filter_by(user_id=current_user.id, community_id=community.id).delete()
+                cache.delete_memoized(community_membership, current_user, community)
+                db.session.commit()
+
+    return redirect(url_for('main.list_communities'))
 
 
 @bp.route('/<actor>/invite', methods=['GET', 'POST'])

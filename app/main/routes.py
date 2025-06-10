@@ -167,6 +167,10 @@ def list_communities():
     page = request.args.get('page', 1, type=int)
     low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
     sort_by = request.args.get('sort_by', 'post_reply_count desc')
+
+    if request.args.get('prompt'):
+        flash(_('You did not choose any topics. Would you like to choose individual communities instead?'))
+
     topics = Topic.query.order_by(Topic.name).all()
     languages = Language.query.order_by(Language.name).all()
     communities = Community.query.filter_by(banned=False)
@@ -671,6 +675,17 @@ And if you want to add your score to the database to help your fellow Bookworms 
             db.session.commit()
 
     return 'ok'
+
+
+@bp.route('/communities_menu')
+def communities_menu():
+    return render_template('communities_menu.html', menu_topics=menu_topics(),
+                           moderating_communities=moderating_communities(current_user.get_id()),
+                           joined_communities=joined_communities(current_user.get_id()),
+                           menu_instance_feeds=menu_instance_feeds(),
+                           menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           )
 
 
 @bp.route('/topics_menu')

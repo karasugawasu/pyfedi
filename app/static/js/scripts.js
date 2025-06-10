@@ -44,6 +44,8 @@ document.addEventListener("DOMContentLoaded", function () {
     setupFancySelects();
     setupImagePreview();
     setupNotificationPermission();
+    setupFederationModeToggle();
+    setupMegaMenuNavigation();
 
     // save user timezone into a timezone field, if it exists
     const timezoneField = document.getElementById('timezone');
@@ -662,6 +664,10 @@ function setupKeyboardShortcuts() {
             if(document.activeElement.classList.contains('skip-link')) {
                 return;
             }
+            // Don't intercept keyboard shortcuts when modifier keys are pressed
+            if (event.ctrlKey || event.metaKey || event.altKey) {
+                return;
+            }
             var didSomething = false;
             if(event.shiftKey && event.key === '?') {
                 location.href = '/keyboard_shortcuts';
@@ -1099,6 +1105,40 @@ function setupNotificationPermission() {
     }
 }
 
+function setupFederationModeToggle() {
+    const federationModeRadios = document.querySelectorAll('input[name="federation_mode"]');
+    const allowlistField = document.getElementById('allowlist');
+    const blocklistField = document.getElementById('blocklist');
+    
+    if (federationModeRadios.length === 0 || !allowlistField || !blocklistField) {
+        return; // Exit if we're not on the federation page
+    }
+    
+    // Get the form groups containing the textarea fields
+    const allowlistGroup = allowlistField.closest('.form-group');
+    const blocklistGroup = blocklistField.closest('.form-group');
+    
+    function toggleFields() {
+        const selectedMode = document.querySelector('input[name="federation_mode"]:checked').value;
+        
+        if (selectedMode === 'allowlist') {
+            allowlistGroup.style.display = '';
+            blocklistGroup.style.display = 'none';
+        } else {
+            allowlistGroup.style.display = 'none';
+            blocklistGroup.style.display = '';
+        }
+    }
+    
+    // Set initial state
+    toggleFields();
+    
+    // Add event listeners to radio buttons
+    federationModeRadios.forEach(radio => {
+        radio.addEventListener('change', toggleFields);
+    });
+}
+
 function getCurrentFontSize() {
     const fontSize = getComputedStyle(document.body).fontSize;
     return parseFloat(fontSize) / parseFloat(getComputedStyle(document.documentElement).fontSize);
@@ -1192,3 +1232,46 @@ document.getElementById('btn_add_home_screen').addEventListener('click', functio
         deferredPrompt = null;
     });
 });
+
+function setupMegaMenuNavigation() {
+    // Custom dropdown management since Bootstrap's data-bs-toggle gets in the way
+    const dropdownToggle = document.querySelector('.nav-link.dropdown-toggle[href="/communities"]');
+    const dropdownMenu = document.querySelector('.dropdown-menu.communities_menu');
+    
+    if (dropdownToggle && dropdownMenu) {
+        // Handle dropdown toggle click
+        dropdownToggle.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const isVisible = dropdownMenu.style.display === 'block';
+            if (isVisible) {
+                hideDropdown();
+            } else {
+                showDropdown();
+            }
+        });
+        
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(e) {
+            if (!dropdownToggle.contains(e.target) && !dropdownMenu.contains(e.target)) {
+                hideDropdown();
+            }
+        });
+
+    }
+    
+    function showDropdown() {
+        dropdownMenu.classList.add('show');
+        dropdownMenu.style.setProperty('display', 'block', 'important');
+        dropdownToggle.setAttribute('aria-expanded', 'true');
+        dropdownToggle.parentElement.classList.add('show');
+    }
+    
+    function hideDropdown() {
+        dropdownMenu.classList.remove('show');
+        dropdownMenu.style.setProperty('display', 'none', 'important');
+        dropdownToggle.setAttribute('aria-expanded', 'false');
+        dropdownToggle.parentElement.classList.remove('show');
+    }
+}

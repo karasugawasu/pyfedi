@@ -764,6 +764,7 @@ def retrieve_peertube_block_list():
 
 
 def ensure_directory_exists(directory):
+    """Ensure a directory exists and is writable, creating it if necessary."""
     parts = directory.split('/')
     rebuild_directory = ''
     for part in parts:
@@ -771,6 +772,10 @@ def ensure_directory_exists(directory):
         if not os.path.isdir(rebuild_directory):
             os.mkdir(rebuild_directory)
         rebuild_directory += '/'
+    
+    # Check if the final directory is writable
+    if not os.access(directory, os.W_OK):
+        current_app.logger.warning(f"Directory '{directory}' is not writable")
 
 
 def mimetype_from_url(url):
@@ -1162,22 +1167,46 @@ def user_filters_replies(user_id):
 def moderating_communities(user_id):
     if user_id is None or user_id == 0:
         return []
-    return Community.query.join(CommunityMember, Community.id == CommunityMember.community_id).\
+    communities = Community.query.join(CommunityMember, Community.id == CommunityMember.community_id).\
         filter(Community.banned == False).\
         filter(or_(CommunityMember.is_moderator == True, CommunityMember.is_owner == True)). \
         filter(CommunityMember.is_banned == False). \
         filter(CommunityMember.user_id == user_id).order_by(Community.title).all()
+    
+    # Track display names to identify duplicates
+    display_name_counts = {}
+    for community in communities:
+        display_name = community.title
+        display_name_counts[display_name] = display_name_counts.get(display_name, 0) + 1
+    
+    # Flag communities as duplicates if their display name appears more than once
+    for community in communities:
+        community.is_duplicate = display_name_counts[community.title] > 1
+    
+    return communities
 
 
 @cache.memoize(timeout=300)
 def joined_communities(user_id):
     if user_id is None or user_id == 0:
         return []
-    return Community.query.join(CommunityMember, Community.id == CommunityMember.community_id).\
+    communities = Community.query.join(CommunityMember, Community.id == CommunityMember.community_id).\
         filter(Community.banned == False). \
         filter(CommunityMember.is_moderator == False, CommunityMember.is_owner == False). \
         filter(CommunityMember.is_banned == False). \
         filter(CommunityMember.user_id == user_id).order_by(Community.title).all()
+    
+    # track display names to identify duplicates
+    display_name_counts = {}
+    for community in communities:
+        display_name = community.title
+        display_name_counts[display_name] = display_name_counts.get(display_name, 0) + 1
+    
+    # flag communities as duplicates if their display name appears more than once
+    for community in communities:
+        community.is_duplicate = display_name_counts[community.title] > 1
+    
+    return communities
 
 
 def joined_or_modding_communities(user_id):
@@ -1710,13 +1739,16 @@ def add_to_modlog_activitypub(action: str, actor: User, community_id: int = None
     db.session.commit()
 
 
-def authorise_api_user(auth, return_type=None, id_match=None):
+def authorise_api_user(auth, return_type=None, id_match=None) -> User | int:
     if not auth:
         raise Exception('incorrect_login')
     token = auth[7:]     # remove 'Bearer '
 
     if current_app.debug and request.host == 'piefed.ngrok.app':
-        return 1
+        if return_type and return_type == 'model':
+            return User.query.get(1)
+        else:
+            return 1
 
     decoded = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=["HS256"])
     if decoded:

@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_babel import _, lazy_gettext as _l
 from sqlalchemy_utils.types import TSVectorType # https://sqlalchemy-searchable.readthedocs.io/en/latest/installation.html
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.ext.mutable import MutableList
 from flask_sqlalchemy import BaseQuery
 from sqlalchemy_searchable import SearchQueryMixin
@@ -22,6 +22,7 @@ from app import db, login, cache, celery, httpx_client, constants
 import jwt
 import os
 import math
+import uuid
 
 from app.constants import SUBSCRIPTION_NONMEMBER, SUBSCRIPTION_MEMBER, SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER, \
     SUBSCRIPTION_BANNED, SUBSCRIPTION_PENDING, NOTIF_USER, NOTIF_COMMUNITY, NOTIF_TOPIC, NOTIF_POST, NOTIF_REPLY, \
@@ -807,7 +808,7 @@ class User(UserMixin, db.Model):
     email_unread_sent = db.Column(db.Boolean)                   # True after a 'unread notifications' email has been sent. None for remote users
     receive_message_mode = db.Column(db.String(20), default='Closed')  # possible values: Open, TrustedOnly, Closed
     bounces = db.Column(db.SmallInteger, default=0)
-    timezone = db.Column(db.String(20))
+    timezone = db.Column(db.String(30))
     reputation = db.Column(db.Float, default=0.0)
     attitude = db.Column(db.Float, default=None)  # (upvotes cast - downvotes cast) / (upvotes + downvotes). A number between 1 and -1 is the ratio between up and down votes they cast
     post_count = db.Column(db.Integer, default=0)
@@ -837,9 +838,10 @@ class User(UserMixin, db.Model):
     reply_hide_threshold = db.Column(db.Integer, default=-20)
     feed_auto_follow = db.Column(db.Boolean, default=True)  # does the user want to auto-follow feed communities
     feed_auto_leave = db.Column(db.Boolean, default=True)   # does the user want to auto-leave feed communities
-    accept_private_messages = db.Column(db.Integer, default=1)         # None or 0 = do not accept, 1 = This instance, 2 = Trusted instances, 3 = All instances
+    accept_private_messages = db.Column(db.Integer, default=3)         # None or 0 = do not accept, 1 = This instance, 2 = Trusted instances, 3 = All instances
     google_oauth_id = db.Column(db.String(64), unique=True, index=True)
     hide_low_quality = db.Column(db.Boolean, default=False)
+    additional_css = db.Column(db.Text)
 
     avatar = db.relationship('File', lazy='joined', foreign_keys=[avatar_id], single_parent=True, cascade="all, delete-orphan")
     cover = db.relationship('File', lazy='joined', foreign_keys=[cover_id], single_parent=True, cascade="all, delete-orphan")
@@ -1752,6 +1754,9 @@ class Post(db.Model):
             file = File.query.get(self.image_id)
             file.delete_from_disk()
 
+    def has_been_reported(self):
+        return self.reports > 0 and current_user.is_authenticated and self.community.is_moderator()
+
     def youtube_embed(self, rel=True) -> str:
         if self.url:
             parsed_url = urlparse(self.url)
@@ -2229,6 +2234,9 @@ class PostReply(db.Model):
         reply = PostReply.query.filter_by(parent_id=self.id).filter(PostReply.deleted == False).first()
         return reply is not None
 
+    def has_been_reported(self):
+        return self.reports > 0 and current_user.is_authenticated and self.community.is_moderator()
+
     def blocked_by_content_filter(self, content_filters):
         lowercase_body = self.body.lower()
         for name, keywords in content_filters.items() if content_filters else {}:
@@ -2520,6 +2528,7 @@ class Interest(db.Model):
 
 class CommunityJoinRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    uuid = db.Column(UUID(as_uuid=True), index=True, default=uuid.uuid4)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     community_id = db.Column(db.Integer, db.ForeignKey('community.id'), index=True)
     joined_via_feed = db.Column(db.Boolean, default=False)

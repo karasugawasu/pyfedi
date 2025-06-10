@@ -120,13 +120,8 @@ def register():
             if form.user_name.data in disallowed_usernames:
                 flash(_('Sorry, you cannot use that user name'), 'error')
             else:
-                if not re.match(r'^[a-zA-Z0-9_]+$', form.user_name.data):
-                    flash(_('Sorry, usernames may only contain English letters, numbers, and "_".'), 'error')
-                    return render_template('auth/register.html', title=_('Register'), form=form, site=g.site,
-                                           google_oauth=current_app.config['GOOGLE_OAUTH_CLIENT_ID'])
-
-                # Nazis use 88 and 14 in their user names very often.
-                if '88' in form.user_name.data or '14' in form.user_name.data:
+                # Nazis use 88 in their user names very often.
+                if '88' in form.user_name.data:
                     resp = make_response(redirect(url_for('auth.please_wait')))
                     resp.set_cookie('sesion', '17489047567495', expires=datetime(year=2099, month=12, day=30))
                     return resp
@@ -186,8 +181,8 @@ def register():
                         task_selector('check_application', application_id=application.id)
                     return redirect(url_for('auth.please_wait'))
                 else:
-                    if current_app.config['FLAG_THROWAWAY_EMAILS'] and os.path.isfile('app/static/disposable_domains.txt'):
-                        with open('app/static/disposable_domains.txt', 'r', encoding='utf-8') as f:
+                    if current_app.config['FLAG_THROWAWAY_EMAILS'] and os.path.isfile('app/static/tmp/disposable_domains.txt'):
+                        with open('app/static/tmp/disposable_domains.txt', 'r', encoding='utf-8') as f:
                             disposable_domains = [line.rstrip('\n') for line in f]
                         if user.email_domain() in disposable_domains:
                             # todo: notify everyone with the "approve registrations" permission, instead of just all admins?
@@ -339,6 +334,11 @@ def google_authorize():
         if user:
             user.google_oauth_id = google_id
         else:
+            # Check if registrations are closed
+            if g.site.registration_mode == 'Closed':
+                flash(_('Account registrations are currently closed.'), 'error')
+                return redirect(url_for('auth.login'))
+
             # Country-based registration blocking
             ip_address_info = ip2location(ip_address())
             if ip_address_info and ip_address_info['country']:
