@@ -987,6 +987,9 @@ class User(UserMixin, db.Model):
                 return True
         return False
 
+    def is_admin_or_staff(self):
+        return self.is_admin() or self.is_staff()
+
     def is_instance_admin(self):
         if self.instance_id:
             instance_role = InstanceRole.query.filter(InstanceRole.instance_id == self.instance_id,
@@ -3113,6 +3116,17 @@ class BlockedImage(db.Model):
     file_name = db.Column(db.String(255), index=True)
     note = db.Column(db.String(255))
     hash = db.Column(BIT(256), index=True)
+
+
+class CmsPage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    url = db.Column(db.String(100), index=True)
+    title = db.Column(db.String(255))
+    body = db.Column(db.Text)
+    body_html = db.Column(db.Text)
+    last_edited_by = db.Column(db.String(50))
+    created_at = db.Column(db.DateTime, default=utcnow)
+    edited_at = db.Column(db.DateTime, default=utcnow)
 
 
 def _large_community_subscribers() -> float:
