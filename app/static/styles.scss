@@ -125,8 +125,21 @@ div.navbar {
     margin-right: 20px;
   }
 }
-.navbar-light .navbar-nav .nav-link {
-  outline-style: none;
+
+.navbar-light .navbar-nav {
+  .nav-link {
+    outline-style: none;
+  }
+}
+
+.dropdown-menu {
+  .dropdown-item {
+    @include breakpoint(tablet) {
+      max-width: 200px;
+    }
+    white-space: break-spaces;
+    break-inside: avoid;
+  }
 }
 
 @include breakpoint(tablet) {
@@ -206,6 +219,72 @@ div.navbar {
 
 .dropdown-divider {
   margin-right: 10px;
+}
+
+.communities_menu {
+  @include breakpoint(tablet) {
+    width: 70vw;
+  }
+
+  h4 {
+    font-size: 1.2rem;
+  }
+
+  h6 {
+    font-size: 1rem;
+  }
+
+  .dropdown-item {
+    padding-left: 0;
+  }
+
+  .dropdown-header {
+    margin-left: 0;
+    padding-left: 0;
+    break-after: avoid-column;
+    text-align: right;
+    @include breakpoint(tablet) {
+      text-align: left;
+    }
+  }
+
+  ul {
+    break-after: avoid-column;
+  }
+
+  @include breakpoint(laptop) {
+    left: -166px!important;
+  }
+
+  .communities_menu_body {
+    @include breakpoint(tablet) {
+      columns: 200px 5;
+    }
+  }
+
+  ul {
+    margin-left: 0;
+    list-style-type: none;
+    padding-left: 0;
+  }
+
+  ul * > * {
+    margin-left: 0!important;
+  }
+
+  .jump_links {
+    float: left;
+    padding-left: 12px;
+    padding-top: 3px;
+
+    a {
+      margin-right: 5px;
+    }
+  }
+}
+
+.communities_menu_parent .show {
+  display: block!important;
 }
 
 .topics_menu, .feeds_menu {
@@ -740,7 +819,7 @@ time {
     .masonry_info {
       position: absolute;
       bottom: 0;
-      background-color: rgba(0, 0, 0, 0.3);
+      background-color: rgba(0, 0, 0, 0.7);
       width: 100%;
       text-align: center;
 
@@ -802,6 +881,9 @@ time {
             }
           }
         }
+        .col-3 {
+          width: 20%;
+        }
         .col-8 {
           justify-content: center;
           p {
@@ -814,6 +896,7 @@ time {
         .reply_col {
           justify-content: right;
           padding-right: 5px;
+          flex-grow: 1;
         }
       }
     }
@@ -822,12 +905,17 @@ time {
       background-color: rgba(0, 0, 0, 0.2);
       width: 100%;
       text-align: center;
+      display:flex;
+      min-height: 8rem;
       p {
         margin-bottom: 0;
+        flex-grow: 1;
+        display: flex;
 
         a {
           color: var(--bs-body-color);
           text-decoration: none;
+          flex-grow: 1;
         }
       }
     }

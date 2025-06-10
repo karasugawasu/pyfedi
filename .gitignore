@@ -170,7 +170,8 @@ celery_worker.py
 # local volumes for docker
 media/
 pgdata/
+logs/
+tmp/
 
-# リストはいらない
 app/static/all_communities.json
 app/static/all_sfw_communities.json

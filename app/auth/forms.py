@@ -1,12 +1,12 @@
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField, HiddenField, BooleanField, SelectField, RadioField, \
-    EmailField
+    EmailField, TextAreaField
 from wtforms.validators import ValidationError, DataRequired, Email, EqualTo, Length
 from flask_babel import _, lazy_gettext as _l
 from app.models import User, Community
 from sqlalchemy import func
 
-from app.utils import MultiCheckboxField, CaptchaField
+from app.utils import MultiCheckboxField, CaptchaField, get_setting
 
 
 class LoginForm(FlaskForm):
@@ -25,11 +25,16 @@ class RegistrationForm(FlaskForm):
     password2 = PasswordField(
         _l('Repeat password'), validators=[DataRequired(),
                                            EqualTo('password')])
-    question = StringField(_l('Why would you like to join this site?'), validators=[DataRequired(), Length(min=1, max=512)])
+    question = TextAreaField(_l('Why would you like to join this site?'), validators=[DataRequired(), Length(min=1, max=512)])
     captcha = CaptchaField(_l('Enter captcha code'), validators=[DataRequired()])
     timezone = HiddenField(render_kw={'id': 'timezone'})
 
     submit = SubmitField(_l('Register'))
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not get_setting('captcha_enabled', True):
+            delattr(self, 'captcha')
 
     def validate_real_email(self, email):
         user = User.query.filter(func.lower(User.email) == func.lower(email.data.strip())).first()
