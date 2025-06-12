@@ -9,7 +9,7 @@ from flask import redirect, url_for, flash, request, make_response, session, Mar
 from flask_login import current_user, login_required
 from flask_babel import _
 from slugify import slugify
-from sqlalchemy import or_, desc, text
+from sqlalchemy import or_, asc, desc, text
 from sqlalchemy.orm.exc import NoResultFound
 
 from app import db, cache, celery, httpx_client
@@ -45,7 +45,7 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     blocked_users, languages_for_form, menu_topics, add_to_modlog, \
     blocked_communities, remove_tracking_from_link, piefed_markdown_to_lemmy_markdown, \
     instance_software, domain_from_email, referrer, flair_for_form, find_flair_id, login_required_if_private_instance, \
-    possible_communities
+    possible_communities, reported_posts
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
 from feedgen.feed import FeedGenerator
@@ -163,7 +163,7 @@ def community_name_search():
                 all_communities_json = json.load(acj)
                 communities_list = all_communities_json['all_communities']
         else:
-            with open('app/static/all_sfw_communities.json','r') as asfwcj:
+            with open('app/static/tmp/all_sfw_communities.json','r') as asfwcj:
                 all_sfw_communities_json = json.load(asfwcj)
                 communities_list = all_sfw_communities_json['all_sfw_communities']
     except:
@@ -309,9 +309,11 @@ def show_community(community: Community):
             posts = posts.filter(Post.posted_at > utcnow() - timedelta(days=7)).order_by(desc(Post.sticky)).order_by(desc(Post.up_votes - Post.down_votes))
         elif sort == 'new':
             posts = posts.order_by(desc(Post.posted_at))
+        elif sort == 'old':
+            posts = posts.order_by(asc(Post.posted_at))
         elif sort == 'active':
             posts = posts.order_by(desc(Post.sticky)).order_by(desc(Post.last_active))
-        per_page = 100
+        per_page = 20 if low_bandwidth else current_app.config['PAGE_LENGTH']
         if post_layout == 'masonry':
             per_page = 200
         elif post_layout == 'masonry_wide':
@@ -451,9 +453,10 @@ def show_community(community: Community):
                            etag=f"{community.id}{sort}{post_layout}_{hash(community.last_active)}", related_communities=related_communities,
                            next_url=next_url, prev_url=prev_url, low_bandwidth=low_bandwidth, un_moderated=un_moderated, community_flair=community_flair,
                            recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted, community_feeds=community_feeds,
-                           canonical=community.profile_id(), can_upvote_here=can_upvote(user, community), can_downvote_here=can_downvote(user, community, g.site),
+                           canonical=community.profile_id(), can_upvote_here=can_upvote(user, community), can_downvote_here=can_downvote(user, community),
                            rss_feed=f"https://{current_app.config['SERVER_NAME']}/community/{community.link()}/feed", rss_feed_name=f"{community.title} on {g.site.name}",
                            content_filters=content_filters,  sort=sort, flair=flair,
+                           reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            post_layout=post_layout, content_type=content_type, current_app=current_app,
                            user_has_feeds=user_has_feeds, current_feed_id=current_feed_id,
@@ -888,7 +891,6 @@ def community_edit(community_id: int):
                 file = save_icon_file(icon_file)
                 if file:
                     community.icon = file
-                    cache.delete_memoized(Community.icon_image, community)
             banner_file = request.files['banner_file']
             if banner_file and banner_file.filename != '':
                 if community.image_id:
@@ -954,7 +956,6 @@ def remove_icon(community_id):
             community.icon_id = None
             db.session.delete(file)
             db.session.commit()
-            cache.delete_memoized(Community.icon_image, community)
     return _('Icon removed!')
 
 
@@ -1887,6 +1888,7 @@ def community_flair_edit(community_id, flair_id):
             flair.flair = form.flair.data
             flair.text_color = form.text_color.data
             flair.background_color = form.background_color.data
+            flair.blur_images = form.blur_images.data
             db.session.commit()
 
             return redirect(url_for('community.community_flair', actor=community.link()))
@@ -1894,6 +1896,7 @@ def community_flair_edit(community_id, flair_id):
             form.flair.data = flair.flair if flair else ''
             form.text_color.data = flair.text_color if flair else '#000000'
             form.background_color.data = flair.background_color if flair else '#deddda'
+            form.blur_images.data = flair.blur_images if flair else False
             return render_template('generic_form.html', form=form, flair=flair,
                                    title=_('Edit %(flair_name)s in %(community_name)s', flair_name=flair.flair, community_name=community.display_name()) if flair else _('Add flair in %(community_name)s', community_name=community.display_name()),
                                    community=community)

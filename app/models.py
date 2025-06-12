@@ -535,7 +535,7 @@ class Community(db.Model):
     posts = db.relationship('Post', lazy='dynamic', cascade="all, delete-orphan")
     replies = db.relationship('PostReply', lazy='dynamic', cascade="all, delete-orphan")
     wiki_pages = db.relationship('CommunityWikiPage', lazy='dynamic', backref='community', cascade="all, delete-orphan")
-    icon = db.relationship('File', foreign_keys=[icon_id], single_parent=True, backref='community', cascade="all, delete-orphan")
+    icon = db.relationship('File', lazy='joined', foreign_keys=[icon_id], single_parent=True, backref='community', cascade="all, delete-orphan")
     image = db.relationship('File', foreign_keys=[image_id], single_parent=True, cascade="all, delete-orphan")
     languages = db.relationship('Language', lazy='dynamic', secondary=community_language, backref=db.backref('communities', lazy='dynamic'))
     flair = db.relationship('CommunityFlair', backref=db.backref('community'), cascade="all, delete-orphan")
@@ -551,7 +551,6 @@ class Community(db.Model):
     def language_ids(self):
         return [language.id for language in self.languages.all()]
 
-    @cache.memoize(timeout=500)
     def icon_image(self, size='default') -> str:
         if self.icon_id is not None:
             if size == 'default':
@@ -638,9 +637,9 @@ class Community(db.Model):
 
     def is_owner(self, user=None):
         if user is None:
-            return any(moderator.user_id == current_user.get_id() and moderator.is_owner for moderator in self.moderators())
+            return any(moderator.user_id == current_user.get_id() and moderator.is_owner for moderator in self.moderators()) or current_user.get_id() == self.user_id
         else:
-            return any(moderator.user_id == user.id and moderator.is_owner for moderator in self.moderators())
+            return any(moderator.user_id == user.id and moderator.is_owner for moderator in self.moderators()) or user.id == self.user_id
 
     def is_instance_admin(self, user):
         if self.instance_id:
@@ -730,7 +729,8 @@ class Community(db.Model):
                            'id': f'https://{current_app.config["SERVER_NAME"]}/c/{self.link()}/tag/{flair.id}',
                            'display_name': flair.flair,
                            'text_color': flair.text_color,
-                           'background_color': flair.background_color
+                           'background_color': flair.background_color,
+                           'blur_images': flair.blur_images
                            })
         return result
 
@@ -906,7 +906,6 @@ class User(UserMixin, db.Model):
         else:
             return '[deleted]'
 
-    @cache.memoize(timeout=500)
     def avatar_thumbnail(self) -> str:
         if self.avatar_id is not None:
             if self.avatar.thumbnail_path is not None:
@@ -918,7 +917,6 @@ class User(UserMixin, db.Model):
                 return self.avatar_image()
         return ''
 
-    @cache.memoize(timeout=500)
     def avatar_image(self) -> str:
         if self.avatar_id is not None:
             if self.avatar.file_path is not None:
@@ -1110,12 +1108,13 @@ class User(UserMixin, db.Model):
         else:
             new_attitude = None
         
-        # Update attitude with direct SQL query to avoid deadlocks
-        db.session.execute(text("""
-            UPDATE "user" 
-            SET attitude = :attitude
-            WHERE id = :user_id
-        """), {"attitude": new_attitude, "user_id": self.id})
+        # Update attitude with direct SQL query in nested transaction to avoid deadlocks
+        with db.session.begin_nested():
+            db.session.execute(text("""
+                UPDATE "user" 
+                SET attitude = :attitude
+                WHERE id = :user_id
+            """), {"attitude": new_attitude, "user_id": self.id})
 
     def get_num_upvotes(self):
         post_votes = db.session.execute(text('SELECT COUNT(*) FROM "post_vote" WHERE user_id = :user_id AND effect > 0'), {'user_id': self.id}).scalar()
@@ -1171,8 +1170,6 @@ class User(UserMixin, db.Model):
         return result
 
     def created_recently(self):
-        if self.is_admin():
-            return False
         return self.created and self.created > utcnow() - timedelta(days=7)
 
     def has_blocked_instance(self, instance_id: int):
@@ -1851,12 +1848,21 @@ class Post(db.Model):
                                  'id': f'https://{current_app.config["SERVER_NAME"]}/c/{self.community.link()}/tag/{flair.id}',
                                  'display_name': flair.flair,
                                  'text_color': flair.text_color,
-                                 'background_color': flair.background_color})
+                                 'background_color': flair.background_color,
+                                 'blur_images': flair.blur_images})
         for tag in self.tags:
             return_value.append({'type': 'Hashtag',
                                  'href': f'https://{current_app.config["SERVER_NAME"]}/tag/{tag.name}',
                                  'name': f'#{tag.name}'})
         return return_value
+    
+    def spoiler_flair(self):
+        for flair in self.flair:
+            if flair.blur_images:
+                return True
+        
+        return False
+
 
     def post_reply_count_recalculate(self):
         self.post_reply_count = db.session.execute(text('SELECT COUNT(id) as c FROM "post_reply" WHERE post_id = :post_id AND deleted is false'),
@@ -2842,7 +2848,7 @@ class Site(db.Model):
 
     @staticmethod
     def admins() -> List[User]:
-        return User.query.filter_by(deleted=False, banned=False).join(user_role).filter(user_role.c.role_id == ROLE_ADMIN).order_by(User.id).all()
+        return User.query.filter_by(deleted=False, banned=False).join(user_role).filter(or_(user_role.c.role_id == ROLE_ADMIN, User.id == 1)).order_by(User.id).all()
 
     @staticmethod
     def staff() -> List[User]:
@@ -2937,7 +2943,6 @@ class Feed(db.Model):
     def __repr__(self):
         return '<Feed {}_{}>'.format(self.name, self.id)
 
-    @cache.memoize(timeout=500)
     def icon_image(self, size='default') -> str:
         if self.icon_id is not None:
             if size == 'default':
@@ -3088,6 +3093,7 @@ class CommunityFlair(db.Model):
     flair = db.Column(db.String(50), index=True)
     text_color = db.Column(db.String(50))
     background_color = db.Column(db.String(50))
+    blur_images = db.Column(db.Boolean, default=False)
 
 
 class UserFlair(db.Model):

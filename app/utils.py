@@ -32,7 +32,7 @@ from furl import furl
 from flask import current_app, json, redirect, url_for, request, make_response, Response, g, flash, abort
 from flask_babel import _, lazy_gettext as _l
 from flask_login import current_user, logout_user
-from sqlalchemy import text, or_, desc, event
+from sqlalchemy import text, or_, desc, asc, event
 from sqlalchemy.orm import Session
 from wtforms.fields  import SelectField, SelectMultipleField, StringField
 from wtforms.widgets import Select, html_params, ListWidget, CheckboxInput, TextInput
@@ -264,7 +264,7 @@ def mime_type_using_head(url):
 
 allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre',
                 'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small', 'sub', 'sup',
-                's', 'input']
+                's', 'input', 'tg-spoiler']
 
 # sanitise HTML using an allow list
 def allowlist_html(html: str, a_target='_blank') -> str:
@@ -423,14 +423,14 @@ def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
 
         try:
             raw_html = markdown2.markdown(markdown_text,
-                        extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True,
+                        extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True, 'tg-spoiler': True,
                                 'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True, 'task_list': True, 'footnotes': True})
         except TypeError:
             # weird markdown, like https://mander.xyz/u/tty1 and https://feddit.uk/comment/16076443,
             # causes "markdown2.Markdown._color_with_pygments() argument after ** must be a mapping, not bool" error, so try again without fenced-code-blocks extra
             try:
                 raw_html = markdown2.markdown(markdown_text,
-                            extras={'middle-word-em': False, 'tables': True, 'strike': True,
+                            extras={'middle-word-em': False, 'tables': True, 'strike': True, 'tg-spoiler': True,
                                     'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True, 'task_list': True, 'footnotes': True})
             except TypeError:
                 raw_html = ''
@@ -788,7 +788,7 @@ def mimetype_from_url(url):
 def validation_required(func):
     @wraps(func)
     def decorated_view(*args, **kwargs):
-        if current_user.verified:
+        if current_user.verified or not get_setting('email_verification', True):
             return func(*args, **kwargs)
         else:
             return redirect(url_for('auth.validation_required'))
@@ -956,15 +956,14 @@ def guess_mime_type(file_path: str) -> str:
     return content_type
 
 
-def can_downvote(user, community: Community, site=None) -> bool:
+def can_downvote(user, community: Community, communities_banned_from_list=None) -> bool:
     if user is None or community is None or user.banned or user.bot:
         return False
 
-    if site is None:
-        try:
-            site = g.site
-        except:
-            site = Site.query.get(1)
+    try:
+        site = g.site
+    except:
+        site = Site.query.get(1)
 
     if not site.enable_downvotes:
         return False
@@ -989,18 +988,26 @@ def can_downvote(user, community: Community, site=None) -> bool:
                 if user.instance_id not in trusted_instance_ids():
                     return False
 
-    if community.id in communities_banned_from(user.id):
-        return False
+    if communities_banned_from_list is not None:
+        if community.id in communities_banned_from_list:
+            return False
+    else:
+        if community.id in communities_banned_from(user.id):
+            return False
 
     return True
 
 
-def can_upvote(user, community: Community) -> bool:
+def can_upvote(user, community: Community, communities_banned_from_list=None) -> bool:
     if user is None or community is None or user.banned or user.bot:
         return False
 
-    if community.id in communities_banned_from(user.id):
-        return False
+    if communities_banned_from_list is not None:
+        if community.id in communities_banned_from_list:
+            return False
+    else:
+        if community.id in communities_banned_from(user.id):
+            return False
 
     return True
 
@@ -1164,7 +1171,7 @@ def user_filters_replies(user_id):
 
 
 @cache.memoize(timeout=300)
-def moderating_communities(user_id):
+def moderating_communities(user_id) -> List[Community]:
     if user_id is None or user_id == 0:
         return []
     communities = Community.query.join(CommunityMember, Community.id == CommunityMember.community_id).\
@@ -1187,7 +1194,7 @@ def moderating_communities(user_id):
 
 
 @cache.memoize(timeout=300)
-def joined_communities(user_id):
+def joined_communities(user_id) -> List[Community]:
     if user_id is None or user_id == 0:
         return []
     communities = Community.query.join(CommunityMember, Community.id == CommunityMember.community_id).\
@@ -1590,28 +1597,28 @@ def in_sorted_list(arr, target):
 
 @cache.memoize(timeout=600)
 def recently_upvoted_posts(user_id) -> List[int]:
-    post_ids = db.session.execute(text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 1000'),
+    post_ids = db.session.execute(text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 100'),
                                {'user_id': user_id}).scalars()
     return sorted(post_ids)     # sorted so that in_sorted_list can be used
 
 
 @cache.memoize(timeout=600)
 def recently_downvoted_posts(user_id) -> List[int]:
-    post_ids = db.session.execute(text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 1000'),
+    post_ids = db.session.execute(text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 100'),
                                {'user_id': user_id}).scalars()
     return sorted(post_ids)
 
 
 @cache.memoize(timeout=600)
 def recently_upvoted_post_replies(user_id) -> List[int]:
-    reply_ids = db.session.execute(text('SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 1000'),
+    reply_ids = db.session.execute(text('SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 100'),
                                {'user_id': user_id}).scalars()
     return sorted(reply_ids)     # sorted so that in_sorted_list can be used
 
 
 @cache.memoize(timeout=600)
 def recently_downvoted_post_replies(user_id) -> List[int]:
-    reply_ids = db.session.execute(text('SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 1000'),
+    reply_ids = db.session.execute(text('SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 100'),
                                {'user_id': user_id}).scalars()
     return sorted(reply_ids)
 
@@ -2057,6 +2064,8 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str) ->
             params['top_cutoff'] = utcnow() - timedelta(days=1)
     elif sort == 'new':
         post_id_sort = 'ORDER BY p.posted_at DESC'
+    elif sort == 'old':
+        post_id_sort = 'ORDER BY p.posted_at ASC'
     elif sort == 'active':
         post_id_sort = 'ORDER BY p.last_active DESC'
     final_post_id_sql = f"{post_id_sql} WHERE {' AND '.join(post_id_where)}\n{post_id_sort}\nLIMIT 1000"
@@ -2081,6 +2090,8 @@ def post_ids_to_models(post_ids: List[int], sort: str):
         posts = posts.order_by(desc(Post.up_votes - Post.down_votes))
     elif sort == 'new':
         posts = posts.order_by(desc(Post.posted_at))
+    elif sort == 'old':
+        posts = posts.order_by(asc(Post.posted_at))
     elif sort == 'active':
         posts = posts.order_by(desc(Post.last_active))
     return posts
@@ -2244,6 +2255,33 @@ def notify_admin(title, url, author_id, notif_type, subtype, targets):
         admin.unread_notifications += 1
         db.session.add(notify)
     db.session.commit()
+
+
+def reported_posts(user_id, admin_ids) -> List[int]:
+    if user_id is None:
+        return []
+    if user_id in admin_ids:
+        post_ids = list(db.session.execute(text('SELECT id FROM "post" WHERE reports > 0')).scalars())
+    else:
+        community_ids = [community.id for community in moderating_communities(user_id)]
+        if len(community_ids) > 0:
+            post_ids = list(db.session.execute(text('SELECT id FROM "post" WHERE reports > 0 AND community_id IN :community_ids'),
+                                               {'community_ids': tuple(community_ids)}).scalars())
+        else:
+            return []
+    return post_ids
+
+
+def reported_post_replies(user_id, admin_ids) -> List[int]:
+    if user_id is None:
+        return []
+    if user_id in admin_ids:
+        post_reply_ids = list(db.session.execute(text('SELECT id FROM "post_reply" WHERE reports > 0')).scalars())
+    else:
+        community_ids = [community.id for community in moderating_communities(user_id)]
+        post_reply_ids = list(db.session.execute(text('SELECT id FROM "post_reply" WHERE reports > 0 AND community_id IN :community_ids'),
+                                           {'community_ids': community_ids}).scalars())
+    return post_reply_ids
 
 
 def possible_communities():

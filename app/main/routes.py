@@ -31,7 +31,7 @@ from app.utils import render_template, get_setting, request_etag_matches, return
     permission_required, debug_mode_only, ip_address, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, \
     feed_tree_public, gibberish, get_deduped_post_ids, paginate_post_ids, post_ids_to_models, html_to_text, \
     get_redis_connection, subscribed_feeds, joined_or_modding_communities, login_required_if_private_instance, \
-    pending_communities, retrieve_image_hash, possible_communities, remove_tracking_from_link
+    pending_communities, retrieve_image_hash, possible_communities, remove_tracking_from_link, reported_posts
 from app.models import Community, CommunityMember, Post, Site, User, utcnow, Topic, Instance, \
     Notification, Language, community_language, ModLog, Feed, FeedItem, CmsPage
 
@@ -68,7 +68,7 @@ def home_page(sort, view_filter):
     page = request.args.get('page', 0, type=int)
     result_id = request.args.get('result_id', gibberish(15)) if current_user.is_authenticated else None
     low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
-    page_length = 20 if low_bandwidth else 100
+    page_length = 20 if low_bandwidth else current_app.config['PAGE_LENGTH']
 
     # view filter - subscribed/local/all
     community_ids = [-1]
@@ -124,24 +124,27 @@ def home_page(sort, view_filter):
             new_communities = new_communities.filter(Community.id.not_in(community_ids))
     new_communities = new_communities.order_by(desc(Community.created_at)).limit(5).all()
 
-    # Voting history
+    # Voting history and ban status
     if current_user.is_authenticated:
         recently_upvoted = recently_upvoted_posts(current_user.id)
         recently_downvoted = recently_downvoted_posts(current_user.id)
+        communities_banned_from_list = communities_banned_from(current_user.id)
     else:
         recently_upvoted = []
         recently_downvoted = []
+        communities_banned_from_list = []
 
     return render_template('index.html', posts=posts, active_communities=active_communities, new_communities=new_communities,
                            show_post_community=True, low_bandwidth=low_bandwidth, recently_upvoted=recently_upvoted,
-                           recently_downvoted=recently_downvoted,
+                           recently_downvoted=recently_downvoted, communities_banned_from_list=communities_banned_from_list,
                            SUBSCRIPTION_PENDING=SUBSCRIPTION_PENDING, SUBSCRIPTION_MEMBER=SUBSCRIPTION_MEMBER,
                            etag=f"{sort}_{view_filter}_{hash(str(g.site.last_active))}", next_url=next_url, prev_url=prev_url,
                            title=f"{g.site.name} - {g.site.description}",
                            description=shorten_string(html_to_text(g.site.sidebar), 150),
                            content_filters=content_filters, sort=sort, view_filter=view_filter,
                            announcement=allowlist_html(get_setting('announcement', '')),
-                            joined_communities=joined_or_modding_communities(current_user.get_id()),
+                           reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                           joined_communities=joined_or_modding_communities(current_user.get_id()),
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None
                            )
 
@@ -492,10 +495,14 @@ def modlog():
     next_url = url_for('main.modlog', page=modlog_entries.next_num) if modlog_entries.has_next else None
     prev_url = url_for('main.modlog', page=modlog_entries.prev_num) if modlog_entries.has_prev and page != 1 else None
 
+    instances = {}
+    for instance in Instance.query.all():
+        instances[instance.id] = instance.domain
+
     return render_template('modlog.html',
                            title=_('Moderation Log'), modlog_entries=modlog_entries, can_see_names=can_see_names,
                            next_url=next_url, prev_url=prev_url, low_bandwidth=low_bandwidth,
-                           
+                           instances=instances,
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            )
 

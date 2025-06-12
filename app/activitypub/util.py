@@ -337,7 +337,8 @@ def find_flair_or_create(flair: dict, community_id: int) -> CommunityFlair:
         return existing_flair
     else:
         new_flair = CommunityFlair(flair=flair['display_name'].strip(), community_id=community_id,
-                                   text_color=flair['text_color'], background_color=flair['background_color'])
+                                   text_color=flair['text_color'], background_color=flair['background_color'],
+                                   blur_images=flair['blur_images'] if 'blur_images' in flair else False)
         return new_flair
 
 
@@ -484,8 +485,6 @@ def refresh_user_profile_task(user_id):
             session.commit()
             if user.avatar_id and avatar_changed:
                 make_image_sizes(user.avatar_id, 40, 250, 'users')
-                cache.delete_memoized(User.avatar_image, user)
-                cache.delete_memoized(User.avatar_thumbnail, user)
             if user.cover_id and cover_changed:
                 make_image_sizes(user.cover_id, 700, 1600, 'users')
                 cache.delete_memoized(User.cover_image, user)
@@ -607,6 +606,8 @@ def refresh_community_profile_task(community_id, activity_json):
                             flair_dict['text_color'] = flair['text_color']
                         if 'background_color' in flair:
                             flair_dict['background_color'] = flair['background_color']
+                        if 'blur_images' in flair:
+                            flair_dict['blur_images'] = flair['blur_images']
                         community.flair.append(find_flair_or_create(flair_dict, community.id))
                     session.commit()
 
@@ -1195,7 +1196,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
 
                             # set up the storage directory
                             if store_files_in_s3():
-                                directory = f'app/static/tmp'
+                                directory = 'app/static/tmp'
                             else:
                                 directory = f'app/static/media/{directory}/' + new_filename[0:2] + '/' + new_filename[2:4]
                             ensure_directory_exists(directory)
@@ -2441,12 +2442,18 @@ def undo_vote(comment, post, target_ap_id, user):
 
 
 def process_report(user, reported, request_json):
-    if len(request_json['summary']) < 15:
-        reasons = request_json['summary']
+    if 'summary' not in request_json:   # reports from peertube have no summary
+        reasons = ''
         description = ''
+        if 'content' in request_json:
+            reasons = request_json['content']
     else:
-        reasons = request_json['summary'][:15]
-        description = request_json['summary'][15:]
+        if len(request_json['summary']) < 15:
+            reasons = request_json['summary']
+            description = ''
+        else:
+            reasons = request_json['summary'][:15]
+            description = request_json['summary'][15:]
     if isinstance(reported, User):
         if reported.reports == -1:
             return
