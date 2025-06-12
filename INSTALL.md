@@ -190,6 +190,8 @@ for bounces, not a inbox you also use for other purposes.
 
 * Enable [image blocking](https://piefed.social/post/751901) by setting IMAGE_HASHING_ENDPOINT to the url of [a PDQ hashing instance](https://piefed.social/post/759065).
 
+* If the home page is loading slowly, set PAGE_LENGTH to a lower number.
+
 ### Development mode
 
 Setting `FLASK_DEBUG=1` in the `.env` file will enable the `<your-site>/dev/tools` page. It will expose some various testing routes as well. See the [testing section](#testing).
@@ -316,6 +318,8 @@ automatically discovered by using [the ipinfo service](https://ipinfo.io/) - reg
 If the search function is not returning any results, you need to [add some database triggers](https://codeberg.org/rimu/pyfedi/issues/358#issuecomment-2475019).
 
 Enable the API for use by mobile apps by setting the ENABLE_ALPHA_API environment variable to 'true' (a string, with quotes).
+
+To limit which domains can access the API, set the CORS_ALLOW_ORIGIN environment variable. This defaults to '*' (allowing requests from any origin) but can be set to a specific domain like 'https://example.com' for security.
 
 <div id="background-services"></div>
 

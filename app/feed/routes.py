@@ -23,7 +23,8 @@ from app.utils import show_ban_message, piefed_markdown_to_lemmy_markdown, markd
     joined_communities, menu_topics, menu_instance_feeds, menu_my_feeds, validation_required, feed_membership, \
     gibberish, get_task_session, instance_banned, menu_subscribed_feeds, referrer, community_membership, \
     paginate_post_ids, get_deduped_post_ids, get_request, post_ids_to_models, recently_upvoted_posts, \
-    recently_downvoted_posts, joined_or_modding_communities, login_required_if_private_instance
+    recently_downvoted_posts, joined_or_modding_communities, login_required_if_private_instance, \
+    communities_banned_from, reported_posts
 from collections import namedtuple
 from sqlalchemy import desc, or_, text
 from slugify import slugify
@@ -165,6 +166,7 @@ def feed_edit(feed_id: int):
         edit_feed_form.is_instance_feed.render_kw = {'disabled': True}
     
     if edit_feed_form.validate_on_submit():
+        edit_feed_form.url.data = slugify(edit_feed_form.url.data, separator='_').lower()
         feed_to_edit.title = edit_feed_form.title.data
         feed_to_edit.name = edit_feed_form.url.data
         feed_to_edit.machine_name = edit_feed_form.url.data
@@ -192,8 +194,8 @@ def feed_edit(feed_id: int):
         if g.site.enable_nsfl:
             feed_to_edit.nsfl = edit_feed_form.nsfl.data
         feed_to_edit.public = edit_feed_form.public.data
-        feed_to_edit.is_instance_feed = edit_feed_form.is_instance_feed.data
         if current_user.is_admin():
+            feed_to_edit.is_instance_feed = edit_feed_form.is_instance_feed.data
             cache.delete_memoized(menu_instance_feeds)
         db.session.add(feed_to_edit)
         db.session.commit()
@@ -372,6 +374,7 @@ def feed_copy(feed_id: int):
     copy_feed_form.title.data = feed_to_copy.title
     copy_feed_form.url.data = feed_to_copy.name
     copy_feed_form.description.data = feed_to_copy.description
+    copy_feed_form.communities.data = feed_communities_for_edit(feed_to_copy.id)
     copy_feed_form.show_child_posts.data = feed_to_copy.show_posts_in_children
     if g.site.enable_nsfw is False:
         copy_feed_form.nsfw.render_kw = {'disabled': True}
@@ -646,7 +649,7 @@ def show_feed(feed):
     sort = request.args.get('sort', '' if current_user.is_anonymous else current_user.default_sort)
     result_id = request.args.get('result_id', gibberish(15)) if current_user.is_authenticated else None
     low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
-    page_length = 20 if low_bandwidth else 100
+    page_length = 20 if low_bandwidth else current_app.config['PAGE_LENGTH']
     post_layout = request.args.get('layout', 'list' if not low_bandwidth else None)
     if post_layout == 'masonry':
         page_length = 200
@@ -709,18 +712,21 @@ def show_feed(feed):
         if current_user.is_authenticated:
             recently_upvoted = recently_upvoted_posts(current_user.id)
             recently_downvoted = recently_downvoted_posts(current_user.id)
+            communities_banned_from_list = communities_banned_from(current_user.id)
         else:
             recently_upvoted = []
             recently_downvoted = []
+            communities_banned_from_list = []
 
         return render_template('feed/show_feed.html', title=_(current_feed.name), posts=posts, feed=current_feed, sort=sort,
                                page=page, post_layout=post_layout, next_url=next_url, prev_url=prev_url,
                                feed_communities=feed_communities, content_filters=user_filters_posts(current_user.id) if current_user.is_authenticated else {},
                                sub_feeds=sub_feeds, feed_path=feed.path(), breadcrumbs=breadcrumbs,
                                rss_feed=f"https://{current_app.config['SERVER_NAME']}/f/{feed.path()}.rss",
-                               rss_feed_name=f"{current_feed.name} on {g.site.name}",
+                               rss_feed_name=f"{current_feed.name} on {g.site.name}", communities_banned_from_list=communities_banned_from_list,
                                show_post_community=True, joined_communities=joined_or_modding_communities(current_user.get_id()),
                                recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
+                               reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
                                inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                                POST_TYPE_LINK=POST_TYPE_LINK, POST_TYPE_IMAGE=POST_TYPE_IMAGE,
                                POST_TYPE_VIDEO=POST_TYPE_VIDEO,
