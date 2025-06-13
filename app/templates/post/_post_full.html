@@ -71,10 +71,10 @@
                 {% elif post.url.startswith('https://www.redgifs.com/watch/') -%}
                     <div style="padding-bottom: 56.25%; position: relative;"><iframe style="position: absolute; top: 0px; left: 0px; width: 100%; height: 100%;" src="{{ post.url.replace('redgifs.com/watch/', 'redgifs.com/ifr/') }}" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"  width="100%" height="100%" frameborder="0"></iframe></div>
                 {% endif -%}
-                {% if 'youtube.com' in post.url -%}
+                <!-- {% if 'youtube.com' in post.url -%}
                     <p><a href="https://piped.video/watch?v={{ post.youtube_embed() }}">{{ _('Watch on piped.video') }} <span class="fe fe-external"></span></a></p>
                     <div style="padding-bottom: 56.25%; position: relative;"><iframe style="position: absolute; top: 0px; left: 0px; width: 100%; height: 100%;" src="https://www.youtube-nocookie.com/embed/{{ post.youtube_embed() }}" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"  width="100%" height="100%" frameborder="0"></iframe></div>
-                {% endif -%}
+                {% endif -%} -->
             {% elif post.type == POST_TYPE_VIDEO -%}
                 <p><a href="{{ post.url }}" rel="nofollow ugc" target="_blank" class="post_link" aria-label="Go to post url">{{ post.url|shorten_url }}
                 <span class="fe fe-external"></span></a></p>
@@ -94,10 +94,10 @@
                 {% elif post.url.startswith('https://www.redgifs.com/watch/') -%}
                     <div style="padding-bottom: 56.25%; position: relative;"><iframe style="position: absolute; top: 0px; left: 0px; width: 100%; height: 100%;" src="{{ post.url.replace('redgifs.com/watch/', 'redgifs.com/ifr/') }}" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"  width="100%" height="100%" frameborder="0"></iframe></div>
                 {% endif -%}
-                {% if 'youtube.com' in post.url -%}
+                <!-- {% if 'youtube.com' in post.url -%}
                     <p><a href="https://piped.video/watch?v={{ post.youtube_embed() }}">{{ _('Watch on piped.video') }} <span class="fe fe-external"></span></a></p>
                     <div style="padding-bottom: 56.25%; position: relative;"><iframe style="position: absolute; top: 0px; left: 0px; width: 100%; height: 100%;" src="https://www.youtube-nocookie.com/embed/{{ post.youtube_embed() }}" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"  width="100%" height="100%" frameborder="0"></iframe></div>
-                {% endif -%}
+                {% endif -%} -->
                 {% if 'videos/watch' in post.url -%}
                     <div style="padding-bottom: 56.25%; position: relative;"><iframe style="position: absolute; top: 0px; left: 0px; width: 100%; height: 100%;" src="{{ post.peertube_embed() }}" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"  width="100%" height="100%" frameborder="0"></iframe></div>
                 {% endif -%}
