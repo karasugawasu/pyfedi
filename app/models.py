@@ -483,8 +483,7 @@ class Community(db.Model):
     title = db.Column(db.String(256))
     description = db.Column(db.Text)        # markdown
     description_html = db.Column(db.Text)   # html equivalent of above markdown
-    rules = db.Column(db.Text)
-    rules_html = db.Column(db.Text)
+    rules = db.Column(db.Text)              # this is unused but do not remove, it breaks everything
     content_warning = db.Column(db.Text)        # "Are you sure you want to view this community?"
     subscriptions_count = db.Column(db.Integer, default=0)
     post_count = db.Column(db.Integer, default=0)
@@ -744,6 +743,7 @@ class Community(db.Model):
         db.session.query(CommunityJoinRequest).filter(CommunityJoinRequest.community_id == self.id).delete()
         db.session.query(CommunityMember).filter(CommunityMember.community_id == self.id).delete()
         db.session.query(Report).filter(Report.suspect_community_id == self.id).delete()
+        db.session.query(UserFlair).filter(UserFlair.community_id == self.id).delete()
         db.session.query(ModLog).filter(ModLog.community_id == self.id).delete()
 
 
@@ -1265,7 +1265,6 @@ class User(UserMixin, db.Model):
     def has_read_post(self, post):
         return self.read_post.filter(read_posts.c.read_post_id == post.id).count() > 0
 
-    @cache.memoize(timeout=500)
     def get_note(self, by_user):
         user_note = self.user_notes.filter(UserNote.target_id == self.id, UserNote.user_id == by_user.id).first()
         if user_note:
@@ -2104,11 +2103,15 @@ class PostReply(db.Model):
         if reply_already_exists(user_id=user.id, post_id=post.id, parent_id=reply.parent_id, body=reply.body):
             raise Exception('Duplicate reply')
 
-        if reply_is_just_link_to_gif_reaction(reply.body):
+        site = Site.query.get(1)
+        if site is None:
+            site = Site()
+        
+        if reply_is_just_link_to_gif_reaction(reply.body) and site.enable_gif_reply_rep_decrease:
             user.reputation -= 1
             raise Exception('Gif comment ignored')
 
-        if reply_is_stupid(reply.body):
+        if reply_is_stupid(reply.body) and site.enable_this_comment_filter:
             raise Exception('Low quality reply')
 
         try:
@@ -2816,6 +2819,9 @@ class Site(db.Model):
     public_key = db.Column(db.Text)
     private_key = db.Column(db.Text)
     enable_downvotes = db.Column(db.Boolean, default=True)
+    enable_gif_reply_rep_decrease = db.Column(db.Boolean, default=False)
+    enable_chan_image_filter = db.Column(db.Boolean, default=False)
+    enable_this_comment_filter = db.Column(db.Boolean, default=False)
     allow_local_image_posts = db.Column(db.Boolean, default=True)
     remote_image_cache_days = db.Column(db.Integer, default=30)
     enable_nsfw = db.Column(db.Boolean, default=False)

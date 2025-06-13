@@ -31,7 +31,8 @@ from app.utils import render_template, get_setting, request_etag_matches, return
     permission_required, debug_mode_only, ip_address, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, \
     feed_tree_public, gibberish, get_deduped_post_ids, paginate_post_ids, post_ids_to_models, html_to_text, \
     get_redis_connection, subscribed_feeds, joined_or_modding_communities, login_required_if_private_instance, \
-    pending_communities, retrieve_image_hash, possible_communities, remove_tracking_from_link, reported_posts
+    pending_communities, retrieve_image_hash, possible_communities, remove_tracking_from_link, reported_posts, \
+    moderating_communities_ids, user_notes
 from app.models import Community, CommunityMember, Post, Site, User, utcnow, Topic, Instance, \
     Notification, Language, community_language, ModLog, Feed, FeedItem, CmsPage
 
@@ -73,6 +74,11 @@ def home_page(sort, view_filter):
     # view filter - subscribed/local/all
     community_ids = [-1]
     low_quality_filter = 'AND c.low_quality is false' if current_user.is_authenticated and current_user.hide_low_quality else ''
+    if current_user.is_authenticated:
+        modded_communities = moderating_communities_ids(current_user.id)
+    else:
+        modded_communities = []
+    enable_mod_filter = len(modded_communities) > 0
 
     if view_filter == 'subscribed' and current_user.is_authenticated:
         community_ids = db.session.execute(text('SELECT id FROM community as c INNER JOIN community_member as cm ON cm.community_id = c.id WHERE cm.is_banned is false AND cm.user_id = :user_id'),
@@ -86,6 +92,8 @@ def home_page(sort, view_filter):
             community_ids = db.session.execute(text(f'SELECT id FROM community as c WHERE c.show_popular is true {low_quality_filter}')).scalars()
     elif view_filter == 'all' or current_user.is_anonymous:
         community_ids = [-1]    # Special value to indicate 'All'
+    elif view_filter == 'moderating':
+        community_ids = modded_communities
 
     post_ids = get_deduped_post_ids(result_id, list(community_ids), sort)
     has_next_page = len(post_ids) > page + 1 * page_length
@@ -144,8 +152,10 @@ def home_page(sort, view_filter):
                            content_filters=content_filters, sort=sort, view_filter=view_filter,
                            announcement=allowlist_html(get_setting('announcement', '')),
                            reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                           user_notes=user_notes(current_user.get_id()),
                            joined_communities=joined_or_modding_communities(current_user.get_id()),
-                           inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None
+                           inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
+                           enable_mod_filter=enable_mod_filter,
                            )
 
 

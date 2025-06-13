@@ -24,7 +24,7 @@
         {% include 'post/_post_full.html' -%}
         {% if post.comments_enabled -%}
             {% if current_user.is_authenticated -%}
-                {% if current_user.verified -%}
+                {% if current_user.verified and not banned_from_community -%}
                     <div class="row post_reply_form">
                         <hr class="mt-1" />
                         <div class="col">
@@ -70,7 +70,9 @@
                         {% endif -%}
                     </div>
                 {% else -%}
-                    <p><a href="{{ url_for('auth.validation_required') }}">{{ _('Verify your email address to comment') }}</a></p>
+                    {% if not current_user.verified -%}
+                        <p><a href="{{ url_for('auth.validation_required') }}">{{ _('Verify your email address to comment') }}</a></p>
+                    {% endif -%}
                 {% endif -%}
             {% else -%}
                 <p><a href="{{ url_for('auth.login', next='/post/' + str(post.id)) }}">{{ _('Log in to comment') }}</a></p>

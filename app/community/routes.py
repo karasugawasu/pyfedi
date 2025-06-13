@@ -45,7 +45,7 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     blocked_users, languages_for_form, menu_topics, add_to_modlog, \
     blocked_communities, remove_tracking_from_link, piefed_markdown_to_lemmy_markdown, \
     instance_software, domain_from_email, referrer, flair_for_form, find_flair_id, login_required_if_private_instance, \
-    possible_communities, reported_posts
+    possible_communities, reported_posts, user_notes
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
 from feedgen.feed import FeedGenerator
@@ -69,9 +69,9 @@ def add_local():
         form.url.data = slugify(form.url.data.strip(), separator='_').lower()
         private_key, public_key = RsaKeys.generate_keypair()
         community = Community(title=form.community_name.data, name=form.url.data, description=piefed_markdown_to_lemmy_markdown(form.description.data),
-                              rules=form.rules.data, nsfw=form.nsfw.data, private_key=private_key,
+                              nsfw=form.nsfw.data, private_key=private_key,
                               public_key=public_key, description_html=markdown_to_html(form.description.data),
-                              rules_html=markdown_to_html(form.rules.data), local_only=form.local_only.data,
+                              local_only=form.local_only.data,
                               ap_profile_id='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data.lower(),
                               ap_public_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data,
                               ap_followers_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data + '/followers',
@@ -236,6 +236,16 @@ def show_community(community: Community):
         is_moderator = False
         is_owner = False
         is_admin = False
+
+    banned_from_community = False
+    if current_user.is_authenticated and community.id in communities_banned_from(current_user.id):
+        ban_details = CommunityBan.query.filter(CommunityBan.user_id == current_user.id, CommunityBan.community_id == community.id).first()
+        banned_from_community = True
+        if ban_details:
+            if ban_details.ban_until:
+                flash(_('You have been banned from this community until %(when)s.', when=ban_details.ban_until.date()))
+            else:
+                flash(_('You have been banned from this community.'))
 
     # Build list of moderators and set un-moderated flag
     mod_user_ids = [mod.user_id for mod in mods]
@@ -457,6 +467,7 @@ def show_community(community: Community):
                            rss_feed=f"https://{current_app.config['SERVER_NAME']}/community/{community.link()}/feed", rss_feed_name=f"{community.title} on {g.site.name}",
                            content_filters=content_filters,  sort=sort, flair=flair,
                            reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                           user_notes=user_notes(current_user.get_id()), banned_from_community=banned_from_community,
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            post_layout=post_layout, content_type=content_type, current_app=current_app,
                            user_has_feeds=user_has_feeds, current_feed_id=current_feed_id,
@@ -874,8 +885,6 @@ def community_edit(community_id: int):
             community.title = form.title.data
             community.description = piefed_markdown_to_lemmy_markdown(form.description.data)
             community.description_html = markdown_to_html(form.description.data, anchors_new_tab=False)
-            community.rules = form.rules.data
-            community.rules_html = markdown_to_html(form.rules.data, anchors_new_tab=False)
             community.nsfw = form.nsfw.data
             community.local_only = form.local_only.data
             community.restricted_to_mods = form.restricted_to_mods.data
@@ -928,7 +937,6 @@ def community_edit(community_id: int):
         else:
             form.title.data = community.title
             form.description.data = community.description
-            form.rules.data = community.rules
             form.nsfw.data = community.nsfw
             form.local_only.data = community.local_only
             form.new_mods_wanted.data = community.new_mods_wanted
@@ -1178,7 +1186,9 @@ def community_ban_user(community_id: int, user_id: int):
             if post_replies:
                 flash(_('Comments by %(name)s have been deleted.', name=user.display_name()))
 
-        # todo: federate ban to post author instance
+        # federate ban to post author instance
+        task_selector('ban_from_community', user_id=user_id, mod_id=current_user.id, community_id=community.id,
+                      expiry=form.ban_until.data, reason=form.reason.data)
 
         # Notify banned person
         if user.is_local():
@@ -1231,7 +1241,8 @@ def community_unban_user(community_id: int, user_id: int):
 
     flash(_('%(name)s has been unbanned.', name=user.display_name()))
 
-    # todo: federate ban to post author instance
+    # federate ban to post author instance
+    task_selector('unban_from_community', user_id=user_id, mod_id=current_user.id, community_id=community.id, expiry=utcnow(), reason='Un-banned')
 
     # notify banned person
     if user.is_local():
@@ -1981,8 +1992,8 @@ def community_invite(actor):
 
     community = actor_to_community(actor)
 
-    if current_user.created_recently():
-        flash(_('Sorry your account it too new to do this.'), 'warning')
+    if current_user.created_recently() and not current_user.is_admin():
+        flash(_('Sorry your account is too new to do this.'), 'warning')
         return redirect(referrer())
 
     if community is not None:

@@ -11,6 +11,8 @@ from json import JSONDecodeError
 from time import sleep
 from typing import List, Literal, Union
 
+from jinja2 import BytecodeCache
+
 import app
 import redis
 import httpx
@@ -28,6 +30,7 @@ from app.constants import DOWNVOTE_ACCEPT_ALL, DOWNVOTE_ACCEPT_TRUSTED, DOWNVOTE
 
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 import os
+import pickle
 from furl import furl
 from flask import current_app, json, redirect, url_for, request, make_response, Response, g, flash, abort
 from flask_babel import _, lazy_gettext as _l
@@ -49,7 +52,7 @@ from captcha.image import ImageCaptcha
 
 from app.models import Settings, Domain, Instance, BannedInstances, User, Community, DomainBlock, ActivityPubLog, IpBan, \
     Site, Post, PostReply, utcnow, Filter, CommunityMember, InstanceBlock, CommunityBan, Topic, UserBlock, Language, \
-    File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair, CommunityJoinRequest, Notification
+    File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair, CommunityJoinRequest, Notification, UserNote
 
 
 # Flask's render_template function, with support for themes added
@@ -1194,6 +1197,28 @@ def moderating_communities(user_id) -> List[Community]:
 
 
 @cache.memoize(timeout=300)
+def moderating_communities_ids(user_id) -> List[int]:
+    """
+    Raw SQL version of moderating_communities() that returns community IDs instead of full objects.
+    """
+    if user_id is None or user_id == 0:
+        return []
+    
+    sql = text("""
+        SELECT c.id
+        FROM community c
+        JOIN community_member cm ON c.id = cm.community_id
+        WHERE c.banned = false
+          AND (cm.is_moderator = true OR cm.is_owner = true)
+          AND cm.is_banned = false
+          AND cm.user_id = :user_id
+        ORDER BY c.title
+    """)
+    
+    return db.session.execute(sql, {'user_id': user_id}).scalars().all()
+
+
+@cache.memoize(timeout=300)
 def joined_communities(user_id) -> List[Community]:
     if user_id is None or user_id == 0:
         return []
@@ -1776,8 +1801,9 @@ def get_task_session() -> Session:
     return Session(bind=db.engine)
 
 
-def get_redis_connection() -> redis.Redis:
-    connection_string = current_app.config['CACHE_REDIS_URL']
+def get_redis_connection(connection_string=None) -> redis.Redis:
+    if connection_string is None:
+        connection_string = current_app.config['CACHE_REDIS_URL']
     if connection_string.startswith('unix://'):
         unix_socket_path, db, password = parse_redis_pipe_string(connection_string)
         return redis.Redis(unix_socket_path=unix_socket_path, db=db, password=password, decode_responses=True)
@@ -2316,6 +2342,15 @@ def possible_communities():
     if len(comms) > 0:
         which_community['Others'] = comms
     return which_community
+
+
+def user_notes(user_id):
+    if user_id is None:
+        return {}
+    result = {}
+    for note in UserNote.query.filter(UserNote.user_id == user_id).all():
+        result[note.target_id] = note.body
+    return result
 
 
 @event.listens_for(User.unread_notifications, 'set')
