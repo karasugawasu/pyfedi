@@ -1060,6 +1060,7 @@ time {
     color: rgba(var(--bs-link-color-rgb),var(--bs-link-opacity,1));
     min-width: $min-touch-target;
     min-height: $min-touch-target;
+    padding-left: 5px;
     span {
       line-height: $min-touch-target;
     }
