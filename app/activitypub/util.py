@@ -553,10 +553,6 @@ def refresh_community_profile_task(community_id, activity_json):
                 else:
                     community.description = html_to_text(community.description_html)
 
-            if 'rules' in activity_json:
-                community.rules_html = allowlist_html(activity_json['rules'])
-                community.rules = html_to_text(community.rules_html)
-
             icon_changed = cover_changed = False
             if 'icon' in activity_json:
                 if isinstance(activity_json['icon'], dict) and 'url' in activity_json['icon']:
@@ -922,10 +918,10 @@ def actor_json_to_model(activity_json, address, server):
                               ap_domain=server.lower(),
                               public_key=activity_json['publicKey']['publicKeyPem'],
                               # language=community_json['language'][0]['identifier'] # todo: language
-                              instance_id=find_instance_id(server),
-                              low_quality='memes' in activity_json['preferredUsername'] or 'shitpost' in activity_json['preferredUsername']
+                              instance_id=find_instance_id(server)
                               )
-
+        if get_setting('meme_comms_low_quality', False):
+            community.low_quality = 'memes' in activity_json['preferredUsername'] or 'shitpost' in activity_json['preferredUsername']
         description_html = ''
         if 'summary' in activity_json:
             description_html = activity_json['summary']
@@ -943,10 +939,6 @@ def actor_json_to_model(activity_json, address, server):
                 community.description_html = markdown_to_html(community.description)          # prefer Markdown if provided, overwrite version obtained from HTML
             else:
                 community.description = html_to_text(community.description_html)
-
-        if 'rules' in activity_json:
-            community.rules_html = allowlist_html(activity_json['rules'])
-            community.rules = html_to_text(community.rules_html)
 
         if 'icon' in activity_json and activity_json['icon'] is not None:
             if isinstance(activity_json['icon'], dict) and 'url' in activity_json['icon']:
@@ -1273,8 +1265,12 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                 s3.close()
                             session.commit()
 
+                            site = Site.query.get(1)
+                            if site is None:
+                                site = Site()
+
                             # Alert regarding fascist meme content
-                            if toxic_community and img_width < 2000:    # images > 2000px tend to be real photos instead of 4chan screenshots.
+                            if site.enable_chan_image_filter and toxic_community and img_width < 2000:    # images > 2000px tend to be real photos instead of 4chan screenshots.
                                 if os.environ.get('ALLOW_4CHAN', None) is None:
                                     try:
                                         image_text = pytesseract.image_to_string(Image.open(BytesIO(source_image)).convert('L'), timeout=30)

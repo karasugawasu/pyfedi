@@ -4,6 +4,7 @@ from datetime import timedelta
 from time import sleep
 from io import BytesIO
 import json as python_json
+import shutil
 
 from flask import request, flash, json, url_for, current_app, redirect, g, abort, send_file
 from flask_login import login_required, current_user
@@ -35,15 +36,28 @@ from app.utils import render_template, permission_required, set_setting, get_set
     moderating_communities, joined_communities, finalize_user_setup, theme_list, blocked_phrases, blocked_referrers, \
     topic_tree, languages_for_form, menu_topics, ensure_directory_exists, add_to_modlog, get_request, file_get_contents, \
     download_defeds, instance_banned, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, referrer, \
-    community_membership, retrieve_image_hash, posts_with_blocked_images, user_access, reported_posts
+    community_membership, retrieve_image_hash, posts_with_blocked_images, user_access, reported_posts, user_notes
 from app.admin import bp
 
 
 @bp.route('/', methods=['GET', 'POST'])
 @login_required
 def admin_home():
-    return render_template('admin/home.html', title=_('Admin'), 
-                           )
+    load1, load5, load15 = os.getloadavg()
+    num_cores = os.cpu_count()
+    path = os.getcwd()
+    usage = shutil.disk_usage(path)
+
+    total = usage.total
+    used = usage.used
+    percent_used = used / total * 100
+
+    if percent_used > 95:
+        disk_usage = f"<span class='blink red'>Storage used: {percent_used:.2f}%</span>"
+    else:
+        disk_usage = f"Storage used: {percent_used:.2f}%"
+    return render_template('admin/home.html', title=_('Admin'), load1=load1, load5=load5, load15=load15, num_cores=num_cores,
+                           disk_usage=disk_usage)
 
 
 @bp.route('/site', methods=['GET', 'POST'])
@@ -154,6 +168,9 @@ def admin_misc():
     form.default_theme.choices = theme_list()
     if form.validate_on_submit():
         site.enable_downvotes = form.enable_downvotes.data
+        site.enable_gif_reply_rep_decrease = form.enable_gif_reply_rep_decrease.data
+        site.enable_chan_image_filter = form.enable_chan_image_filter.data
+        site.enable_this_comment_filter = form.enable_this_comment_filter.data
         site.allow_local_image_posts = form.allow_local_image_posts.data
         site.remote_image_cache_days = form.remote_image_cache_days.data
         site.enable_nsfw = form.enable_nsfw.data
@@ -175,6 +192,7 @@ def admin_misc():
             db.session.add(site)
         db.session.commit()
         cache.delete_memoized(blocked_referrers)
+        set_setting('meme_comms_low_quality', form.meme_comms_low_quality.data)
         set_setting('public_modlog', form.public_modlog.data)
         set_setting('email_verification', form.email_verification.data)
         set_setting('captcha_enabled', form.captcha_enabled.data)
@@ -185,6 +203,10 @@ def admin_misc():
         flash(_('Settings saved.'))
     elif request.method == 'GET':
         form.enable_downvotes.data = site.enable_downvotes
+        form.enable_gif_reply_rep_decrease.data = site.enable_gif_reply_rep_decrease
+        form.enable_chan_image_filter.data = site.enable_chan_image_filter
+        form.enable_this_comment_filter.data = site.enable_this_comment_filter
+        form.meme_comms_low_quality.data = get_setting('meme_comms_low_quality', False)
         form.allow_local_image_posts.data = site.allow_local_image_posts
         form.remote_image_cache_days.data = site.remote_image_cache_days
         form.enable_nsfw.data = site.enable_nsfw
@@ -208,9 +230,7 @@ def admin_misc():
         form.private_instance.data = site.private_instance
         form.registration_approved_email.data = get_setting('registration_approved_email', '')
         form.ban_check_servers.data = get_setting('ban_check_servers', 'piefed.social')
-    return render_template('admin/misc.html', title=_('Misc settings'), form=form,
-                           
-                            )
+    return render_template('admin/misc.html', title=_('Misc settings'), form=form)
 
 
 @bp.route('/federation', methods=['GET', 'POST'])
@@ -728,9 +748,7 @@ def admin_federation():
 
     return render_template('admin/federation.html', title=_('Federation settings'), 
                            form=form, preload_form=preload_form, ban_lists_form=ban_lists_form,
-                           remote_scan_form=remote_scan_form, current_app_debug=current_app.debug,
-                           
-                            )
+                           remote_scan_form=remote_scan_form, current_app_debug=current_app.debug)
 
 
 @celery.task
@@ -1188,6 +1206,7 @@ def admin_users():
 
     return render_template('admin/users.html', title=_('Users'), next_url=next_url, prev_url=prev_url, users=users,
                            local_remote=local_remote, search=search, sort_by=sort_by, last_seen=last_seen,
+                           user_notes=user_notes(current_user.get_id()),
                            )
 
 
@@ -1253,6 +1272,7 @@ def admin_content():
                            next_url=next_url, prev_url=prev_url,
                            next_url_replies=next_url_replies, prev_url_replies=prev_url_replies,
                            posts=posts, post_replies=post_replies,
+                           user_notes=user_notes(current_user.get_id()),
                            posts_replies=posts_replies, show=show, days=days,
                            reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
                            )
