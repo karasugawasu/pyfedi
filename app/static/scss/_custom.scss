@@ -8,6 +8,13 @@ span.score {
     padding-right: 5px;
 }
 
+.nav {
+  .dropdown-item {
+      max-width: 300px;
+      min-width: 190px;
+  }
+}
+
 .communities_menu {
     width: 60vw;
 }
