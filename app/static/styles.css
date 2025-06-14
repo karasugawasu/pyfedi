@@ -2690,4 +2690,16 @@ span.score {
   padding-right: 5px;
 }
 
+.communities_menu {
+  width: 60vw;
+}
+
+.communities_menu_body .dropdown-item {
+  min-width: 10vw;
+}
+
+.nav-tabs {
+  word-break: keep-all;
+}
+
 /*# sourceMappingURL=styles.css.map */
