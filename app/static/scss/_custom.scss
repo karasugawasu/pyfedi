@@ -20,3 +20,66 @@ span.score {
 .nav-tabs {
     word-break: keep-all;
 }
+
+.post_body, .wiki_page {
+  h1, h2, h3, h4, h5, h6 {
+    &:not(.post_title) {
+      margin-top: 2rem;
+      margin-bottom: 0.5rem;
+    }
+  }
+
+  pre {
+    white-space: pre;
+    margin-left: 0.75rem;
+    padding: 1rem;
+    max-width: 100%;
+    overflow: auto;
+    border: 1px solid var(--bs-secondary);
+    border-radius: 5px;
+
+    &::-webkit-scrollbar-track {
+      background-color: var(--bs-light);
+    }
+
+    &::-webkit-scrollbar {
+      width: 0.8rem;
+      height: 0.8rem;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: var(--bs-secondary);
+      border-radius: 1rem;
+      box-shadow: none;
+    }
+  }
+
+  code {
+    font-family: "HackGen Console NF", "HackGen Console", Menlo, Consolas, "DejaVu Sans Mono";
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin-bottom: 1rem;
+    border: 1px solid var(--bs-dark);
+
+    th, td {
+      padding: 0.5rem;
+      vertical-align: top;
+      border: 1px solid var(--bs-dark);
+      border-top: 1px solid var(--bs-dark);
+    }
+
+    thead th {
+      vertical-align: bottom;
+      border-bottom: 2px solid var(--bs-dark);
+    }
+
+    tbody + tbody {
+      border-top: 2px solid var(--bs-dark);
+    }
+  }
+}
