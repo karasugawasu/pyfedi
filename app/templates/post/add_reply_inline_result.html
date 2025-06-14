@@ -95,7 +95,7 @@
                 {% if post_reply.instance_id != 1 -%}
                     <div class="post_remote_post_reply_link">
                         <a href="{{ post_reply.ap_id }}" rel="nofollow">
-                            <svg xmlns="http://www.w3.org/2000/svg" style="width: 16px; height: 16px;" viewBox="0 0 196.52 196.52" title="{{ _('View original on %(domain)s', domain=post_reply.instance.domain) }}">
+                            <svg class="fediverse_icon" xmlns="http://www.w3.org/2000/svg" style="width: 16px; height: 16px;" viewBox="0 0 196.52 196.52" title="{{ _('View original on %(domain)s', domain=post_reply.instance.domain) }}">
                                 <path fill="#a730b8" d="M47.9242 72.7966a18.2278 18.2278 0 0 1-7.7959 7.7597l42.7984 42.9653 10.3182-5.2291zm56.4524 56.6704-10.3182 5.2291 21.686 21.7708a18.2278 18.2278 0 0 1 7.7975-7.7608z"/>
                                 <path fill="#5496be" d="M129.6645 102.0765l1.7865 11.4272 27.4149-13.8942a18.2278 18.2278 0 0 1-4.9719-9.8124zm-14.0658 7.1282-57.2891 29.0339a18.2278 18.2278 0 0 1 4.9728 9.8133l54.1027-27.4194z"/>
                                 <path fill="#ce3d1a" d="M69.5312 91.6539l8.1618 8.1933 29.269-57.1387a18.2278 18.2278 0 0 1-9.787-5.0219zm-7.1897 14.0363-14.0022 27.3353a18.2278 18.2278 0 0 1 9.786 5.0214l12.3775-24.1639z"/>
