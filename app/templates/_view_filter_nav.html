@@ -12,18 +12,28 @@
   </select>
 </div>
 <div class="d-none d-xl-block view_filter btn-group mt-1 mb-2" aria-label="{{ _('Post filters: ') }}">
-  {% if not current_user.is_anonymous -%}
-    {% if enable_mod_filter -%}
-      <a href="/home/{{ sort }}/moderating" class="btn {{ 'btn-primary' if view_filter == 'moderating' else 'btn-outline-secondary' }}" rel="nofollow noindex" title="{{ _('Posts from communities you moderate') }}">
-        {{ _('Moderating') }}
-    </a>{% endif -%}
-    <a href="/home/{{ sort }}/subscribed" class="btn {{ 'btn-primary' if view_filter == 'subscribed' else 'btn-outline-secondary' }}" rel="nofollow noindex" title="{{ _('Posts from joined communities') }}">
+  <button id="viewFilterDropdown" type="button" class="btn dropdown-toggle px-2 py-2 {{ 'btn-primary' if view_filter in ['subscribed','moderating','local','popular','all'] else 'btn-outline-secondary' }}" data-bs-toggle="dropdown" aria-expanded="false">
+    {%- if view_filter == 'moderating' -%}
+      {{ _('Moderating') }}
+    {%- elif view_filter == 'subscribed' -%}
       {{ _('Subscribed') }}
-    </a>{% endif -%}<a href="/home/{{ sort }}/local" class="btn {{ 'btn-primary' if view_filter == 'local' else 'btn-outline-secondary' }}" rel="nofollow noindex" title="{{ _('Posts on this instance') }}">
+    {%- elif view_filter == 'local' -%}
       {{ _('Local') }}
-    </a><a href="/home/{{ sort }}/popular" class="btn {{ 'btn-primary' if view_filter == 'popular' else 'btn-outline-secondary' }}" rel="nofollow noindex" title="{{ _('Posts from popular communities') }}">
+    {%- elif view_filter == 'popular' -%}
       {{ _('Popular') }}
-    </a><a href="/home/{{ sort }}/all" class="btn {{ 'btn-primary' if view_filter == 'all' else 'btn-outline-secondary' }}" rel="nofollow noindex" title="{{ _('No filter') }}">
+    {%- else -%}
       {{ _('All') }}
-    </a>
+    {%- endif -%}
+  </button>
+  <ul class="dropdown-menu" aria-labelledby="viewFilterDropdown">
+    {% if not current_user.is_anonymous and enable_mod_filter %}
+    <li><a class="dropdown-item" href="/home/{{ sort }}/moderating">{{ _('Moderating') }}</a></li>
+    {% endif %}
+    {% if not current_user.is_anonymous %}
+    <li><a class="dropdown-item" href="/home/{{ sort }}/subscribed">{{ _('Subscribed') }}</a></li>
+    {% endif %}
+    <li><a class="dropdown-item" href="/home/{{ sort }}/local">{{ _('Local') }}</a></li>
+    <li><a class="dropdown-item" href="/home/{{ sort }}/popular">{{ _('Popular') }}</a></li>
+    <li><a class="dropdown-item" href="/home/{{ sort }}/all">{{ _('All') }}</a></li>
+  </ul>
 </div>
