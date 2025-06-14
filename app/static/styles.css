@@ -2702,4 +2702,54 @@ span.score {
   word-break: keep-all;
 }
 
+.post_body h1:not(.post_title), .post_body h2:not(.post_title), .post_body h3:not(.post_title), .post_body h4:not(.post_title), .post_body h5:not(.post_title), .post_body h6:not(.post_title), .wiki_page h1:not(.post_title), .wiki_page h2:not(.post_title), .wiki_page h3:not(.post_title), .wiki_page h4:not(.post_title), .wiki_page h5:not(.post_title), .wiki_page h6:not(.post_title) {
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+}
+.post_body pre, .wiki_page pre {
+  white-space: pre;
+  margin-left: 0.75rem;
+  padding: 1rem;
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--bs-secondary);
+  border-radius: 5px;
+}
+.post_body pre::-webkit-scrollbar-track, .wiki_page pre::-webkit-scrollbar-track {
+  background-color: var(--bs-light);
+}
+.post_body pre::-webkit-scrollbar, .wiki_page pre::-webkit-scrollbar {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+.post_body pre::-webkit-scrollbar-thumb, .wiki_page pre::-webkit-scrollbar-thumb {
+  background: var(--bs-secondary);
+  border-radius: 1rem;
+  box-shadow: none;
+}
+.post_body code, .wiki_page code {
+  font-family: "HackGen Console NF", "HackGen Console", Menlo, Consolas, "DejaVu Sans Mono";
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+.post_body table, .wiki_page table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1rem;
+  border: 1px solid var(--bs-dark);
+}
+.post_body table th, .post_body table td, .wiki_page table th, .wiki_page table td {
+  padding: 0.5rem;
+  vertical-align: top;
+  border: 1px solid var(--bs-dark);
+  border-top: 1px solid var(--bs-dark);
+}
+.post_body table thead th, .wiki_page table thead th {
+  vertical-align: bottom;
+  border-bottom: 2px solid var(--bs-dark);
+}
+.post_body table tbody + tbody, .wiki_page table tbody + tbody {
+  border-top: 2px solid var(--bs-dark);
+}
+
 /*# sourceMappingURL=styles.css.map */
