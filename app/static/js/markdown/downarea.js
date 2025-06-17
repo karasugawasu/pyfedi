@@ -40,6 +40,7 @@ var DownArea = (function () {
             _a['o-list'] = { fn: this.addOrderedList },
             _a['sl-code'] = { fn: this.addSingleLineCode },
             _a['code-block'] = { fn: this.addCodeBlock },
+            _a['ruby'] = { fn: this.addRuby },
             _a);
         this.element = args.elem;
         this.attr = (_b = args.attr) !== null && _b !== void 0 ? _b : {};
@@ -185,6 +186,49 @@ var DownArea = (function () {
             codeBlockTool.title = 'Code Block';
             codeBlockTool.innerHTML = "<svg width=\"100%\" height=\"100%\" viewBox=\"0 0 100 100\" version=\"1.1\"\n                         style=\"fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;\">\n                        <g transform=\"matrix(1.47619,0,0,1.37619,-9.78571,-21.5619)\">\n                            <path d=\"M29.5,65L9,65L9,72L29.5,72L29.5,65ZM61,54L9,54L9,61L61,61L61,54ZM50,43L9,43L9,50L50,50L50,43ZM72,32L9,32L9,39L72,39L72,32Z\"/>\n                        </g>\n                    </svg>";
             toolbar.appendChild(codeBlockTool);
+        }
+        if (this.hiddenTools.indexOf('ruby') < 0) {
+            const rubyModal = document.createElement('div');
+            rubyModal.classList.add('ruby');
+            rubyModal.innerHTML = `
+                <div class="modal fade" id="ruby-modal" tabindex="-1" aria-labelledby="rubyModalLabel" aria-hidden="true">
+                <div class="modal-dialog">
+                    <div class="modal-content bg-dark text-light">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="rubyModalLabel">ルビを挿入</h5>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="閉じる"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                        <label for="rubyBase" class="form-label">文字列</label>
+                        <input type="text" class="form-control" id="rubyBase" placeholder="例: 漢字">
+                        </div>
+                        <div class="mb-3">
+                        <label for="rubyText" class="form-label">ルビ</label>
+                        <input type="text" class="form-control" id="rubyText" placeholder="例: かんじ">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                        <button type="button" class="btn btn-primary" id="rubyConfirm">OK</button>
+                    </div>
+                    </div>
+                </div>
+                </div>
+            `;
+
+            const rubyTool = document.createElement('div');
+            rubyTool.classList.add('downarea-toolbar-tool');
+            rubyTool.title = 'Ruby 注釈';
+            rubyTool.dataset.action = 'ruby';
+            rubyTool.innerHTML = `
+            <ruby style="font-size: 8px; line-height: 1; display: inline-block; text-align: center;">
+                亜<rt style="font-size: 6px;">ア</rt>
+            </ruby>
+            `;
+
+            document.body.appendChild(rubyModal);
+            toolbar.appendChild(rubyTool);
         }
         var textareaContainer = document.createElement('div');
         textareaContainer.classList.add('downarea-textarea');
@@ -495,7 +539,7 @@ var DownArea = (function () {
         var link = '';
         var offset = 0;
         if (type === 0) {
-            link = '[](https://)';
+            link = '[]()';
             offset = link.length - 1;
             if (self.textarea.selectionStart != self.textarea.selectionEnd) {
                 end = self.textarea.value.substr(self.textarea.selectionEnd);
@@ -695,6 +739,40 @@ var DownArea = (function () {
         self.textarea.selectionStart = start.length + code.length - offset;
         self.textarea.selectionEnd = self.textarea.selectionStart;
         self.textarea.focus();
+    };
+    DownArea.prototype.addRuby = function (self) {
+        const modal = document.getElementById('ruby-modal');
+        const baseInput = modal.querySelector('#rubyBase');
+        const rubyInput = modal.querySelector('#rubyText');
+        const confirmBtn = modal.querySelector('#rubyConfirm');
+        const cancelBtn = modal.querySelector('#rubyCancel');
+
+        const selection = self.textarea.value.substring(self.textarea.selectionStart, self.textarea.selectionEnd);
+        baseInput.value = selection || '';
+        rubyInput.value = '';
+
+        const bsModal = new bootstrap.Modal(modal);
+        bsModal.show();
+
+        confirmBtn.onclick = () => {
+            const base = baseInput.value.trim();
+            const ruby = rubyInput.value.trim();
+            if (!base || !ruby) return;
+
+            const insertText = `{${base}|${ruby}}`;
+            const start = self.textarea.value.substring(0, self.textarea.selectionStart);
+            const end = self.textarea.value.substring(self.textarea.selectionEnd);
+            const pos = start.length + insertText.length;
+
+            self.textarea.value = start + insertText + end;
+            self.textarea.selectionStart = self.textarea.selectionEnd = pos;
+            self.textarea.focus();
+            bsModal.hide();
+        };
+
+        cancelBtn.onclick = () => {
+            bsModal.hide();
+        };
     };
     DownArea.RESIZE_OFF = 0;
     DownArea.RESIZE_VERTICAL = 1;
