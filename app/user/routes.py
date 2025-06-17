@@ -86,10 +86,8 @@ def _get_user_post_replies(user, replies_page):
 
 
 def _get_user_moderates(user):
-    """Get communities moderated by user based on current user's permissions."""
-    if not (current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_staff() or current_user.is_admin())):
-        return []
-    
+    """Get communities moderated by user."""
+
     moderates = Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id).\
         filter(or_(CommunityMember.is_moderator, CommunityMember.is_owner))
     
@@ -139,6 +137,8 @@ def show_profile(user):
     canonical = user.ap_public_url if user.ap_public_url else None
     description = shorten_string(markdown_to_text(user.about), 150) if user.about else None
     user.recalculate_post_stats()
+    if current_user.is_authenticated and current_user.is_admin_or_staff():
+        user.recalculate_attitude()
     db.session.commit()
 
     # find all user feeds marked as public

@@ -16,7 +16,7 @@ from app.models import Site
 from app.utils import getmtime, gibberish, shorten_string, shorten_url, digits, user_access, community_membership, \
     can_create_post, can_upvote, can_downvote, shorten_number, ap_datetime, current_theme, community_link_to_href, \
     in_sorted_list, role_access, first_paragraph, person_link_to_href, feed_membership, html_to_text, remove_images, \
-    notif_id_to_string
+    notif_id_to_string, feed_link_to_href
 
 app = create_app()
 cli.register(app)
@@ -59,6 +59,7 @@ with app.app_context():
     app.jinja_env.globals['first_paragraph'] = first_paragraph
     app.jinja_env.globals['html_to_text'] = html_to_text
     app.jinja_env.filters['community_links'] = community_link_to_href
+    app.jinja_env.filters['feed_links'] = feed_link_to_href
     app.jinja_env.filters['person_links'] = person_link_to_href
     app.jinja_env.filters['shorten'] = shorten_string
     app.jinja_env.filters['shorten_url'] = shorten_url
@@ -67,8 +68,8 @@ with app.app_context():
 
 @app.before_request
 def before_request():
-    # Handle CORS preflight requests for API routes
-    if request.method == 'OPTIONS' and request.path.startswith('/api/'):
+    # Handle CORS preflight requests for all routes
+    if request.method == 'OPTIONS':
         return '', 200
     
     # Store nonce in g (g is per-request, unlike session)
@@ -96,11 +97,10 @@ def before_request():
 
 @app.after_request
 def after_request(response):
-    # Add CORS headers for API routes
-    if request.path.startswith('/api/'):
-        response.headers['Access-Control-Allow-Origin'] = current_app.config['CORS_ALLOW_ORIGIN']
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    # Add CORS headers to all responses
+    response.headers['Access-Control-Allow-Origin'] = current_app.config.get('CORS_ALLOW_ORIGIN', '*')
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
     
     # Don't set cookies for static resources or ActivityPub responses to make them cachable
     if request.path.startswith('/static/') or request.path.startswith('/bootstrap/static/') or response.content_type == 'application/activity+json':
