@@ -209,7 +209,7 @@ var DownArea = (function () {
                         </div>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">キャンセル</button>
+                        <button type="button" class="btn btn-secondary" id="rubyCancel" data-bs-dismiss="modal">キャンセル</button>
                         <button type="button" class="btn btn-primary" id="rubyConfirm">OK</button>
                     </div>
                     </div>
@@ -239,6 +239,12 @@ var DownArea = (function () {
         }
         textarea.value = this.textareaValue.toString();
         textareaContainer.appendChild(textarea);
+        textarea.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key.toLowerCase() === 'r') {
+                e.preventDefault();
+                this.addRuby(this);
+            }
+        });
         var bottom = document.createElement('div');
         bottom.classList.add('downarea-bottom');
         wrapper.appendChild(bottom);
@@ -742,6 +748,8 @@ var DownArea = (function () {
     };
     DownArea.prototype.addRuby = function (self) {
         const modal = document.getElementById('ruby-modal');
+        if (!modal) return console.error('ルビモーダルが見つかりません');
+
         const baseInput = modal.querySelector('#rubyBase');
         const rubyInput = modal.querySelector('#rubyText');
         const confirmBtn = modal.querySelector('#rubyConfirm');
@@ -754,7 +762,34 @@ var DownArea = (function () {
         const bsModal = new bootstrap.Modal(modal);
         bsModal.show();
 
-        confirmBtn.onclick = () => {
+        modal.addEventListener('shown.bs.modal', () => {
+            if (selection) {
+                rubyInput.focus();
+            } else {
+                baseInput.focus();
+            }
+
+            const keyListener = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleConfirm();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    handleCancel();
+                }
+            };
+            modal.addEventListener('keydown', keyListener);
+
+            modal.addEventListener(
+                'hidden.bs.modal',
+                () => {
+                    modal.removeEventListener('keydown', keyListener);
+                },
+                { once: true }
+            );
+        }, { once: true });
+
+        const handleConfirm = () => {
             const base = baseInput.value.trim();
             const ruby = rubyInput.value.trim();
             if (!base || !ruby) return;
@@ -763,16 +798,21 @@ var DownArea = (function () {
             const start = self.textarea.value.substring(0, self.textarea.selectionStart);
             const end = self.textarea.value.substring(self.textarea.selectionEnd);
             const pos = start.length + insertText.length;
-
+            document.activeElement.blur();
+            bsModal.hide();
             self.textarea.value = start + insertText + end;
             self.textarea.selectionStart = self.textarea.selectionEnd = pos;
             self.textarea.focus();
-            bsModal.hide();
         };
 
-        cancelBtn.onclick = () => {
+        const handleCancel = () => {
+            document.activeElement.blur();
             bsModal.hide();
+            self.textarea.focus();
         };
+
+        confirmBtn.onclick = handleConfirm;
+        cancelBtn.onclick = handleCancel;
     };
     DownArea.RESIZE_OFF = 0;
     DownArea.RESIZE_VERTICAL = 1;
