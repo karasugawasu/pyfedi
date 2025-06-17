@@ -46,6 +46,8 @@ document.addEventListener("DOMContentLoaded", function () {
     setupNotificationPermission();
     setupFederationModeToggle();
     setupMegaMenuNavigation();
+    setupPopupCommunitySidebar();
+    setupVideoSpoilers();
 
     // save user timezone into a timezone field, if it exists
     const timezoneField = document.getElementById('timezone');
@@ -1265,6 +1267,32 @@ function setupMegaMenuNavigation() {
             if (isVisible) {
                 hideDropdown();
             } else {
+                const accountMenu = document.querySelector('.account_menu_parent');
+                if(accountMenu) {
+                    const accountAnchor = accountMenu.querySelector('a');
+                    if(accountAnchor) {
+                        accountAnchor.classList.remove('show');
+                        accountAnchor.setAttribute('aria-expanded', 'false');
+                    }
+                    const accountUl = accountMenu.querySelector('ul');
+                    if(accountUl) {
+                        accountUl.classList.remove('show');
+                        accountUl.removeAttribute('data-bs-popper');
+                    }
+                }
+                const adminMenu = document.querySelector('.admin_menu_parent');
+                if(adminMenu) {
+                    const adminAnchor = adminMenu.querySelector('a');
+                    if(adminAnchor) {
+                        adminAnchor.classList.remove('show');
+                        adminAnchor.setAttribute('aria-expanded', 'false');
+                    }
+                    const adminUl = adminMenu.querySelector('ul');
+                    if(adminUl) {
+                        adminUl.classList.remove('show');
+                        adminUl.removeAttribute('data-bs-popper');
+                    }
+                }
                 showDropdown();
             }
         });
@@ -1291,4 +1319,63 @@ function setupMegaMenuNavigation() {
         dropdownToggle.setAttribute('aria-expanded', 'false');
         dropdownToggle.parentElement.classList.remove('show');
     }
+}
+
+function setupPopupCommunitySidebar() {
+    const dialog = document.getElementById('communitySidebar');
+
+    document.querySelectorAll('.showPopupCommunitySidebar').forEach(anchor => {
+        anchor.addEventListener('click', function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const communityId = this.getAttribute('data-id');
+
+            if (communityId && dialog) {
+                fetch(`/community/get_sidebar/${communityId}`)
+                    .then(response => response.text())
+                    .then(html => {
+                        dialog.innerHTML = `
+                            <div style="position: relative;">
+                                <button id="closeCommunitySidebar" style="position: absolute; top: -10px; right: 0; background: none; border: none; font-size: 24px; cursor: pointer; z-index: 1000;" aria-label="Close">&times;</button>
+                                ${html}
+                            </div>
+                        `;
+
+                        const closeButton = dialog.querySelector('#closeCommunitySidebar');
+                        if (closeButton) {
+                            closeButton.addEventListener('click', function() {
+                                dialog.close();
+                            });
+                        }
+
+                        dialog.showModal();
+                    })
+                    .catch(error => {
+                        console.error('Error fetching community sidebar:', error);
+                    });
+            }
+        });
+    });
+
+    if (dialog) {
+        dialog.addEventListener('click', function(event) {
+            if (event.target === dialog) {
+                dialog.close();
+            }
+        });
+    }
+}
+
+function setupVideoSpoilers() {
+    const videosBlurred = document.querySelectorAll('.responsive-video.blur');
+
+    videosBlurred.forEach(function(vid) {
+        vid.addEventListener('play', function(playing) {
+            vid.classList.remove("blur");
+        });
+        vid.addEventListener('pause', function(paused) {
+            vid.classList.add("blur");
+        });
+    });
 }

@@ -154,7 +154,7 @@ def feed_edit(feed_id: int):
     if current_user.banned:
         return show_ban_message()
     # load the feed
-    feed_to_edit = Feed.query.get_or_404(feed_id)
+    feed_to_edit: Feed = Feed.query.get_or_404(feed_id)
     # make sure the user owns this feed
     if feed_to_edit.user_id != current_user.id:
         abort(404)
@@ -164,6 +164,9 @@ def feed_edit(feed_id: int):
 
     if not current_user.is_admin():
         edit_feed_form.is_instance_feed.render_kw = {'disabled': True}
+
+    if feed_to_edit.subscriptions_count > 1:
+        edit_feed_form.url.render_kw = {'disabled': True}
     
     if edit_feed_form.validate_on_submit():
         edit_feed_form.url.data = slugify(edit_feed_form.url.data, separator='_').lower()
@@ -1033,3 +1036,46 @@ def announce_feed_delete_to_subscribers(user_id, feed_id):
         if instance.inbox and instance.online() and not instance_banned(instance.domain):
             send_post_request(instance.inbox, delete_json, user.private_key, user.ap_profile_id + '#main-key', timeout=10)
     session.close()
+
+
+@bp.route('/feed/lookup/<feedname>/<domain>')
+def lookup(feedname, domain):
+    if domain == current_app.config['SERVER_NAME']:
+        return redirect('/f/' + feedname)
+
+    feedname = feedname.lower()
+    domain = domain.lower()
+
+    exists = Feed.query.filter_by(ap_id=f'{feedname}@{domain}').first()
+    if exists:
+        return redirect('/f/' + feedname + '@' + domain)
+    else:
+        address = '~' + feedname + '@' + domain
+        if current_user.is_authenticated:
+            new_feed = None
+
+            try:
+                new_feed = search_for_feed(address)
+            except Exception as e:
+                if 'is blocked.' in str(e):
+                    flash(_('Sorry, that instance is blocked, check https://gui.fediseer.com/ for reasons.'), 'warning')
+            if new_feed is None:
+                if g.site.enable_nsfw:
+                    flash(_('Feed not found.'), 'warning')
+                else:
+                    flash(_('Feed not found. If you are searching for a nsfw feed it is blocked by this instance.'), 'warning')
+            else:
+                if new_feed.banned:
+                    flash(_('That feed is banned from %(site)s.', site=g.site.name), 'warning')
+
+            return render_template('feed/lookup_remote.html',
+                           title=_('Search result for remote feed'), new_feed=new_feed,
+                           subscribed=feed_membership(current_user, new_feed) >= SUBSCRIPTION_MEMBER)
+        else:
+            # send them back where they came from
+            flash(_('Searching for remote feeds requires login'), 'error')
+            referrer = request.headers.get('Referer', None)
+            if referrer is not None:
+                return redirect(referrer)
+            else:
+                return redirect('/')

@@ -1108,13 +1108,13 @@ class User(UserMixin, db.Model):
         else:
             new_attitude = None
         
-        # Update attitude with direct SQL query in nested transaction to avoid deadlocks
-        with db.session.begin_nested():
-            db.session.execute(text("""
-                UPDATE "user" 
-                SET attitude = :attitude
-                WHERE id = :user_id
-            """), {"attitude": new_attitude, "user_id": self.id})
+        # Update attitude
+        db.session.execute(text("""
+            UPDATE "user" 
+            SET attitude = :attitude
+            WHERE id = :user_id
+        """), {"attitude": new_attitude, "user_id": self.id})
+        db.session.commit()
 
     def get_num_upvotes(self):
         post_votes = db.session.execute(text('SELECT COUNT(*) FROM "post_vote" WHERE user_id = :user_id AND effect > 0'), {'user_id': self.id}).scalar()
@@ -1171,6 +1171,9 @@ class User(UserMixin, db.Model):
 
     def created_recently(self):
         return self.created and self.created > utcnow() - timedelta(days=7)
+
+    def created_very_recently(self):
+        return self.created and self.created > utcnow() - timedelta(days=1)
 
     def has_blocked_instance(self, instance_id: int):
         instance_block = InstanceBlock.query.filter_by(user_id=self.id, instance_id=instance_id).first()
@@ -1596,8 +1599,8 @@ class Post(db.Model):
                 language = find_language(next(iter(request_json['object']['contentMap'])))
                 post.language_id = language.id if language else None
             else:
-                from app.utils import english_language_id
-                post.language_id = english_language_id()
+                from app.utils import site_language_id
+                post.language_id = site_language_id()
             if 'licence' in request_json['object'] and isinstance(request_json['object']['licence'], dict):
                 licence = find_licence_or_create(request_json['object']['licence']['name'])
                 post.licence = licence
@@ -1987,10 +1990,6 @@ class Post(db.Model):
                               "ranking_scaled": new_ranking_scaled, 
                               "post_id": self.id})
         
-        # Update user's attitude in another separate transaction
-        with db.session.begin_nested():
-            user.recalculate_attitude()
-        
         db.session.commit()
         return undo
 
@@ -2362,10 +2361,6 @@ class PostReply(db.Model):
         with db.session.begin_nested():
             db.session.execute(text("UPDATE post_reply SET ranking=:ranking WHERE id=:post_reply_id"),
                              {"ranking": new_ranking, "post_reply_id": self.id})
-        
-        # Update user's attitude in another separate transaction
-        with db.session.begin_nested():
-            user.recalculate_attitude()
         
         db.session.commit()
         return undo
@@ -2851,6 +2846,7 @@ class Site(db.Model):
     show_inoculation_block = db.Column(db.Boolean, default=True)
     additional_css = db.Column(db.Text)
     private_instance = db.Column(db.Boolean, default=False)
+    language_id = db.Column(db.Integer)
 
     @staticmethod
     def admins() -> List[User]:
@@ -2949,6 +2945,7 @@ class Feed(db.Model):
     def __repr__(self):
         return '<Feed {}_{}>'.format(self.name, self.id)
 
+    @cache.memoize(timeout=500)
     def icon_image(self, size='default') -> str:
         if self.icon_id is not None:
             if size == 'default':
@@ -3089,6 +3086,7 @@ class Feed(db.Model):
 
 class FeedJoinRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    uuid = db.Column(UUID(as_uuid=True), index=True, default=uuid.uuid4)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     feed_id = db.Column(db.Integer, db.ForeignKey('feed.id'), index=True)
 

@@ -1357,8 +1357,8 @@ def find_instance_id(server):
     else:
         # Our instance does not know about {server} yet. Initially, create a sparse row in the 'instance' table and spawn a background
         # task to update the row with more details later
-        new_instance = Instance(domain=server, software='unknown', inbox=f'https://{server}/inbox', created_at=utcnow(),
-                                trusted=server == 'piefed.social')
+        new_instance = Instance(domain=server, software='unknown', inbox=f'https://{server}/inbox', created_at=utcnow())
+        
         try:
             db.session.add(new_instance)
             db.session.commit()
@@ -1772,8 +1772,8 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             language = find_language(next(iter(request_json['object']['contentMap'])))  # Combination of next and iter gets the first key in a dict
             language_id = language.id if language else None
         else:
-            from app.utils import english_language_id
-            language_id = english_language_id()
+            from app.utils import site_language_id
+            language_id = site_language_id()
 
         distinguished = request_json['object']['distinguished'] if 'distinguished' in request_json['object'] else False
 
@@ -2137,7 +2137,9 @@ def update_post_from_activity(post: Post, request_json: dict):
     # Tags
     if 'tag' in request_json['object'] and isinstance(request_json['object']['tag'], list):
         post.tags.clear()
-        post.flair.clear()
+        # change back when lemmy supports flairs
+        #post.flair.clear()
+        flair_tags = []
         for json_tag in request_json['object']['tag']:
             if json_tag['type'] == 'Hashtag':
                 if post.microblog or json_tag['name'][1:].lower() != post.community.name.lower():             # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
@@ -2145,9 +2147,11 @@ def update_post_from_activity(post: Post, request_json: dict):
                     if hashtag:
                         post.tags.append(hashtag)
             if json_tag['type'] == 'lemmy:CommunityTag':
-                flair = find_flair_or_create(json_tag, post.community_id)
-                if flair:
-                    post.flair.append(flair)
+                # change back when lemmy supports flairs
+                #flair = find_flair_or_create(json_tag, post.community_id)
+                #if flair:
+                #    post.flair.append(flair)
+                flair_tags.append(json_tag)
             if 'type' in json_tag and json_tag['type'] == 'Mention':
                 profile_id = json_tag['href'] if 'href' in json_tag else None
                 if profile_id and isinstance(profile_id, str) and profile_id.startswith('https://' + current_app.config['SERVER_NAME']):
@@ -2166,6 +2170,14 @@ def update_post_from_activity(post: Post, request_json: dict):
                                                             targets=targets_data)
                                 recipient.unread_notifications += 1
                                 db.session.add(notification)
+        # remove when lemmy supports flairs
+        # for now only clear tags if there's new ones or if maybe another PieFed instance is trying to remove them
+        if len(flair_tags) > 0 or post.instance.software == 'piefed':
+            post.flair.clear()
+            for ft in flair_tags:
+                flair = find_flair_or_create(ft, post.community_id)
+                if flair:
+                    post.flair.append(flair)
 
     post.comments_enabled = request_json['object']['commentsEnabled'] if 'commentsEnabled' in request_json['object'] else True
     try:
@@ -2411,7 +2423,9 @@ def undo_vote(comment, post, target_ap_id, user):
         post = voted_on
         existing_vote = PostVote.query.filter_by(user_id=user.id, post_id=post.id).first()
         if existing_vote:
-            post.author.reputation -= existing_vote.effect
+            with db.session.begin_nested():
+                db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
+                                   {'effect': existing_vote.effect, 'user_id': post.user_id})
             if existing_vote.effect < 0:  # Lemmy sends 'like' for upvote and 'dislike' for down votes. Cool! When it undoes an upvote it sends an 'Undo Like'. Fine. When it undoes a downvote it sends an 'Undo Like' - not 'Undo Dislike'?!
                 post.down_votes -= 1
             else:
@@ -2424,7 +2438,9 @@ def undo_vote(comment, post, target_ap_id, user):
         comment = voted_on
         existing_vote = PostReplyVote.query.filter_by(user_id=user.id, post_reply_id=comment.id).first()
         if existing_vote:
-            comment.author.reputation -= existing_vote.effect
+            with db.session.begin_nested():
+                db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
+                                   {'effect': existing_vote.effect, 'user_id': comment.user_id})
             if existing_vote.effect < 0:  # Lemmy sends 'like' for upvote and 'dislike' for down votes. Cool! When it undoes an upvote it sends an 'Undo Like'. Fine. When it undoes a downvote it sends an 'Undo Like' - not 'Undo Dislike'?!
                 comment.down_votes -= 1
             else:
@@ -2744,14 +2760,18 @@ def resolve_remote_post(uri: str, community, announce_id, store_ap_json, nodebb=
     announce_actor_domain = parsed_url.netloc
     if announce_actor_domain != 'a.gup.pe' and not nodebb and announce_actor_domain != uri_domain:
         return None
-    actor_domain = None
-    actor = None
 
     post_data = remote_object_to_json(uri)
     if not post_data:
         return None
 
+    return create_resolved_object(uri, post_data, uri_domain, community, announce_id, store_ap_json)
+
+
+def create_resolved_object(uri, post_data, uri_domain, community, announce_id, store_ap_json):
     # find the author. Make sure their domain matches the site hosting it to mitigate impersonation attempts
+    actor_domain = None
+    actor = None
     if 'attributedTo' in post_data:
         attributed_to = post_data['attributedTo']
         if isinstance(attributed_to, str):
@@ -2814,6 +2834,7 @@ def resolve_remote_post(uri: str, community, announce_id, store_ap_json, nodebb=
                 return post
 
     return None
+
 
 
 @celery.task
@@ -3057,33 +3078,22 @@ def find_community(request_json):
                             if potential_community:
                                 return potential_community
 
-    # used for manual retrieval of a PeerTube vid
-    if request_json['type'] == 'Video':
-        if 'attributedTo' in request_json and isinstance(request_json['attributedTo'], list):
-            for a in request_json['attributedTo']:
-                if a['type'] == 'Group':
-                    potential_community = Community.query.filter_by(ap_profile_id=a['id'].lower()).first()
-                    if potential_community:
-                        return potential_community
-
-    # change this if manual retrieval of comments is allowed in future
-    if not 'object' in request_json:
-        return None
+    rj = request_json['object'] if 'object' in request_json else request_json
 
     # Create/Update Note from platform that didn't include the Community in 'audience', 'cc', or 'to' (e.g. Mastodon reply to Lemmy post)
-    if 'inReplyTo' in request_json['object'] and request_json['object']['inReplyTo'] is not None:
-        post_being_replied_to = Post.get_by_ap_id(request_json['object']['inReplyTo'])
+    if 'inReplyTo' in rj and rj['inReplyTo'] is not None:
+        post_being_replied_to = Post.get_by_ap_id(rj['inReplyTo'])
         if post_being_replied_to:
             return post_being_replied_to.community
         else:
-            comment_being_replied_to = PostReply.get_by_ap_id(request_json['object']['inReplyTo'])
+            comment_being_replied_to = PostReply.get_by_ap_id(rj['inReplyTo'])
             if comment_being_replied_to:
                 return comment_being_replied_to.community
 
     # Update / Video from PeerTube (possibly an edit, more likely an invite to query Likes / Replies endpoints)
-    if request_json['object']['type'] == 'Video':
-        if 'attributedTo' in request_json['object'] and isinstance(request_json['object']['attributedTo'], list):
-            for a in request_json['object']['attributedTo']:
+    if rj['type'] == 'Video':
+        if 'attributedTo' in rj and isinstance(rj['attributedTo'], list):
+            for a in rj['attributedTo']:
                 if a['type'] == 'Group':
                     potential_community = Community.query.filter_by(ap_profile_id=a['id'].lower()).first()
                     if potential_community:

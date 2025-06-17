@@ -3,7 +3,7 @@
 {% else %}
     {% extends "base.html" %}
 {% endif %}
-{% from 'bootstrap/form.html' import render_form %}
+{% from 'bootstrap5/form.html' import render_form %}
 {% from "_macros.html" import render_communityname %}
 {% set active_child = 'admin_communities' %}
 
@@ -21,7 +21,8 @@
                 </form>
                 Result Filter:
                 <a href="{{ url_for('admin.admin_communities') }}">All</a> | 
-                <a href="{{ url_for('admin.admin_communities_no_topic') }}">No topic</a>
+                <a href="{{ url_for('admin.admin_communities_no_topic') }}">No topic</a> |
+                <a href="{{ url_for('admin.admin_communities_low_quality') }}">Low Quality</a>
             </div>
             <div class="col-auto">
                 <div class="btn-group">

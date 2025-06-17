@@ -47,6 +47,7 @@ class SiteMiscForm(FlaskForm):
     auto_decline_countries = TextAreaField(_l('Ignore registrations from these countries'))
     auto_decline_referrers = TextAreaField(_l('Block registrations from these referrers (one per line)'))
     ban_check_servers = TextAreaField(_l('Warn if new account banned from these instances'))
+    language_id = SelectField(_l('Primary language'), validators=[DataRequired()], coerce=int, render_kw={'class': 'form-select'})
     default_theme = SelectField(_l('Default theme'), coerce=str, render_kw={'class': 'form-select'})
     additional_css = TextAreaField(_l('Additional CSS'))
     filters = [('subscribed', _l('Subscribed')),
@@ -103,7 +104,7 @@ class EditCommunityForm(FlaskForm):
     icon_file = FileField(_l('Icon image'))
     banner_file = FileField(_l('Banner image'))
     rules = TextAreaField(_l('Rules'))
-    nsfw = BooleanField(_l('Porn community'))
+    nsfw = BooleanField(_l('NSFW community'))
     banned = BooleanField(_l('Banned - no new posts accepted'))
     local_only = BooleanField(_l('Only accept posts from current instance'))
     restricted_to_mods = BooleanField(_l('Only moderators can post'))

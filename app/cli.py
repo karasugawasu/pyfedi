@@ -88,7 +88,7 @@ def register(app):
             db.configure_mappers()
             db.create_all()
             private_key, public_key = RsaKeys.generate_keypair()
-            db.session.add(Site(name="PieFed", description='Explore Anything, Discuss Everything.', public_key=public_key, private_key=private_key))
+            db.session.add(Site(name="PieFed", description='Explore Anything, Discuss Everything.', public_key=public_key, private_key=private_key, language_id=2))
             db.session.add(Instance(domain=app.config['SERVER_NAME'], software='PieFed'))   # Instance 1 is always the local instance
             db.session.add(Settings(name='allow_nsfw', value=json.dumps(False)))
             db.session.add(Settings(name='allow_nsfl', value=json.dumps(False)))
@@ -96,8 +96,6 @@ def register(app):
             db.session.add(Settings(name='allow_local_image_posts', value=json.dumps(True)))
             db.session.add(Settings(name='allow_remote_image_posts', value=json.dumps(True)))
             db.session.add(Settings(name='federation', value=json.dumps(True)))
-            db.session.add(Language(name='Undetermined', code='und'))
-            db.session.add(Language(name='English', code='en'))
             banned_instances = ['anonib.al','lemmygrad.ml', 'gab.com', 'rqd2.net', 'exploding-heads.com', 'hexbear.net',
                                 'threads.net', 'noauthority.social', 'pieville.net', 'links.hackliberty.org',
                                 'poa.st', 'freespeechextremist.com', 'bae.st', 'nicecrew.digital', 'detroitriotcity.com',
@@ -121,6 +119,16 @@ def register(app):
                     db.session.add(Domain(name=domain.strip(), banned=True))
                     db.session.add(BannedInstances(domain=domain.strip()))
                 print("Added 'Peertube Isolation' blocklist, see https://peertube_isolation.frama.io/")
+
+            # Initial languages
+            db.session.add(Language(name='Undetermined', code='und'))
+            db.session.add(Language(code='en', name='English'))
+            db.session.add(Language(code='de', name='Deutsch'))
+            db.session.add(Language(code='es', name='Español'))
+            db.session.add(Language(code='fr', name='Français'))
+            db.session.add(Language(code='hi', name='हिन्दी'))
+            db.session.add(Language(code='ja', name='日本語'))
+            db.session.add(Language(code='zh', name='中文'))
 
             # Initial roles
             # These roles will create rows in the 'role' table with IDs of 1,2,3,4. There are some constants (ROLE_*) in
@@ -285,6 +293,7 @@ def register(app):
             # update and sync defederation subscriptions
             print(f'update and sync defederation subscriptions {datetime.now()}')
             db.session.execute(text('DELETE FROM banned_instances WHERE subscription_id is not null'))
+            db.session.commit()
             for defederation_sub in DefederationSubscription.query.all():
                 download_defeds(defederation_sub.id, defederation_sub.domain)
 
@@ -463,6 +472,11 @@ def register(app):
             except Exception as e:
                 db.session.rollback()
                 current_app.logger.error(f"Error in daily maintenance: {e}")
+
+            # recalculate recent active user's attitude
+            print(f'recalcuating attitudes {datetime.now()}')
+            for user in User.query.filter(User.last_seen > utcnow() - timedelta(days=1)):
+                user.recalculate_attitude()
 
             print(f'Done {datetime.now()}')
 

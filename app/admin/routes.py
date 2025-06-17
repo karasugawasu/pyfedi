@@ -166,6 +166,7 @@ def admin_misc():
     if site is None:
         site = Site()
     form.default_theme.choices = theme_list()
+    form.language_id.choices = languages_for_form(all=True)
     if form.validate_on_submit():
         site.enable_downvotes = form.enable_downvotes.data
         site.enable_gif_reply_rep_decrease = form.enable_gif_reply_rep_decrease.data
@@ -188,6 +189,7 @@ def admin_misc():
         site.additional_css = form.additional_css.data
         site.default_filter = form.default_filter.data
         site.private_instance = form.private_instance.data
+        site.language_id = form.language_id.data
         if site.id is None:
             db.session.add(site)
         db.session.commit()
@@ -218,6 +220,7 @@ def admin_misc():
         form.auto_decline_referrers.data = site.auto_decline_referrers
         form.auto_decline_countries.data = get_setting('auto_decline_countries', '')
         form.log_activitypub_json.data = site.log_activitypub_json
+        form.language_id.data = site.language_id
         form.show_inoculation_block.data = site.show_inoculation_block
         form.default_theme.data = site.default_theme if site.default_theme is not None else ''
         form.additional_css.data = site.additional_css if site.additional_css is not None else ''
@@ -964,6 +967,26 @@ def admin_communities_no_topic():
                            communities=communities)
 
 
+@bp.route('/communities/low-quality', methods=['GET'])
+@permission_required('administer all communities')
+@login_required
+def admin_communities_low_quality():
+
+    page = request.args.get('page', 1, type=int)
+    search = request.args.get('search', '')
+
+    communities = Community.query.filter(Community.low_quality == True)
+    if search:
+        communities = communities.filter(Community.title.ilike(f"%{search}%"))
+    communities = communities.order_by(-Community.post_count).paginate(page=page, per_page=1000, error_out=False)
+
+    next_url = url_for('admin.admin_communities_low_quality', page=communities.next_num) if communities.has_next else None
+    prev_url = url_for('admin.admin_communities_low_quality', page=communities.prev_num) if communities.has_prev and page != 1 else None
+
+    return render_template('admin/communities.html', title=_('Communities with low_quality == True'), next_url=next_url, prev_url=prev_url,
+                           communities=communities)
+
+
 @bp.route('/community/<int:community_id>/edit', methods=['GET', 'POST'])
 @permission_required('administer all communities')
 @login_required
@@ -972,7 +995,7 @@ def admin_community_edit(community_id):
     community = Community.query.get_or_404(community_id)
     old_topic_id = community.topic_id if community.topic_id else None
     form.topic.choices = topics_for_form(0)
-    form.languages.choices = languages_for_form()
+    form.languages.choices = languages_for_form(all=True)
     if form.validate_on_submit():
         community.name = form.url.data
         community.title = form.title.data
