@@ -159,6 +159,7 @@ def register(app):
             admin_role.permissions.append(RolePermission(permission='change instance settings'))
             admin_role.permissions.append(RolePermission(permission='administer all communities'))
             admin_role.permissions.append(RolePermission(permission='administer all users'))
+            admin_role.permissions.append(RolePermission(permission='edit cms pages'))
             db.session.add(admin_role)
 
             # Admin user
