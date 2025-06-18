@@ -265,6 +265,22 @@ def mime_type_using_head(url):
         return ''
 
 
+def protect_code_blocks(html: str):
+    code_snippets = []
+
+    def store(match):
+        code_snippets.append(match.group(0))
+        return f"__CODE_BLOCK_{len(code_snippets)-1}__"
+
+    html = re.sub(r'<pre[\s\S]*?</pre>', store, html)
+    html = re.sub(r'<code[\s\S]*?</code>', store, html)
+    return html, code_snippets
+
+def restore_code_blocks(html: str, code_snippets: list[str]):
+    for i, snippet in enumerate(code_snippets):
+        html = html.replace(f"__CODE_BLOCK_{i}__", snippet)
+    return html
+
 allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre',
                 'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small', 'sub', 'sup',
                 's', 'input', 'tg-spoiler',
@@ -344,6 +360,8 @@ def allowlist_html(html: str, a_target='_blank') -> str:
 
     clean_html = str(soup)
 
+    clean_html, code_snippets = protect_code_blocks(clean_html)
+
     # avoid returning empty anchors
     re_empty_anchor = re.compile(r'<a href="(.*?)" rel="nofollow ugc" target="_blank"><\/a>')
     clean_html = re_empty_anchor.sub(r'<a href="\1" rel="nofollow ugc" target="_blank">\1</a>', clean_html)
@@ -383,6 +401,8 @@ def allowlist_html(html: str, a_target='_blank') -> str:
     # replace ruby markdown like {漢字|かんじ}
     re_ruby = re.compile(r'\{(.+?)\|(.+?)\}')
     clean_html = re_ruby.sub(r'<ruby>\1<rp>(</rp><rt>\2</rt><rp>)</rp></ruby>', clean_html)
+
+    clean_html = restore_code_blocks(clean_html, code_snippets)
 
     return clean_html
 
