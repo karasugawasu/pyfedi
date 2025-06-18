@@ -6,13 +6,13 @@ import flask
 from bs4 import BeautifulSoup
 
 from flask import redirect, url_for, flash, request, make_response, session, Markup, current_app, abort, g, json
-from flask_login import current_user, login_required
+from flask_login import current_user
 from flask_babel import _
 from slugify import slugify
 from sqlalchemy import or_, asc, desc, text
 from sqlalchemy.orm.exc import NoResultFound
 
-from app import db, cache, celery, httpx_client
+from app import db, cache, celery, httpx_client, limiter
 from app.activitypub.signature import RsaKeys, post_request, send_post_request
 from app.activitypub.util import extract_domain_and_actor
 from app.chat.util import send_message
@@ -46,7 +46,7 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     blocked_users, languages_for_form, menu_topics, add_to_modlog, \
     blocked_communities, remove_tracking_from_link, piefed_markdown_to_lemmy_markdown, \
     instance_software, domain_from_email, referrer, flair_for_form, find_flair_id, login_required_if_private_instance, \
-    possible_communities, reported_posts, user_notes
+    possible_communities, reported_posts, user_notes, login_required
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
 from feedgen.feed import FeedGenerator
@@ -968,7 +968,7 @@ def community_edit(community_id: int):
         abort(401)
 
 
-@bp.route('/community/<int:community_id>/remove_icon', methods=['GET', 'POST'])
+@bp.route('/community/<int:community_id>/remove_icon', methods=['POST'])
 @login_required
 def remove_icon(community_id):
     community = Community.query.get_or_404(community_id)
@@ -983,7 +983,7 @@ def remove_icon(community_id):
     return _('Icon removed!')
 
 
-@bp.route('/community/<int:community_id>/remove_header', methods=['GET', 'POST'])
+@bp.route('/community/<int:community_id>/remove_header', methods=['POST'])
 @login_required
 def remove_header(community_id):
     community = Community.query.get_or_404(community_id)
@@ -1079,7 +1079,7 @@ def community_find_moderator(community_id: int):
         abort(401)
 
 
-@bp.route('/community/<int:community_id>/moderators/remove/<int:user_id>', methods=['GET', 'POST'])
+@bp.route('/community/<int:community_id>/moderators/remove/<int:user_id>', methods=['POST'])
 @login_required
 def community_remove_moderator(community_id: int, user_id: int):
     if current_user.banned:
@@ -1361,7 +1361,7 @@ def community_moderate_comments(actor):
                                    disable_voting=True, community=community, current='comments')
 
 
-@bp.route('/community/<int:community_id>/<int:user_id>/kick_user_community', methods=['GET', 'POST'])
+@bp.route('/community/<int:community_id>/<int:user_id>/kick_user_community', methods=['POST'])
 @login_required
 def community_kick_user(community_id: int, user_id: int):
     community = Community.query.get_or_404(community_id)
@@ -1634,7 +1634,7 @@ def community_wiki_revisions(actor, page_id):
         abort(404)
 
 
-@bp.route('/<actor>/moderate/wiki/<int:page_id>/delete', methods=['GET'])
+@bp.route('/<actor>/moderate/wiki/<int:page_id>/delete', methods=['POST'])
 @login_required
 def community_wiki_delete(actor, page_id):
     community = actor_to_community(actor)
@@ -1875,7 +1875,7 @@ def community_flair_edit(community_id, flair_id):
         abort(401)
 
 
-@bp.route('/community/<int:community_id>/flair/<int:flair_id>/delete', methods=['GET'])
+@bp.route('/community/<int:community_id>/flair/<int:flair_id>/delete', methods=['POST'])
 @login_required
 def community_flair_delete(community_id, flair_id):
     community = Community.query.get_or_404(community_id)
@@ -1944,6 +1944,7 @@ def community_leave_all():
 
 
 @bp.route('/<actor>/invite', methods=['GET', 'POST'])
+@limiter.limit("5 per 1 minutes", methods=['POST'])
 @login_required
 def community_invite(actor):
     if current_user.banned:
@@ -1961,6 +1962,7 @@ def community_invite(actor):
             chat_invites = 0
             email_invites = 0
             total_invites = 0
+            sent_to = set()
             for line in form.to.data.split('\n'):
                 line = line.strip()
                 if line != '':
@@ -1970,7 +1972,9 @@ def community_invite(actor):
                         if line.startswith('@') or instance_software(domain_from_email(line)):
                             chat_invites += invite_with_chat(community.id, line, SRC_WEB)
                         else:
-                            email_invites += invite_with_email(community.id, line, SRC_WEB)
+                            if line not in sent_to:
+                                email_invites += invite_with_email(community.id, line, SRC_WEB)
+                                sent_to.add(line)
                         total_invites += 1
 
             flash(_('Invited %(total_invites)d people using %(chat_invites)d chat messages and %(email_invites)d emails.',
