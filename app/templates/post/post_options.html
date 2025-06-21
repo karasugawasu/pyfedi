@@ -33,11 +33,11 @@
         {% endif -%}
     {% endif -%}
     {% if existing_bookmark -%}
-        <li><a href="#" data-url="{{ url_for('post.post_remove_bookmark', post_id=post.id) }}" style="white-space: normal" class="dropdown-item no-underline send_post" rel="nofollow noindex"><span class="fe fe-bookmark"></span>
-                {{ _('Remove bookmark') }}</a></li>
+        <li><a class="dropdown-item no-underline" role="button" style="white-space: normal" aria-label="{{ _('Remove bookmark') }}"
+          hx-post="/post/{{ post.id }}/remove_bookmark" hx-trigger="click throttle:1s" hx-target="this" hx-swap="outerHTML" tabindex="0"><span class="fe fe-bookmark"></span> {{ _('Remove bookmark') }}</a></li>
     {% else -%}
-        <li><a href='#' data-url="{{ url_for('post.post_bookmark', post_id=post.id) }}" style="white-space: normal" class="dropdown-item no-underline send_post" rel="nofollow noindex"><span class="fe fe-bookmark"></span>
-                {{ _('Bookmark') }}</a></li>
+        <li><a class="dropdown-item no-underline" role="button" style="white-space: normal" aria-label="{{ _('Bookmark') }}"
+          hx-post="/post/{{ post.id }}/bookmark" hx-trigger="click throttle:1s" hx-target="this" hx-swap="outerHTML" tabindex="0"><span class="fe fe-bookmark"></span> {{ _('Bookmark') }}</a></li>
     {% endif -%}
     {% if post.user_id == current_user.id and not post.mea_culpa -%}
         <li><a href="{{ url_for('post.post_mea_culpa', post_id=post.id) }}" style="white-space: normal" class="dropdown-item no-underline"><span class="fe fe-mea-culpa"></span>
@@ -48,8 +48,8 @@
             <li><a class="dropdown-item no-underline" style="white-space: normal" aria-label="{{ _('Cross-post') }}" href="{{ url_for('post.post_cross_post', post_id=post.id) }}"><span class="fe fe-cross-post"></span>
             {{ _('Cross-post to another community') }}</a></li>
         {% endif -%}
-        <li><a href="#" data-url="{{ url_for('post.post_block_user', post_id=post.id) }}" style="white-space: normal" class="dropdown-item no-underline send_post"><span class="fe fe-block"></span>
-            {{ _('Block post author @%(author_name)s', author_name=post.author.user_name) }}</a></li>
+        <li><a class="dropdown-item no-underline" role="button" style="white-space: normal" aria-label="{{ _('Block post author @%(author_name)s', author_name=post.author.user_name) }}"
+          hx-post="/post/{{ post.id }}/block_user" hx-trigger="click throttle:1s"tabindex="0"><span class="fe fe-block"></span> {{ _('Block post author @%(author_name)s', author_name=post.author.user_name) }}</a></li>
         <li><a href="#" data-url="{{ url_for('post.post_block_community', post_id=post.id) }}" style="white-space: normal" class="dropdown-item no-underline send_post"><span class="fe fe-block"></span>
             {{ _('Block community %(community_name)s', community_name=post.community.display_name()) }}</a></li>
         {% if post.community.is_moderator() or current_user.get_id() in admin_ids -%}

@@ -88,6 +88,12 @@ def register(app):
     @app.cli.command("init-db")
     def init_db():
         with app.app_context():
+            # Check if alembic_version table exists
+            inspector = db.inspect(db.engine)
+            if 'alembic_version' not in inspector.get_table_names():
+                print("Error: alembic_version table not found. Please run 'flask db upgrade' first.")
+                return
+            
             db.drop_all()
             db.configure_mappers()
             db.create_all()
@@ -138,7 +144,6 @@ def register(app):
             # These roles will create rows in the 'role' table with IDs of 1,2,3,4. There are some constants (ROLE_*) in
             # constants.py that will need to be updated if the role IDs ever change.
             anon_role = Role(name='Anonymous user', weight=0)
-            anon_role.permissions.append(RolePermission(permission='register'))
             db.session.add(anon_role)
 
             auth_role = Role(name='Authenticated user', weight=1)
@@ -163,6 +168,7 @@ def register(app):
             db.session.add(admin_role)
 
             # Admin user
+            print('The admin user created here should be reserved for admin tasks and not used as a primary daily identity (unless this instance will only be for personal use).')
             user_name = input("Admin user name (ideally not 'admin'): ")
             email = input("Admin email address: ")
             password = input("Admin password: ")
@@ -1277,6 +1283,17 @@ def register(app):
             else:
                 warnings.append(
                     "   ⚠️  Admin user not found - run 'flask init-db' if this is a new installation")
+
+            # Check migration system
+            print("\n9. Checking database migration system...")
+            try:
+                inspector = db.inspect(db.engine)
+                if 'alembic_version' in inspector.get_table_names():
+                    print("   ✅ Database migration system is initialized")
+                else:
+                    errors.append("   ❌ alembic_version table not found")
+            except Exception as e:
+                errors.append(f"   ❌ Error checking database migration system: {e}")
 
             # Summary
             print("\n" + "=" * 40)

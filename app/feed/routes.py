@@ -263,9 +263,7 @@ def feed_delete(feed_id: int):
             announce_feed_delete_to_subscribers.delay(user_id, feed.id)
 
     # strip out any feedmembers before deleting
-    feed_members = FeedMember.query.filter_by(feed_id=feed.id)
-    for fm in feed_members.all():
-        db.session.delete(fm)
+    db.session.query(FeedMember).filter(FeedMember.feed_id == feed.id).delete()
 
     # delete the feed
     if feed.num_communities > 0:
@@ -803,7 +801,7 @@ def do_feed_subscribe(actor, user_id):
         feed = Feed.query.filter_by(name=actor, ap_id=None).first()
     
     if feed is not None:
-        if feed_membership(user, feed) != SUBSCRIPTION_MEMBER and feed_membership(user, feed) != SUBSCRIPTION_PENDING:
+        if feed_membership(user, feed) == SUBSCRIPTION_NONMEMBER:
             success = True
 
             # for local feeds, joining is instant
