@@ -23,6 +23,7 @@ from app.user import bp
 from app.user.forms import ProfileForm, SettingsForm, DeleteAccountForm, ReportUserForm, \
     FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm, UserNoteForm, BanUserForm
 from app.user.utils import purge_user_then_delete, unsubscribe_from_community, search_for_user
+from app.ldap_utils import sync_user_to_ldap
 from app.utils import render_template, markdown_to_html, user_access, markdown_to_text, shorten_string, \
     gibberish, file_get_contents, community_membership, user_filters_home, \
     user_filters_posts, user_filters_replies, theme_list, \
@@ -165,7 +166,7 @@ def show_profile(user):
                            user_notes=user_notes(current_user.get_id()),
                            post_next_url=post_next_url, post_prev_url=post_prev_url,
                            replies_next_url=replies_next_url, replies_prev_url=replies_prev_url,
-                           noindex=not user.indexable, show_post_community=True, hide_vote_buttons=True,
+                           noindex=not user.indexable, show_post_community=True, hide_vote_buttons=True, show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff(),
                            reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
                            rss_feed=f"https://{current_app.config['SERVER_NAME']}/u/{user.link()}/feed" if user.post_count > 0 else None,
                            rss_feed_name=f"{user.display_name()} on {g.site.name}" if user.post_count > 0 else None,
@@ -196,8 +197,10 @@ def edit_profile(actor):
             send_verification_email(current_user)
             flash(_('You have changed your email address so we need to verify it. Please check your email inbox for a verification link.'), 'warning')
         current_user.email = form.email.data.strip()
+        password_updated = False
         if form.password_field.data.strip() != '':
             current_user.set_password(form.password_field.data)
+            password_updated = True
         current_user.about = piefed_markdown_to_lemmy_markdown(form.about.data)
         current_user.about_html = markdown_to_html(form.about.data)
         current_user.matrix_user_id = form.matrixuserid.data
@@ -241,6 +244,14 @@ def edit_profile(actor):
                 cache.delete_memoized(User.cover_image, current_user)
 
         db.session.commit()
+
+        # Sync to LDAP if password was provided
+        if password_updated:
+            try:
+                sync_user_to_ldap(current_user.user_name, current_user.email, form.password_field.data.strip())
+            except Exception as e:
+                # Log error but don't fail the profile update
+                current_app.logger.error(f"LDAP sync failed for user {current_user.user_name}: {e}")
 
         flash(_('Your changes have been saved.'), 'success')
 
@@ -603,11 +614,14 @@ def ban_profile(actor):
                         flash(_('%(actor)s has been banned, deleted and all their content deleted. This might take a few minutes.',
                               actor=actor))
                     else:
-                        user.deleted = True
-                        user.deleted_by = current_user.id
                         user.delete_dependencies()
                         user.purge_content()
-                        db.session.commit()
+                        from app import redis_client
+                        with redis_client.lock(f"lock:user:{user.id}", timeout=10, blocking_timeout=2):
+                            user = User.query.get(user.id)
+                            user.deleted = True
+                            user.deleted_by = current_user.id
+                            db.session.commit()
                         flash(_('%(actor)s has been banned, deleted and all their content deleted.', actor=actor))
 
                     add_to_modlog('delete_user', reason=form.reason.data, link_text=user.display_name(), link=user.link())
@@ -640,7 +654,7 @@ def ban_profile(actor):
                 form.ip_address.render_kw = {'disabled': True}
                 form.ip_address.data = False
 
-            return render_template('generic_form.html', form=form, title=_('Ban %(name)s', name=actor))
+            return render_template('user/user_ban.html', form=form, title=_('Ban %(name)s', name=actor))
     else:
         abort(401)
 
@@ -674,12 +688,16 @@ def unban_profile(actor):
     return redirect(goto)
 
 
-@bp.route('/u/<actor>/block', methods=['GET'])
+@bp.route('/u/<actor>/block', methods=['POST'])
 @login_required
 def block_profile(actor):
     actor = actor.strip()
-    user = User.query.filter_by(user_name=actor, deleted=False).first()
-    if user is None:
+    if "@" not in actor or actor.endswith("@" + current_app.config['SERVER_NAME']):
+        # Local user
+        user = User.query.filter_by(user_name=actor, deleted=False).filter(
+            or_(User.ap_id == None, User.ap_domain == current_app.config['SERVER_NAME'])).first()
+    else:
+        # Remote user
         user = User.query.filter_by(ap_id=actor, deleted=False).first()
         if user is None:
             abort(404)
@@ -701,6 +719,17 @@ def block_profile(actor):
 
         flash(_('%(actor)s has been blocked.', actor=actor))
         cache.delete_memoized(blocked_users, current_user.id)
+    
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-URL')
+
+        if "/user/" in curr_url:
+            resp.headers['HX-Redirect'] = curr_url
+        else:
+            resp.headers['HX-Redirect'] = url_for("main.index")
+        
+        return resp
 
     goto = request.args.get('redirect') if 'redirect' in request.args else f'/u/{actor}'
     return redirect(goto)
@@ -723,8 +752,12 @@ def user_block_instance(actor):
 @login_required
 def unblock_profile(actor):
     actor = actor.strip()
-    user = User.query.filter_by(user_name=actor, deleted=False).first()
-    if user is None:
+    if "@" not in actor or actor.endswith("@" + current_app.config['SERVER_NAME']):
+        # Local user
+        user = User.query.filter_by(user_name=actor, deleted=False).filter(
+            or_(User.ap_id == None, User.ap_domain == current_app.config['SERVER_NAME'])).first()
+    else:
+        # Remote user
         user = User.query.filter_by(ap_id=actor, deleted=False).first()
         if user is None:
             abort(404)
@@ -743,6 +776,13 @@ def unblock_profile(actor):
 
         flash(_('%(actor)s has been unblocked.', actor=actor))
         cache.delete_memoized(blocked_users, current_user.id)
+    
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-URL')
+        resp.headers['HX-Redirect'] = curr_url
+        
+        return resp
 
     goto = request.args.get('redirect') if 'redirect' in request.args else f'/u/{actor}'
     return redirect(goto)
@@ -812,6 +852,9 @@ def delete_profile(actor):
         if user.id == current_user.id:
             flash(_('You cannot delete yourself.'), 'error')
         else:
+            if user.id == 1:
+                flash('This user cannot be deleted.')
+                return redirect(request.args.get('redirect') if 'redirect' in request.args else f'/u/{actor}')
             user.banned = True
             user.deleted = True
             user.deleted_by = current_user.id
@@ -877,7 +920,9 @@ def delete_account():
         flash(_('Account deletion in progress. Give it a few minutes.'), 'success')
         return redirect(url_for('main.index'))
     elif request.method == 'GET':
-        ...
+        if current_user.id == 1:
+            flash('This user cannot be deleted.')
+            return redirect(url_for('main.index'))
 
     return render_template('user/delete_account.html', title=_('Delete my account'), form=form, user=current_user)
 

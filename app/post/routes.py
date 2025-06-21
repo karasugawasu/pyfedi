@@ -100,9 +100,8 @@ def show_post(post_id: int):
         form = NewReplyForm()
         form.language_id.choices = languages_for_form() if current_user.is_authenticated else []
 
-        if current_user.is_authenticated and (current_user.id == post.user_id or current_user.is_admin() or current_user.is_staff()):
-            if post.status == POST_STATUS_SCHEDULED:
-                flash(_('This post is scheduled to be published at %(when)s', when=str(post.scheduled_for)))    # todo: convert into current_user.timezone
+        if post.status == POST_STATUS_SCHEDULED:
+            flash(_('This post is scheduled to be published at %(when)s UTC', when=str(post.scheduled_for)))    # todo: convert into current_user.timezone
 
         if current_user.is_authenticated:
             if not post.community.is_moderator() and not post.community.is_owner() and not current_user.is_staff() and not current_user.is_admin():
@@ -233,7 +232,7 @@ def show_post(post_id: int):
                                poll_form=poll_form, poll_results=poll_results, poll_data=poll_data, poll_choices=poll_choices, poll_total_votes=poll_total_votes,
                                canonical=post.ap_id, form=form, replies=replies, more_replies=more_replies, user_flair=user_flair,
                                THREAD_CUTOFF_DEPTH=constants.THREAD_CUTOFF_DEPTH,
-                               description=description, og_image=og_image,
+                               description=description, og_image=og_image, show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff(),
                                autoplay=request.args.get('autoplay', False), archive_link=archive_link,
                                noindex=not post.author.indexable, preconnect=post.url if post.url else None,
                                recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
@@ -911,7 +910,7 @@ def post_bookmark(post_id: int):
     except NoResultFound:
         abort(404)
 
-    return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id)))
+    return render_template('post/_add_remove_bookmark.html', post_id=post_id, action_type="add", item_type="post")
 
 
 @bp.route('/post/<int:post_id>/remove_bookmark', methods=['POST'])
@@ -922,7 +921,19 @@ def post_remove_bookmark(post_id: int):
     except NoResultFound:
         abort(404)
 
-    return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id)))
+    return render_template('post/_add_remove_bookmark.html', post_id=post_id, action_type="remove", item_type="post")
+
+
+@bp.route('/post/<int:post_id>/comment/<int:comment_id>/bookmark', methods=['POST'])
+@login_required
+def post_reply_bookmark(post_id: int, comment_id: int):
+    try:
+        bookmark_reply(comment_id, SRC_WEB)
+    except NoResultFound:
+        abort(404)
+
+    return render_template('post/_add_remove_bookmark.html', post_id=post_id, reply_id=comment_id,
+                           action_type="add", item_type="reply")
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/remove_bookmark', methods=['POST'])
@@ -933,7 +944,8 @@ def post_reply_remove_bookmark(post_id: int, comment_id: int):
     except NoResultFound:
         abort(404)
 
-    return redirect(url_for('activitypub.post_ap', post_id=post_id))
+    return render_template('post/_add_remove_bookmark.html', post_id=post_id, reply_id=comment_id,
+                           action_type="remove", item_type="reply")
 
 
 @bp.route('/post/<int:post_id>/report', methods=['GET', 'POST'])
@@ -1020,7 +1032,21 @@ def post_block_user(post_id: int):
     flash(_('%(name)s has been blocked.', name=post.author.user_name))
     cache.delete_memoized(blocked_users, current_user.id)
 
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-URL')
+
+        if "/post/" in curr_url:
+            resp.headers['HX-Redirect'] = post.community.local_url()
+        elif "/u/" in curr_url:
+            resp.headers['HX-Redirect'] = url_for("main.index")
+        else:
+            resp.headers['HX-Redirect'] = curr_url
+        
+        return resp
+
     # todo: federate block to post author instance
+    # task_selector()...
 
     return redirect(post.community.local_url())
 
@@ -1199,17 +1225,6 @@ def post_reply_report(post_id: int, comment_id: int):
     return render_template('post/post_reply_report.html', title=_('Report comment'), form=form, post=post, post_reply=post_reply)
 
 
-@bp.route('/post/<int:post_id>/comment/<int:comment_id>/bookmark', methods=['POST'])
-@login_required
-def post_reply_bookmark(post_id: int, comment_id: int):
-    try:
-        bookmark_reply(comment_id, SRC_WEB)
-    except NoResultFound:
-        abort(404)
-
-    return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{comment_id}'))
-
-
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/block_user', methods=['POST'])
 @login_required
 def post_reply_block_user(post_id: int, comment_id: int):
@@ -1221,6 +1236,22 @@ def post_reply_block_user(post_id: int, comment_id: int):
         db.session.commit()
     flash(_('%(name)s has been blocked.', name=post_reply.author.user_name))
     cache.delete_memoized(blocked_users, current_user.id)
+
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-URL')
+        
+        if "/post/" in curr_url:
+            if post_reply.author.id != post.author.id:
+                resp.headers['HX-Redirect'] = url_for('activitypub.post_ap', post_id=post.id)
+            else:
+                resp.headers['HX-Redirect'] = post.community.local_url()
+        elif "/u/" in curr_url:
+            resp.headers['HX-Redirect'] = url_for("main.index")
+        else:
+            resp.headers['HX-Redirect'] = curr_url
+        
+        return resp
 
     # todo: federate block to post_reply author instance
 
