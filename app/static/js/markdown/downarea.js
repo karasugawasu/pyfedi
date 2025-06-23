@@ -551,7 +551,7 @@ var DownArea = (function () {
                 end = self.textarea.value.substr(self.textarea.selectionEnd);
                 var range = self.textarea.value.slice(self.textarea.selectionStart, self.textarea.selectionEnd);
                 var rangeIsURL = range.match(/https?:\/\/(.+)/);
-                link = rangeIsURL ? "[](".concat(range.trim(), ")") : "[".concat(range.trim(), "](https://)");
+                link = rangeIsURL ? "[](".concat(range.trim(), ")") : "[".concat(range.trim(), "]()");
                 offset = rangeIsURL ? range.trim().length + 3 : 1;
             }
         }
@@ -609,7 +609,7 @@ var DownArea = (function () {
             end = self.textarea.value.substr(self.textarea.selectionEnd);
             var range = self.textarea.value.slice(self.textarea.selectionStart, self.textarea.selectionEnd);
             var rangeIsURL = range.match(/https?:\/\/(.+)/);
-            link = rangeIsURL ? "![](".concat(range.trim(), ")") : "![".concat(range.trim(), "](https://)");
+            link = rangeIsURL ? "![](".concat(range.trim(), ")") : "![".concat(range.trim(), "]()");
             offset = rangeIsURL ? range.trim().length + 3 : 1;
         }
         if (start.length && start[start.length - 1] != '\n' && start[start.length - 1] != ' ') {
