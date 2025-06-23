@@ -2756,12 +2756,8 @@ span.score {
   min-width: 190px;
 }
 
-.communities_menu {
-  width: 60vw;
-}
-
 .communities_menu_body .dropdown-item {
-  min-width: 10vw;
+  min-width: 15vw;
 }
 
 .nav-tabs {
