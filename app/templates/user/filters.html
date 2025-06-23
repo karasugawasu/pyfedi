@@ -107,7 +107,7 @@
                 {% for community in blocked_communities %}
                     <tr>
                         <td><a href="{{ url_for('activitypub.community_profile', actor=community.ap_id if community.ap_id is not none else community.name) }}">{{ community.title }}</a></td>
-                        <td><a class="no-underline confirm_first send_post" href="#" data-url="{{ url_for('user.user_community_unblock', community_id=community.id) }}" rel="nofollow"><span class="fe fe-delete"></span> {{ _('Unblock') }}</a></td>
+                        <td><a class="no-underline confirm_first" role="button" aria-label="{{ _('Unblock %(community_title)s', community_title=community.title) }}" hx-post="/user/community/{{ community.id }}/unblock" hx-trigger="click throttle:1s"><span class="fe fe-delete"></span> {{ _('Unblock %(community_title)s', community_title=community.title) }}</a></td>
                     </tr>
                 {% endfor %}
                 </table>
@@ -125,7 +125,7 @@
                 {% for domain in blocked_domains %}
                     <tr>
                         <td><a href="{{ url_for('domain.show_domain', domain_id=domain.id) }}">{{ domain.name }}</a></td>
-                        <td><a class="no-underline confirm_first" href="{{ url_for('domain.domain_unblock', domain_id=domain.id) }}" rel="nofollow"><span class="fe fe-delete"></span> {{ _('Unblock') }}</a></td>
+                        <td><a class="no-underline confirm_first" role="button" aria-label="{{ _('Unblock') }}" hx-post="/d/{{ domain.id }}/unblock" hx-trigger="click throttle:1s"tabindex="0"><span class="fe fe-delete"></span> {{ _('Unblock') }}</a></td>
                     </tr>
                 {% endfor %}
                 </table>

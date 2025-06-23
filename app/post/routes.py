@@ -25,7 +25,7 @@ from app.post.util import post_replies, get_comment_branch, tags_to_string, url_
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, POST_TYPE_LINK, \
     POST_TYPE_IMAGE, \
     POST_TYPE_ARTICLE, POST_TYPE_VIDEO, NOTIF_REPLY, NOTIF_POST, POST_TYPE_POLL, SRC_WEB, SRC_API
-from app.models import Post, PostReply, \
+from app.models import Post, PostReply, PostReplyValidationError, \
     PostReplyVote, PostVote, Notification, utcnow, UserBlock, DomainBlock, Report, Site, Community, \
     Topic, User, Instance, UserFollower, Poll, PollChoice, PollChoiceVote, PostBookmark, \
     PostReplyBookmark, CommunityBlock, File, CommunityFlair, UserFlair, BlockedImage, CommunityBan
@@ -299,8 +299,6 @@ def post_embed_code(post_id):
     breadcrumbs.append(breadcrumb)
 
     if community.topic_id:
-        related_communities = Community.query.filter_by(topic_id=community.topic_id). \
-            filter(Community.id != community.id, Community.banned == False).order_by(Community.name)
         topics = []
         previous_topic = Topic.query.get(community.topic_id)
         topics.append(previous_topic)
@@ -328,7 +326,6 @@ def post_embed_code(post_id):
         breadcrumb.url = f'/post/{post.id}'
         breadcrumbs.append(breadcrumb)
     else:
-        related_communities = []
 
         breadcrumb = namedtuple("Breadcrumb", ['text', 'url'])
         breadcrumb.text = _('Communities')
@@ -519,11 +516,12 @@ def add_reply(post_id: int, comment_id: int):
                                )
 
 
-@bp.route('/post/<int:post_id>/comment/<int:comment_id>/reply_inline', methods=['GET', 'POST'])
+@bp.route('/post/<int:post_id>/comment/<int:comment_id>/reply_inline/<nonce>', methods=['GET', 'POST'])
 @login_required
-def add_reply_inline(post_id: int, comment_id: int):
+def add_reply_inline(post_id: int, comment_id: int, nonce):
     # this route is called by htmx and returns a html fragment representing a form that can be submitted to make a new reply
-    # it also accepts the POST from that form and makes the reply
+    # it also accepts the POST from that form and makes the reply. All the JS in the response needs a nonce from the parent page
+    # to keep CSP happy and that nonce needs to be used by any replies to this reply so it's nonces all the way down.
     if current_user.banned or current_user.ban_comments:
         return _('You have been banned.')
     post = Post.query.get_or_404(post_id)
@@ -539,16 +537,20 @@ def add_reply_inline(post_id: int, comment_id: int):
         return _('You cannot reply to %(name)s', name=in_reply_to.author.display_name())
 
     if request.method == 'GET':
-        return render_template('post/add_reply_inline.html', post_id=post_id, comment_id=comment_id, languages=languages_for_form())
+        return render_template('post/add_reply_inline.html', post_id=post_id, comment_id=comment_id, nonce=nonce,
+                               languages=languages_for_form(), markdown_editor=current_user.markdown_editor)
     else:
         content = request.form.get('body', '').strip()
         language_id = int(request.form.get('language_id'))
 
         if content == '':
             return f'<div id="reply_to_{comment_id}" class="hidable"></div>' # do nothing, just hide the form
-        reply = PostReply.new(current_user, post, in_reply_to=in_reply_to, body=piefed_markdown_to_lemmy_markdown(content),
-                              body_html=markdown_to_html(content), notify_author=True,
-                              language_id=language_id, distinguished=False)
+        try:
+            reply = PostReply.new(current_user, post, in_reply_to=in_reply_to, body=piefed_markdown_to_lemmy_markdown(content),
+                                  body_html=markdown_to_html(content), notify_author=True,
+                                  language_id=language_id, distinguished=False)
+        except PostReplyValidationError as e:
+            return '<div id="reply_to_{comment_id}" class="hidable"><span class="red">' + str(e) + '</span></div>'
 
         current_user.language_id = language_id
         reply.ap_id = reply.profile_id()
@@ -563,7 +565,7 @@ def add_reply_inline(post_id: int, comment_id: int):
                                                   UserFlair.user_id == current_user.id):
                 user_flair[u_flair.user_id] = u_flair.flair
 
-        return render_template('post/add_reply_inline_result.html', post_reply=reply, user_flair=user_flair)
+        return render_template('post/add_reply_inline_result.html', post_reply=reply, user_flair=user_flair, nonce=nonce)
 
 
 @bp.route('/post/<int:post_id>/options_menu', methods=['GET'])
@@ -1034,7 +1036,7 @@ def post_block_user(post_id: int):
 
     if request.headers.get('HX-Request'):
         resp = make_response()
-        curr_url = request.headers.get('HX-Current-URL')
+        curr_url = request.headers.get('HX-Current-Url')
 
         if "/post/" in curr_url:
             resp.headers['HX-Redirect'] = post.community.local_url()
@@ -1061,6 +1063,18 @@ def post_block_domain(post_id: int):
         db.session.commit()
         cache.delete_memoized(blocked_domains, current_user.id)
     flash(_('Posts linking to %(name)s will be hidden.', name=post.domain.name))
+    
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-Url')
+        
+        if "/post/" in curr_url:
+            resp.headers['HX-Redirect'] = url_for("main.index")
+        else:
+            resp.headers['HX-Redirect'] = curr_url
+        
+        return resp
+    
     return redirect(post.community.local_url())
 
 
@@ -1074,6 +1088,19 @@ def post_block_community(post_id: int):
         db.session.commit()
         cache.delete_memoized(blocked_communities, current_user.id)
     flash(_('Posts in %(name)s will be hidden.', name=post.community.display_name()))
+    
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-Url')
+        redir_home = ["/c/", "/post/"]
+        
+        if any(found_str in curr_url for found_str in redir_home):
+            resp.headers['HX-Redirect'] = url_for("main.index")
+        else:
+            resp.headers['HX-Redirect'] = curr_url
+        
+        return resp
+    
     return redirect(post.community.local_url())
 
 
@@ -1239,7 +1266,7 @@ def post_reply_block_user(post_id: int, comment_id: int):
 
     if request.headers.get('HX-Request'):
         resp = make_response()
-        curr_url = request.headers.get('HX-Current-URL')
+        curr_url = request.headers.get('HX-Current-Url')
         
         if "/post/" in curr_url:
             if post_reply.author.id != post.author.id:

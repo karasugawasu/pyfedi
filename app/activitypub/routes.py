@@ -741,7 +741,7 @@ def process_inbox_request(request_json, store_ap_json):
             if actor and isinstance(actor, User):
                 user = actor
                 # Update user's last_seen in a separate transaction to avoid deadlocks
-                with redis_client.lock(f"lock:user:{user.id}", timeout=10, blocking_timeout=2):
+                with redis_client.lock(f"lock:user:{user.id}", timeout=10, blocking_timeout=6):
                     db.session.execute(text('UPDATE "user" SET last_seen=:last_seen WHERE id = :user_id'),
                                      {"last_seen": utcnow(), "user_id": user.id})
                     db.session.commit()
@@ -786,7 +786,7 @@ def process_inbox_request(request_json, store_ap_json):
                         log_incoming_ap(id, APLOG_ANNOUNCE, APLOG_FAILURE, saved_json, f'{user_ap_id} is banned')
                         return
 
-                    with redis_client.lock(f"lock:user:{user.id}", timeout=10, blocking_timeout=2):
+                    with redis_client.lock(f"lock:user:{user.id}", timeout=10, blocking_timeout=6):
                         user.last_seen = utcnow()
                         user.instance.last_seen = utcnow()
                         user.instance.dormant = False
@@ -906,7 +906,7 @@ def process_inbox_request(request_json, store_ap_json):
                 join_request_parts = core_activity['object'].split('/')
                 try:
                     join_request = CommunityJoinRequest.query.filter_by(uuid=join_request_parts[-1]).first()
-                except Exception as e:  # old style join requests were just a number
+                except Exception:  # old style join requests were just a number
                     db.session.rollback()
                     join_request = CommunityJoinRequest.query.get(join_request_parts[-1])
                 if join_request:
@@ -1936,11 +1936,15 @@ def process_chat(user, store_ap_json, core_activity):
 
 # ---- Feeds ----
 
-@bp.route('/f/<actor>', methods=['GET'])
-def feed_profile(actor):
+@bp.route('/f/<actor>')
+@bp.route('/f/<actor>/<feed_owner>', methods=['GET'])
+def feed_profile(actor, feed_owner=None):
     """ Requests to this endpoint can be for a JSON representation of the feed, or an HTML rendering of it.
         The two types of requests are differentiated by the header """
     actor = actor.strip()
+    if feed_owner is not None:
+        feed_owner = feed_owner.strip()
+        actor = actor + '/' + feed_owner
     if '@' in actor:
         # don't provide activitypub info for remote communities
         if 'application/ld+json' in request.headers.get('Accept', '') or 'application/activity+json' in request.headers.get('Accept', ''):
