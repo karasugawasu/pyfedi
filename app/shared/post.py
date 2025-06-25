@@ -339,6 +339,8 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
         uploaded_file.seek(0)
         uploaded_file.save(final_place)
 
+        final_ext = file_ext # track file extension for conversion
+
         if file_ext.lower() == '.heic':
             register_heif_opener()
         if file_ext.lower() == '.avif':
@@ -346,14 +348,30 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
 
         Image.MAX_IMAGE_PIXELS = 89478485
 
-        # limit full sized version to 2000px
+        # Use environment variables to determine image max dimension, format, and quality
+        image_max_dimension = current_app.config['MEDIA_IMAGE_MAX_DIMENSION']
+        image_format = current_app.config['MEDIA_IMAGE_FORMAT']
+        image_quality = current_app.config['MEDIA_IMAGE_QUALITY']
+
+        if image_format == 'AVIF':
+            import pillow_avif
+
         if not final_place.endswith('.svg') and not final_place.endswith('.gif'):
             img = Image.open(final_place)
             if '.' + img.format.lower() in allowed_extensions:
                 img = ImageOps.exif_transpose(img)
+                img = img.convert('RGB' if (image_format == 'JPEG' or final_ext in ['.jpg', '.jpeg']) else 'RGBA')
+                img.thumbnail((image_max_dimension, image_max_dimension), resample=Image.LANCZOS)
 
-                img.thumbnail((2000, sys.maxsize))
-                img.save(final_place)
+                kwargs = {}
+                if image_format:
+                    kwargs['format'] = image_format.upper()
+                    final_ext = '.' + image_format.lower()
+                    final_place = os.path.splitext(final_place)[0] + final_ext
+                if image_quality:
+                    kwargs['quality'] = int(image_quality)
+
+                img.save(final_place, optimize=True, **kwargs)
             else:
                 raise Exception('filetype not allowed')
         
@@ -362,6 +380,7 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
             gif_image.save(final_place[:-4] + ".webp", format="WEBP", save_all=True, loop=0)
             os.remove(final_place)
             final_place = final_place[:-4] + ".webp"
+            final_ext = '.webp'
 
         url = f"{current_app.config['HTTP_PROTOCOL']}://{current_app.config['SERVER_NAME']}/{final_place.replace('app/', '')}"
 
@@ -381,10 +400,10 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
                 aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
             )
             s3.upload_file(final_place, current_app.config['S3_BUCKET'], 'posts/' +
-                           new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + file_ext,
-                           ExtraArgs={'ContentType': guess_mime_type(final_place)})
+                        new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + final_ext,
+                        ExtraArgs={'ContentType': guess_mime_type(final_place)})
             url = f"https://{current_app.config['S3_PUBLIC_URL']}/posts/" + \
-                  new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + file_ext
+                new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + final_ext
             s3.close()
             os.unlink(final_place)
 
@@ -397,7 +416,13 @@ def edit_post(input, post, type, src, user=None, auth=None, uploaded_file=None, 
             post.domain = domain
             domain.post_count += 1
             already_notified = set()  # often admins and mods are the same people - avoid notifying them twice
-            targets_data = {'post_id': post.id}
+            targets_data = {'gen':'0',
+                            'post_id': post.id,
+                            'orig_post_title':post.title,
+                            'orig_post_body':post.body,
+                            'orig_post_domain':post.domain,
+                            'author_user_name':user.ap_id if user.ap_id else user.user_name
+                            }
             if domain.notify_mods:
                 for community_member in post.community.moderators():
                     if community_member.is_local():
@@ -585,7 +610,17 @@ def report_post(post_id, input, src, auth=None):
 
     # Notify moderators
     already_notified = set()
-    targets_data = {'suspect_post_id':post.id,'suspect_user_id':post.user_id,'reporter_id':user_id}
+    suspect_user = User.query.get(post.user_id)
+    reporter_user = User.query.get(user_id)
+    targets_data = {'gen':'0',
+                    'suspect_post_id':post.id,
+                    'suspect_user_id':post.user_id,
+                    'suspect_user_user_name':suspect_user.ap_id if suspect_user.ap_id else suspect_user.user_name,
+                    'reporter_id':user_id,
+                    'reporter_user_name':reporter_user.ap_id if reporter_user.ap_id else reporter_user.user_name,
+                    'orig_post_title':post.title,
+                    'orig_post_body':post.body
+                    }
     for mod in post.community.moderators():
         moderator = User.query.get(mod.user_id)
         if moderator and moderator.is_local():

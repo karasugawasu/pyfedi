@@ -530,7 +530,6 @@ def user_settings():
         current_user.font = form.font.data
         current_user.additional_css = form.additional_css.data
         session['ui_language'] = form.interface_language.data
-        session['compact_level'] = form.compaction.data
         current_user.vote_privately = form.vote_privately.data
         if form.vote_privately.data:
             if current_user.alt_user_name is None or current_user.alt_user_name == '':
@@ -543,7 +542,11 @@ def user_settings():
         db.session.commit()
 
         flash(_('Your changes have been saved.'), 'success')
-        return redirect(url_for('user.user_settings'))
+
+        resp = make_response(redirect(url_for('user.user_settings')))
+        resp.set_cookie('compact_level', form.compaction.data, expires=datetime(year=2099, month=12, day=30))
+        return resp
+
     elif request.method == 'GET':
         form.newsletter.data = current_user.newsletter
         form.email_unread.data = current_user.email_unread
@@ -559,7 +562,7 @@ def user_settings():
         form.feed_auto_follow.data = current_user.feed_auto_follow
         form.feed_auto_leave.data = current_user.feed_auto_leave
         form.read_languages.data = current_user.read_language_ids
-        form.compaction.data = session.get('compact_level', '')
+        form.compaction.data = request.cookies.get('compact_level', '')
         form.accept_private_messages.data = current_user.accept_private_messages
         form.font.data = current_user.font
         form.additional_css.data = current_user.additional_css
@@ -700,7 +703,7 @@ def ban_profile(actor):
                 form.ip_address.render_kw = {'disabled': True}
                 form.ip_address.data = False
 
-            return render_template('user/user_ban.html', form=form, title=_('Ban %(name)s', name=actor))
+            return render_template('user/user_ban.html', form=form, title=_('Ban %(name)s', name=actor), user=user)
     else:
         abort(401)
 
@@ -790,6 +793,20 @@ def user_block_instance(actor):
         abort(404)
     block_remote_instance(user.instance_id, SRC_WEB)
     flash(_('Content from %(name)s will be hidden.', name=user.ap_domain))
+
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-Url')
+
+        if user.ap_domain in curr_url:
+            resp.headers["HX-Redirect"] = url_for("main.index")
+        elif "/u/" in curr_url:
+            resp.headers["HX-Redirect"] = url_for("main.index")
+        else:
+            resp.headers["HX-Redirect"] = curr_url
+        
+        return resp
+
     goto = request.args.get('redirect') if 'redirect' in request.args else f'/u/{actor}'
     return redirect(goto)
 
@@ -860,7 +877,12 @@ def report_profile(actor):
 
             # Notify site admin
             already_notified = set()
-            targets_data = {'suspect_user_id': user.id,'reporter_id':current_user.id}
+            targets_data = {'gen':'0',
+                            'suspect_user_id': user.id,
+                            'suspect_user_user_name': user.ap_id if user.ap_id else user.user_name,
+                            'reporter_id':current_user.id,
+                            'reporter_user_name':current_user.user_name
+                            }
             for admin in Site.admins():
                 if admin.id not in already_notified:
                     notify = Notification(title='Reported user', url='/admin/reports', user_id=admin.id, 
@@ -1070,8 +1092,8 @@ def notifications():
     current_user.unread_notifications = Notification.query.filter_by(user_id=current_user.id, read=False).count()
     db.session.commit()
 
-    type = request.args.get('type', '')
-    current_filter = type
+    type_ = request.args.get('type', '')
+    current_filter = type_
     has_notifications = False
 
     notification_types = defaultdict(int)
@@ -1087,9 +1109,9 @@ def notifications():
                 notification_types[notif_id_to_string(notification.notif_type)] += 1
             notification_links[notif_id_to_string(notification.notif_type)].add(notification.notif_type)
 
-    if type:
-        type = tuple(int(x.strip()) for x in type.strip('{}').split(','))   # convert '{41, 10}' to a tuple containing 41 and 10
-        notification_list = Notification.query.filter_by(user_id=current_user.id).filter(Notification.notif_type.in_(type)).order_by(desc(Notification.created_at)).all()
+    if type_:
+        type_ = tuple(int(x.strip()) for x in type_.strip('{}').split(','))   # convert '{41, 10}' to a tuple containing 41 and 10
+        notification_list = Notification.query.filter_by(user_id=current_user.id).filter(Notification.notif_type.in_(type_)).order_by(desc(Notification.created_at)).all()
 
     return render_template('user/notifications.html', title=_('Notifications'), notifications=notification_list,
                            notification_types=notification_types, has_notifications=has_notifications,
@@ -1477,6 +1499,16 @@ def user_alerts(type='posts', filter='all'):
                            low_bandwidth=low_bandwidth, user=current_user, type=type, filter=filter,
                            next_url=next_url, prev_url=prev_url)
 
+@bp.route('/scheduled_posts')
+@login_required
+def user_scheduled_posts(type='posts', filter='all'):
+    low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
+    entities = Post.query.filter(Post.deleted == False, Post.status == POST_STATUS_SCHEDULED, Post.user_id == current_user.id)
+    title = _('Scheduled posts')
+
+    return render_template('user/scheduled_posts.html', title=title, entities=entities,
+                           low_bandwidth=low_bandwidth, user=current_user, site=g.site,
+                           )
 
 @bp.route('/u/<actor>/fediverse_redirect', methods=['GET', 'POST'])
 def fediverse_redirect(actor):

@@ -18,6 +18,7 @@ from sqlalchemy import or_, desc, text
 from app import db, cache
 import click
 import os
+import redis
 
 from app.activitypub.signature import RsaKeys, send_post_request
 from app.activitypub.util import find_actor_or_create, extract_domain_and_actor, notify_about_post
@@ -27,7 +28,7 @@ from app.constants import NOTIF_COMMUNITY, NOTIF_POST, NOTIF_REPLY, POST_STATUS_
 from app.email import send_email
 from app.models import Settings, BannedInstances, Role, User, RolePermission, Domain, ActivityPubLog, \
     utcnow, Site, Instance, File, Notification, Post, CommunityMember, NotificationSubscription, PostReply, Language, \
-    Tag, InstanceRole, Community, DefederationSubscription, SendQueue, CommunityBan, _store_files_in_s3
+    Tag, InstanceRole, Community, DefederationSubscription, SendQueue, CommunityBan, _store_files_in_s3, PostVote
 from app.post.routes import post_delete_post
 from app.shared.post import edit_post
 from app.shared.tasks import task_selector
@@ -494,50 +495,40 @@ def register(app):
     @app.cli.command('send-queue')
     def send_queue():
         with app.app_context():
-            # Semaphore to avoid parallel runs of this task
-            if get_setting('send-queue-running', False):
+            from app import redis_client
+            try:    # avoid parallel runs of this task using Redis lock
+                with redis_client.lock("lock:send-queue", timeout=300, blocking_timeout=1):
+                    # Check size of redis memory. Abort if > 200 MB used
+                    try:
+                        if redis_client and redis_client.memory_stats()['total.allocated'] > 200000000:
+                            print('Redis memory is quite full - stopping send queue to avoid making it worse.')
+                            return
+                    except: # retrieving memory stats fails on recent versions of redis. Once the redis package is fixed this problem should go away.
+                        ...
+
+                    to_be_deleted = []
+                    # Send all waiting Activities that are due to be sent
+                    for to_send in SendQueue.query.filter(SendQueue.send_after < utcnow()):
+                        if instance_online(to_send.destination_domain):
+                            if to_send.retries <= to_send.max_retries:
+                                send_post_request(to_send.destination, json.loads(to_send.payload), to_send.private_key, to_send.actor,
+                                                  retries=to_send.retries + 1)
+                            to_be_deleted.append(to_send.id)
+                        elif instance_gone_forever(to_send.destination_domain):
+                            to_be_deleted.append(to_send.id)
+                    # Remove them once sent - send_post_request will have re-queued them if they failed
+                    if len(to_be_deleted):
+                        db.session.execute(text('DELETE FROM "send_queue" WHERE id IN :to_be_deleted'), {'to_be_deleted': tuple(to_be_deleted)})
+                        db.session.commit()
+
+                    publish_scheduled_posts()
+
+            except redis.exceptions.LockError:
                 print('Send queue is still running - stopping this process to avoid duplication.')
                 return
-            set_setting('send-queue-running', True)
-
-            # Check size of redis memory. Abort if > 200 MB used
-            try:
-                redis = get_redis_connection()
-                try:
-                    if redis and redis.memory_stats()['total.allocated'] > 200000000:
-                        print('Redis memory is quite full - stopping send queue to avoid making it worse.')
-                        set_setting('send-queue-running', False)
-                        return
-                except: # retrieving memory stats fails on recent versions of redis. Once the redis package is fixed this problem should go away.
-                    ...
-            except:
-                print('Could not connect to redis')
-                set_setting('send-queue-running', False)
-                return
-
-            to_be_deleted = []
-            try:
-                # Send all waiting Activities that are due to be sent
-                for to_send in SendQueue.query.filter(SendQueue.send_after < utcnow()):
-                    if instance_online(to_send.destination_domain):
-                        if to_send.retries <= to_send.max_retries:
-                            send_post_request(to_send.destination, json.loads(to_send.payload), to_send.private_key, to_send.actor,
-                                              retries=to_send.retries + 1)
-                        to_be_deleted.append(to_send.id)
-                    elif instance_gone_forever(to_send.destination_domain):
-                        to_be_deleted.append(to_send.id)
-                # Remove them once sent - send_post_request will have re-queued them if they failed
-                if len(to_be_deleted):
-                    db.session.execute(text('DELETE FROM "send_queue" WHERE id IN :to_be_deleted'), {'to_be_deleted': tuple(to_be_deleted)})
-                    db.session.commit()
-
-                publish_scheduled_posts()
-
             except Exception as e:
-                set_setting('send-queue-running', False)
+                print('Could not connect to redis or other error occurred')
                 raise e
-            finally:
-                set_setting('send-queue-running', False)
 
     @app.cli.command('publish-scheduled-posts')
     def publish_scheduled_posts_command():
@@ -549,25 +540,49 @@ def register(app):
         with app.app_context():
             for post in Post.query.filter(Post.status == POST_STATUS_SCHEDULED, Post.scheduled_for < utcnow(),
                                           Post.deleted == False):
-                post.status = POST_STATUS_PUBLISHED
                 if post.repeat and post.repeat != 'none':
                     next_occurrence = post.scheduled_for + find_next_occurrence(post)
                 else:
                     next_occurrence = None
-                post.scheduled_for = None
-                post.posted_at = utcnow()
-                post.edited_at = None
-                db.session.commit()
+                # One shot scheduled post
+                if not next_occurrence:
+                    post.status = POST_STATUS_PUBLISHED
+                    post.scheduled_for = None
+                    post.posted_at = utcnow()
+                    post.edited_at = None
+                    db.session.commit()
 
-                # Federate post
-                task_selector('make_post', post_id=post.id)
+                    # Federate post
+                    task_selector('make_post', post_id=post.id)
 
-                # create Notification()s for all the people subscribed to this post.community, post.author, post.topic_id and feed
-                notify_about_post(post)
+                    # create Notification()s for all the people subscribed to this post.community, post.author, post.topic_id and feed
+                    notify_about_post(post)
 
-                if next_occurrence:
-                    # create new post with new_post.scheduled_for = next_occurrence and new_post.repeat = post.repeat. Call Post.new()
-                    ...
+                # Scheduled post with multiple occurences
+                else:
+                    # Create a new instance and copy all fields
+                    scheduled_post = Post()
+                    for column in post.__table__.columns:
+                        setattr(scheduled_post, column.name, getattr(post, column.name))
+                    scheduled_post.id = None
+                    scheduled_post.ap_id = None
+                    scheduled_post.scheduled_for = None
+                    scheduled_post.posted_at = utcnow()
+                    scheduled_post.edited_at = None
+                    scheduled_post.status = POST_STATUS_PUBLISHED
+                    db.session.add(scheduled_post)
+                    db.session.commit()
+
+                    scheduled_post.ap_id = f"https://{current_app.config['SERVER_NAME']}/post/{scheduled_post.id}"
+                    # Update the scheduled_for with the next occurrence date
+                    post.scheduled_for = next_occurrence
+                    vote = PostVote(user_id=post.user_id, post_id=scheduled_post.id, author_id=scheduled_post.user_id, effect=1)
+                    db.session.add(vote)
+                    db.session.commit()
+    
+                    task_selector('make_post', post_id=scheduled_post.id)
+                    notify_about_post(scheduled_post)
+
 
     @app.cli.command('move-files-to-s3')
     def move_files_to_s3():
