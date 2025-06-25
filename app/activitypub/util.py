@@ -19,7 +19,7 @@ from app import db, cache, constants, celery
 from app.models import User, Post, Community, BannedInstances, File, PostReply, AllowedInstances, Instance, utcnow, \
     PostVote, PostReplyVote, ActivityPubLog, Notification, Site, CommunityMember, InstanceRole, Report, Conversation, \
     Language, Tag, Poll, PollChoice, UserFollower, CommunityBan, CommunityJoinRequest, NotificationSubscription, \
-    Licence, UserExtraField, Feed, FeedMember, FeedItem, CommunityFlair, UserFlair
+    Licence, UserExtraField, Feed, FeedMember, FeedItem, CommunityFlair, UserFlair, Topic
 from app.activitypub.signature import signed_get_request, post_request
 import time
 from app.constants import *
@@ -1208,11 +1208,36 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
 
                             boto3_session = None
                             s3 = None
+
+                            # Use environment variables to determine medium and thumbnail format and quality
+
+                            medium_image_format = current_app.config['MEDIA_IMAGE_MEDIUM_FORMAT']
+                            medium_image_quality = current_app.config['MEDIA_IMAGE_MEDIUM_QUALITY']
+                            thumbnail_image_format = current_app.config['MEDIA_IMAGE_THUMBNAIL_FORMAT']
+                            thumbnail_image_quality = current_app.config['MEDIA_IMAGE_THUMBNAIL_QUALITY']
+
+                            final_ext = file_ext # track file extension for conversion
+                            thumbnail_ext = file_ext
+
+                            if medium_image_format == 'AVIF' or thumbnail_image_format == 'AVIF':
+                                import pillow_avif
+
                             # Resize the image to medium
                             if medium_width:
-                                if img_width > medium_width:
-                                    image.thumbnail((medium_width, sys.maxsize))
-                                image.save(final_place)
+                                if img_width > medium_width or medium_image_format:
+                                    image = image.convert('RGB' if (medium_image_format == 'JPEG' or final_ext in ['.jpg', '.jpeg']) else 'RGBA')
+                                    image.thumbnail((medium_width, sys.maxsize), resample=Image.LANCZOS)
+
+                                kwargs = {}
+                                if medium_image_format:
+                                    kwargs['format'] = medium_image_format.upper()
+                                    final_ext = '.' + medium_image_format.lower()
+                                    final_place = os.path.splitext(final_place)[0] + final_ext
+                                if medium_image_quality:
+                                    kwargs['quality'] = int(medium_image_quality)
+
+                                image.save(final_place, optimize=True, **kwargs)
+
                                 if store_files_in_s3():
                                     content_type = guess_mime_type(final_place)
                                     boto3_session = boto3.session.Session()
@@ -1224,11 +1249,11 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                         aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
                                     )
                                     s3.upload_file(final_place, current_app.config['S3_BUCKET'], original_directory + '/' +
-                                                   new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + file_ext,
+                                                   new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + final_ext,
                                                    ExtraArgs={'ContentType': content_type})
                                     os.unlink(final_place)
                                     final_place = f"https://{current_app.config['S3_PUBLIC_URL']}/{original_directory}/{new_filename[0:2]}/{new_filename[2:4]}" + \
-                                                  '/' + new_filename + file_ext
+                                                  '/' + new_filename + final_ext
 
                                 file.file_path = final_place
                                 file.width = image.width
@@ -1237,8 +1262,19 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                             # Resize the image to a thumbnail (webp)
                             if thumbnail_width:
                                 if img_width > thumbnail_width:
-                                    image.thumbnail((thumbnail_width, thumbnail_width))
-                                image.save(final_place_thumbnail, format="WebP", quality=93)
+                                    image = image.convert('RGB' if thumbnail_image_format == 'JPEG' else 'RGBA')
+                                    image.thumbnail((thumbnail_width, thumbnail_width), resample=Image.LANCZOS)
+
+                                kwargs = {}
+                                if thumbnail_image_format:
+                                    kwargs['format'] = thumbnail_image_format.upper()
+                                    thumbnail_ext = '.' + thumbnail_image_format.lower()
+                                    final_place_thumbnail = os.path.splitext(final_place_thumbnail)[0] + thumbnail_ext
+                                if thumbnail_image_quality:
+                                    kwargs['quality'] = int(thumbnail_image_quality)
+
+                                image.save(final_place_thumbnail, optimize=True, **kwargs)
+
                                 if store_files_in_s3():
                                     content_type = guess_mime_type(final_place_thumbnail)
                                     if boto3_session is None and s3 is None:
@@ -1252,11 +1288,11 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                         )
                                     s3.upload_file(final_place_thumbnail, current_app.config['S3_BUCKET'],
                                                    original_directory + '/' +
-                                                   new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + '_thumbnail.webp',
+                                                   new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + '_thumbnail' + thumbnail_ext,
                                                    ExtraArgs={'ContentType': content_type})
                                     os.unlink(final_place_thumbnail)
                                     final_place_thumbnail = f"https://{current_app.config['S3_PUBLIC_URL']}/{original_directory}/{new_filename[0:2]}/{new_filename[2:4]}" + \
-                                                            '/' + new_filename + '_thumbnail.webp'
+                                                            '/' + new_filename + '_thumbnail' + thumbnail_ext
                                 file.thumbnail_path = final_place_thumbnail
                                 file.thumbnail_width = image.width
                                 file.thumbnail_height = image.height
@@ -1278,7 +1314,11 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                         image_text = ''
                                     if 'Anonymous' in image_text and ('No.' in image_text or ' N0' in image_text):   # chan posts usually contain the text 'Anonymous' and ' No.12345'
                                         post = Post.query.filter_by(image_id=file.id).first()
-                                        targets_data = {'post_id': post.id}
+                                        targets_data = {'gen':'0',
+                                                        'post_id': post.id,
+                                                        'orig_post_title': post.title,
+                                                        'orig_post_body': post.body
+                                                        }
                                         notification = Notification(title='Review this',
                                                                     user_id=1,
                                                                     author_id=post.user_id,
@@ -1288,6 +1328,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                                                     targets=targets_data)
                                         session.add(notification)
                                         session.commit()
+
 
 
 def find_reply_parent(in_reply_to: str) -> Tuple[int, int, int]:
@@ -1824,7 +1865,13 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
                 if recipient:
                     blocked_senders = blocked_users(recipient.id)
                     if post_reply.user_id not in blocked_senders:
-                        targets_data = {'post_id':post_reply.post_id,'comment_id': post_reply.id}
+                        author = User.query.get(post_reply.user_id)
+                        targets_data = {'gen':'0',
+                                        'post_id':post_reply.post_id,
+                                        'comment_id': post_reply.id,
+                                        'comment_body': post_reply.body,
+                                        'author_user_name': author.ap_id if author.ap_id else author.user_name
+                                        }
                         notification = Notification(user_id=recipient.id, title=_(f"You have been mentioned in comment {post_reply.id}"),
                                                     url=f"https://{current_app.config['SERVER_NAME']}/comment/{post_reply.id}",
                                                     author_id=user.id, notif_type=NOTIF_MENTION,
@@ -1869,6 +1916,12 @@ def notify_about_post_task(post_id):
     # get the post by id
     post = Post.query.get(post_id)
 
+    # get the author
+    author = User.query.get(post.user_id)
+
+    # get the community
+    community = Community.query.get(post.community_id)
+
     # Send notifications based on subscriptions
     notifications_sent_to = set()
 
@@ -1876,7 +1929,12 @@ def notify_about_post_task(post_id):
     user_send_notifs_to = notification_subscribers(post.user_id, NOTIF_USER)
     for notify_id in user_send_notifs_to:
         if notify_id != post.user_id and notify_id not in notifications_sent_to:
-            targets_data = {'post_id': post.id,'author_id':post.user_id}
+            targets_data = {'gen':'0',
+                            'post_id': post.id,
+                            'post_title': post.title,
+                            'community_name': community.ap_id if community.ap_id else community.name,
+                            'author_id':post.user_id,
+                            'author_user_name': author.ap_id if author.ap_id else author.user_name}
             new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                             user_id=notify_id, author_id=post.user_id,
                                             notif_type=NOTIF_USER, 
@@ -1892,7 +1950,11 @@ def notify_about_post_task(post_id):
     community_send_notifs_to = notification_subscribers(post.community_id, NOTIF_COMMUNITY)
     for notify_id in community_send_notifs_to:
         if notify_id != post.user_id and notify_id not in notifications_sent_to:
-            targets_data = {'post_id': post.id,'community_id':post.community_id}
+            targets_data = {'gen':'0',
+                            'post_id': post.id,
+                            'post_title': post.title,
+                            'community_name': community.ap_id if community.ap_id else community.name,
+                            'community_id':post.community_id}
             new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                             user_id=notify_id, author_id=post.user_id,
                                             notif_type=NOTIF_COMMUNITY,
@@ -1906,9 +1968,16 @@ def notify_about_post_task(post_id):
 
     # NOTIF_TOPIC    
     topic_send_notifs_to = notification_subscribers(post.community.topic_id, NOTIF_TOPIC)
+    topic = Topic.query.get(post.community.topic_id)
     for notify_id in topic_send_notifs_to:
         if notify_id != post.user_id and notify_id not in notifications_sent_to:
-            targets_data = {'post_id': post.id,'author_id':post.user_id}
+            targets_data = {'gen':'0',
+                            'post_id': post.id,
+                            'post_title': post.title,
+                            'community_name': community.ap_id if community.ap_id else community.name,
+                            'topic_name': topic.machine_name,
+                            'topic_machine_name': topic.name,
+                            'author_id': post.user_id}
             new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                             user_id=notify_id, author_id=post.user_id,
                                             notif_type=NOTIF_TOPIC,
@@ -1929,7 +1998,13 @@ def notify_about_post_task(post_id):
         feed_send_notifs_to = notification_subscribers(feed.id, NOTIF_FEED)
         for notify_id in feed_send_notifs_to:
             if notify_id != post.user_id and notify_id not in notifications_sent_to:
-                targets_data = {'post_id':post.id,'feed_id':feed.id}
+                targets_data = {'gen':'0',
+                                'post_id':post.id,
+                                'post_title': post.title,
+                                'community_name': community.ap_id if community.ap_id else community.name,
+                                'feed_id':feed.id,
+                                'feed_name':feed.title
+                                }
                 new_notification = Notification(title=shorten_string(post.title, 150), url=f"/post/{post.id}",
                                                 user_id=notify_id, author_id=post.user_id,
                                                 notif_type=NOTIF_FEED,
@@ -1946,9 +2021,18 @@ def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: Pos
 
     if parent_reply is None:  # This happens when a new_reply is a top-level comment, not a comment on a comment
         send_notifs_to = notification_subscribers(new_reply.post.id, NOTIF_POST)
+        post = Post.query.get(new_reply.post.id)
+        community = Community.query.get(post.community_id)
+        author = User.query.get(new_reply.user_id)
         for notify_id in send_notifs_to:
             if new_reply.user_id != notify_id:
-                targets_data = {'post_id':new_reply.post.id,'comment_id':new_reply.id}
+                targets_data = {'gen':'0',
+                                'post_id':new_reply.post.id,
+                                'post_title': post.title,
+                                'community_name': community.ap_id if community.ap_id else community.name,
+                                'author_user_name': author.ap_id if author.ap_id else author.user_name,
+                                'comment_id':new_reply.id,
+                                'comment_body': new_reply.body}
                 new_notification = Notification(title=shorten_string(_('Reply to %(post_title)s',
                                                                        post_title=new_reply.post.title), 150),
                                                 url=f"/post/{new_reply.post.id}#comment_{new_reply.id}",
@@ -1965,8 +2049,15 @@ def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: Pos
         send_notifs_to = set(notification_subscribers(parent_reply.id, NOTIF_REPLY))
         for notify_id in send_notifs_to:
             if new_reply.user_id != notify_id:
+                author = User.query.get(new_reply.user_id)
                 if new_reply.depth <= THREAD_CUTOFF_DEPTH:
-                    targets_data = {'post_id':parent_reply.post.id,'comment_id':new_reply.id,'author_id':new_reply.user_id}
+                    targets_data = {'gen':'0',
+                                    'post_id':parent_reply.post.id,
+                                    'parent_reply_body': parent_reply.body,
+                                    'comment_id':new_reply.id,
+                                    'comment_body': new_reply.body,
+                                    'author_id':new_reply.user_id,
+                                    'author_user_name': author.ap_id if author.ap_id else author.user_name,}
                     new_notification = Notification(title=shorten_string(_('Reply to comment on %(post_title)s',
                                                                            post_title=parent_reply.post.title), 150),
                                                     url=f"/post/{parent_reply.post.id}#comment_{new_reply.id}",
@@ -1975,7 +2066,14 @@ def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: Pos
                                                     subtype='new_reply_on_followed_comment',
                                                     targets=targets_data)
                 else:
-                    targets_data = {'post_id':parent_reply.post.id,'parent_comment_id':parent_reply.id,'comment_id':new_reply.id,'author_id':new_reply.user_id}
+                    targets_data = {'gen':'0',
+                                    'post_id':parent_reply.post.id,
+                                    'parent_comment_id':parent_reply.id,
+                                    'parent_reply_body': parent_reply.body,
+                                    'comment_id':new_reply.id,
+                                    'comment_body': new_reply.body,
+                                    'author_id':new_reply.user_id,
+                                    'author_user_name': author.ap_id if author.ap_id else author.user_name,}
                     new_notification = Notification(title=shorten_string(_('Reply to comment on %(post_title)s',
                                                                            post_title=parent_reply.post.title), 150),
                                                     url=f"/post/{parent_reply.post.id}/comment/{parent_reply.id}#comment_{new_reply.id}",
@@ -2061,7 +2159,13 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
                             if reply.user_id not in blocked_senders:
                                 existing_notification = Notification.query.filter(Notification.user_id == recipient.id, Notification.url == f"https://{current_app.config['SERVER_NAME']}/comment/{reply.id}").first()
                                 if not existing_notification:
-                                    targets_data = {'post_id':reply.post_id,'comment_id': reply.id}
+                                    author = User.query.get(reply.user_id)
+                                    targets_data = {'gen':'0',
+                                                    'post_id':reply.post_id,
+                                                    'comment_id': reply.id,
+                                                    'comment_body': reply.body,
+                                                    'author_user_name': author.ap_id if author.ap_id else author.user_name
+                                                    }
                                     notification = Notification(user_id=recipient.id, title=_(f"You have been mentioned in comment {reply.id}"),
                                                                 url=f"https://{current_app.config['SERVER_NAME']}/comment/{reply.id}",
                                                                 author_id=reply.user_id, notif_type=NOTIF_MENTION,
@@ -2163,7 +2267,13 @@ def update_post_from_activity(post: Post, request_json: dict):
                         if post.user_id not in blocked_senders:
                             existing_notification = Notification.query.filter(Notification.user_id == recipient.id, Notification.url == f"https://{current_app.config['SERVER_NAME']}/post/{post.id}").first()
                             if not existing_notification:
-                                targets_data = {'post_id':post.id}
+                                author = User.query.get(post.user_id)
+                                targets_data = {'gen':'0',
+                                                'post_id':post.id,
+                                                'post_title':post.title,
+                                                'post_body':post.body,
+                                                'author_user_name': author.ap_id if author.ap_id else author.user_name
+                                                }
                                 notification = Notification(user_id=recipient.id, title=_(f"You have been mentioned in post {post.id}"),
                                                             url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
                                                             author_id=post.user_id, notif_type=NOTIF_MENTION,
@@ -2378,9 +2488,14 @@ def update_post_from_activity(post: Post, request_json: dict):
             if old_domain != new_domain:
                 # notify about links to banned websites.
                 already_notified = set()  # often admins and mods are the same people - avoid notifying them twice
+                targets_data = {'gen':'0',
+                                'post_id': post.id,
+                                'orig_post_title': post.title,
+                                'orig_post_body': post.body,
+                                'orig_post_domain':post.domain,
+                                }
                 if new_domain.notify_mods:
                     for community_member in post.community.moderators():
-                        targets_data = {'post_id': post.id}
                         notify = Notification(title='Suspicious content', url=post.ap_id,
                                                   user_id=community_member.user_id,
                                                   author_id=1, notif_type=NOTIF_REPORT,
@@ -2391,7 +2506,12 @@ def update_post_from_activity(post: Post, request_json: dict):
                 if new_domain.notify_admins:
                     for admin in Site.admins():
                         if admin.id not in already_notified:
-                            targets_data = {'post_id': post.id}
+                            targets_data = {'gen':'0',
+                                            'post_id': post.id,
+                                            'orig_post_title': post.title,
+                                            'orig_post_body': post.body,
+                                            'orig_post_domain':post.domain,
+                                            }
                             notify = Notification(title='Suspicious content',
                                                       url=post.ap_id, user_id=admin.id,
                                                       author_id=1, notif_type=NOTIF_REPORT,
@@ -2477,9 +2597,19 @@ def process_report(user, reported, request_json):
 
         # Notify site admin
         already_notified = set()
+        source_instance = Instance.query.get(user.instance_id)
         for admin in Site.admins():
             if admin.id not in already_notified:
-                targets_data = {'suspect_user_id': reported.id,'reporter_id':user.id,'source_instance_id':user.instance_id}
+                targets_data = {'gen':'0',
+                                'suspect_user_id': reported.id,
+                                'suspect_user_user_name': reported.ap_id if reported.ap_id else reported.user_name,
+                                'reporter_id':user.id,
+                                'reporter_user_name': user.ap_id if user.ap_id else user.user_name,
+                                'source_instance_id':user.instance_id,
+                                'source_instance_domain': source_instance.domain,
+                                'reasons': reasons,
+                                'description':description
+                                }
                 notify = Notification(title='Reported user', url='/admin/reports', user_id=admin.id,
                                       author_id=user.id, notif_type=NOTIF_REPORT,
                                       subtype='user_reported',
@@ -2499,8 +2629,20 @@ def process_report(user, reported, request_json):
         db.session.add(report)
 
         already_notified = set()
+        suspect_author = User.query.get(reported.author.id)
+        source_instance = Instance.query.get(user.instance_id)
         for mod in reported.community.moderators():
-            targets_data = {'suspect_post_id':reported.id,'suspect_user_id':reported.author.id,'reporter_id':user.id,'source_instance_id':user.instance_id}
+            targets_data = {'gen':'0',
+                            'suspect_post_id':reported.id,
+                            'suspect_user_id':reported.author.id,
+                            'suspect_user_user_name':suspect_author.ap_id if suspect_author.ap_id else suspect_author.user_name,
+                            'reporter_id':user.id,
+                            'reporter_user_name': user.ap_id if user.ap_id else user.user_name,
+                            'source_instance_id':user.instance_id,
+                            'source_instance_domain': source_instance.domain,
+                            'orig_post_title': reported.title,
+                            'orig_post_body': reported.body
+                            }
             notification = Notification(user_id=mod.user_id, title=_('A post has been reported'),
                                         url=f"https://{current_app.config['SERVER_NAME']}/post/{reported.id}",
                                         author_id=user.id, notif_type=NOTIF_REPORT,
@@ -2523,8 +2665,19 @@ def process_report(user, reported, request_json):
         db.session.add(report)
         # Notify moderators
         already_notified = set()
+        suspect_author = User.query.get(reported.author.id)
+        source_instance = Instance.query.get(user.instance_id)
         for mod in post.community.moderators():
-            targets_data = {'suspect_comment_id':reported.id,'suspect_user_id':reported.author.id,'reporter_id':user.id,'source_instance_id':user.instance_id}
+            targets_data = {'gen':'0',
+                            'suspect_comment_id':reported.id,
+                            'suspect_user_id':reported.author.id,
+                            'suspect_user_user_name':suspect_author.ap_id if suspect_author.ap_id else suspect_author.user_name,
+                            'reporter_id':user.id,
+                            'reporter_user_name':user.ap_id if user.ap_id else user.name,
+                            'source_instance_id':user.instance_id,
+                            'source_instance_domain': source_instance.domain,
+                            'orig_comment_body': reported.body
+                            }
             notification = Notification(user_id=mod.user_id, title=_('A comment has been reported'),
                                         url=f"https://{current_app.config['SERVER_NAME']}/comment/{reported.id}",
                                         author_id=user.id, notif_type=NOTIF_REPORT,
