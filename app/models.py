@@ -7,6 +7,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 import arrow
 import boto3
 from flask import current_app
+from flask_babel import force_locale, gettext
 from flask_login import UserMixin, current_user
 from sqlalchemy import or_, text, desc, Index
 from sqlalchemy.exc import IntegrityError
@@ -847,7 +848,9 @@ class User(UserMixin, db.Model):
     accept_private_messages = db.Column(db.Integer, default=3)         # None or 0 = do not accept, 1 = This instance, 2 = Trusted instances, 3 = All instances
     google_oauth_id = db.Column(db.String(64), unique=True, index=True)
     hide_low_quality = db.Column(db.Boolean, default=False)
+    show_subscribed_communities = db.Column(db.Boolean, default=False)
     additional_css = db.Column(db.Text)
+    mastodon_oauth_id = db.Column(db.String(64), unique=True, index=True)
 
     avatar = db.relationship('File', lazy='joined', foreign_keys=[avatar_id], single_parent=True, cascade="all, delete-orphan")
     cover = db.relationship('File', lazy='joined', foreign_keys=[cover_id], single_parent=True, cascade="all, delete-orphan")
@@ -1170,12 +1173,8 @@ class User(UserMixin, db.Model):
         result = self.ap_profile_id if self.ap_profile_id else f"https://{current_app.config['SERVER_NAME']}/u/{self.user_name.lower()}"
         return result
 
-    def public_url(self, main_user_name=True):
-        if main_user_name:
-            result = self.ap_public_url if self.ap_public_url else f"https://{current_app.config['SERVER_NAME']}/u/{self.user_name}"
-        else:
-            result = f"https://{current_app.config['SERVER_NAME']}/u/{self.alt_user_name}" if self.alt_user_name else self.public_url(True)
-        return result
+    def public_url(self):
+        return self.ap_public_url if self.ap_public_url else f"https://{current_app.config['SERVER_NAME']}/u/{self.user_name}"
 
     def created_recently(self):
         return self.created and self.created > utcnow() - timedelta(days=7)
@@ -1565,7 +1564,7 @@ class Post(db.Model):
                     db.session.add(notify)
                     already_notified.add(community_member.user_id)
             if domain.notify_admins:
-                targets_data = {'post_id': post.id}
+                targets_data = {'gen':'0', 'post_id': post.id}
                 for admin in Site.admins():
                     if admin.id not in already_notified:
                         notify = Notification(title='Suspicious content',
@@ -1662,14 +1661,17 @@ class Post(db.Model):
                                                     'post_title': post.title,
                                                     'author_user_name': author.ap_id if author.ap_id else author.user_name,
                                                     }
-                                    notification = Notification(user_id=recipient.id, title=_(f"You have been mentioned in post {post.id}"),
-                                                                url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
-                                                                author_id=post.user_id, notif_type=NOTIF_MENTION,
-                                                                subtype='post_mention',
-                                                                targets=targets_data)
-                                    recipient.unread_notifications += 1
-                                    db.session.add(notification)
-                                    db.session.commit()
+                                    # import here to avoid circular import errors
+                                    from app.utils import get_recipient_language
+                                    with force_locale(get_recipient_language(recipient.id)):
+                                        notification = Notification(user_id=recipient.id, title=gettext(f"You have been mentioned in post {post.id}"),
+                                                                    url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
+                                                                    author_id=post.user_id, notif_type=NOTIF_MENTION,
+                                                                    subtype='post_mention',
+                                                                    targets=targets_data)
+                                        recipient.unread_notifications += 1
+                                        db.session.add(notification)
+                                        db.session.commit()
 
             # Polls need to be processed quite late because they need a post_id to refer to
             if request_json['object']['type'] == 'Question':
@@ -1691,8 +1693,8 @@ class Post(db.Model):
                     make_image_sizes(post.image_id, 512, 1200, 'posts',
                                      community.low_quality)  # the 512 sized image is for masonry view
                 else:
-                    make_image_sizes(post.image_id, 170, None, 'posts',
-                                     community.low_quality)  # the 512 sized image is for masonry view
+                    make_image_sizes(post.image_id, 170, 512, 'posts',
+                                     community.low_quality)  # the 512 sized image is for masonry view and API responses
 
             # Update list of cross posts
             if post.url:
@@ -1917,38 +1919,39 @@ class Post(db.Model):
         assert vote_direction == 'upvote' or vote_direction == 'downvote'
         undo = None
         if existing_vote:
-            if not self.community.low_quality:
-                with redis_client.lock(f"lock:user:{self.user_id}", timeout=10, blocking_timeout=6):
-                    db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
-                                       {'effect': existing_vote.effect, 'user_id': self.user_id})
-                    db.session.commit()
-            if existing_vote.effect > 0:  # previous vote was up
-                if vote_direction == 'upvote':  # new vote is also up, so remove it
-                    db.session.delete(existing_vote)
-                    db.session.commit()
-                    self.up_votes -= 1
-                    self.score -= existing_vote.effect              # score - (+1) = score-1
-                    undo = 'Like'
-                else:  # new vote is down while previous vote was up, so reverse their previous vote
-                    existing_vote.effect = -1
-                    db.session.commit()
-                    self.up_votes -= 1
-                    self.down_votes += 1
-                    self.score += existing_vote.effect * 2          # score + (-2) = score-2
-            else:  # previous vote was down
-                if vote_direction == 'downvote':  # new vote is also down, so remove it
-                    db.session.delete(existing_vote)
-                    db.session.commit()
-                    self.down_votes -= 1
-                    self.score -= existing_vote.effect              # score - (-1) = score+1
-                    undo = 'Dislike'
-                else:  # new vote is up while previous vote was down, so reverse their previous vote
-                    existing_vote.effect = 1
-                    db.session.commit()
-                    self.up_votes += 1
-                    self.down_votes -= 1
-                    self.score += existing_vote.effect * 2          # score + (+2) = score+2
-            db.session.commit()
+            with redis_client.lock(f"lock:vote:{existing_vote.id}", timeout=10, blocking_timeout=6):
+                if not self.community.low_quality:
+                    with redis_client.lock(f"lock:user:{self.user_id}", timeout=10, blocking_timeout=6):
+                        db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
+                                           {'effect': existing_vote.effect, 'user_id': self.user_id})
+                        db.session.commit()
+                if existing_vote.effect > 0:  # previous vote was up
+                    if vote_direction == 'upvote':  # new vote is also up, so remove it
+                        db.session.delete(existing_vote)
+                        db.session.commit()
+                        self.up_votes -= 1
+                        self.score -= existing_vote.effect              # score - (+1) = score-1
+                        undo = 'Like'
+                    else:  # new vote is down while previous vote was up, so reverse their previous vote
+                        existing_vote.effect = -1
+                        db.session.commit()
+                        self.up_votes -= 1
+                        self.down_votes += 1
+                        self.score += existing_vote.effect * 2          # score + (-2) = score-2
+                else:  # previous vote was down
+                    if vote_direction == 'downvote':  # new vote is also down, so remove it
+                        db.session.delete(existing_vote)
+                        db.session.commit()
+                        self.down_votes -= 1
+                        self.score -= existing_vote.effect              # score - (-1) = score+1
+                        undo = 'Dislike'
+                    else:  # new vote is up while previous vote was down, so reverse their previous vote
+                        existing_vote.effect = 1
+                        db.session.commit()
+                        self.up_votes += 1
+                        self.down_votes -= 1
+                        self.score += existing_vote.effect * 2          # score + (+2) = score+2
+                db.session.commit()
         else:
             if vote_direction == 'upvote':
                 effect = Instance.weight(user.ap_domain)
@@ -2305,36 +2308,37 @@ class PostReply(db.Model):
         assert vote_direction == 'upvote' or vote_direction == 'downvote'
         undo = None
         if existing_vote:
-            with redis_client.lock(f"lock:user:{self.user_id}", timeout=10, blocking_timeout=6):
-                db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
-                                   {'effect': existing_vote.effect, 'user_id': self.user_id})
-                db.session.commit()
-            if existing_vote.effect > 0:  # previous vote was up
-                if vote_direction == 'upvote':  # new vote is also up, so remove it
-                    db.session.delete(existing_vote)
+            with redis_client.lock(f"lock:vote:{existing_vote.id}", timeout=10, blocking_timeout=6):
+                with redis_client.lock(f"lock:user:{self.user_id}", timeout=10, blocking_timeout=6):
+                    db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
+                                       {'effect': existing_vote.effect, 'user_id': self.user_id})
                     db.session.commit()
-                    self.up_votes -= 1
-                    self.score -= 1
-                    undo = 'Like'
-                else:  # new vote is down while previous vote was up, so reverse their previous vote
-                    existing_vote.effect = -1
-                    db.session.commit()
-                    self.up_votes -= 1
-                    self.down_votes += 1
-                    self.score -= 2
-            else:  # previous vote was down
-                if vote_direction == 'downvote':  # new vote is also down, so remove it
-                    db.session.delete(existing_vote)
-                    db.session.commit()
-                    self.down_votes -= 1
-                    self.score += 1
-                    undo = 'Dislike'
-                else:  # new vote is up while previous vote was down, so reverse their previous vote
-                    existing_vote.effect = 1
-                    db.session.commit()
-                    self.up_votes += 1
-                    self.down_votes -= 1
-                    self.score += 2
+                if existing_vote.effect > 0:  # previous vote was up
+                    if vote_direction == 'upvote':  # new vote is also up, so remove it
+                        db.session.delete(existing_vote)
+                        db.session.commit()
+                        self.up_votes -= 1
+                        self.score -= 1
+                        undo = 'Like'
+                    else:  # new vote is down while previous vote was up, so reverse their previous vote
+                        existing_vote.effect = -1
+                        db.session.commit()
+                        self.up_votes -= 1
+                        self.down_votes += 1
+                        self.score -= 2
+                else:  # previous vote was down
+                    if vote_direction == 'downvote':  # new vote is also down, so remove it
+                        db.session.delete(existing_vote)
+                        db.session.commit()
+                        self.down_votes -= 1
+                        self.score += 1
+                        undo = 'Dislike'
+                    else:  # new vote is up while previous vote was down, so reverse their previous vote
+                        existing_vote.effect = 1
+                        db.session.commit()
+                        self.up_votes += 1
+                        self.down_votes -= 1
+                        self.score += 2
         else:
             if user.cannot_vote():
                 effect = 0
@@ -2844,6 +2848,7 @@ class Site(db.Model):
     logo_16 = db.Column(db.String(40), default='')
     show_inoculation_block = db.Column(db.Boolean, default=True)
     additional_css = db.Column(db.Text)
+    additional_js = db.Column(db.Text)
     private_instance = db.Column(db.Boolean, default=False)
     language_id = db.Column(db.Integer)
 

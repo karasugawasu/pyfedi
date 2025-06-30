@@ -9,14 +9,14 @@ from app.models import Instance, Notification, NotificationSubscription, Post, P
 from app.shared.tasks import task_selector
 from app.utils import gibberish, instance_banned, render_template, authorise_api_user, recently_upvoted_post_replies, recently_downvoted_post_replies, shorten_string, \
                       piefed_markdown_to_lemmy_markdown, markdown_to_html, ap_datetime, add_to_modlog_activitypub, can_create_post_reply, \
-                      can_upvote, can_downvote
+                      can_upvote, can_downvote, get_recipient_language
 
 from flask import abort, current_app, flash, redirect, request, url_for
-from flask_babel import _
+from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 
 
-def vote_for_reply(reply_id: int, vote_direction, src, auth=None):
+def vote_for_reply(reply_id: int, vote_direction, federate: bool, src, auth=None):
     if src == SRC_API:
         reply = PostReply.query.filter_by(id=reply_id).one()
         user = authorise_api_user(auth, return_type='model')
@@ -30,7 +30,7 @@ def vote_for_reply(reply_id: int, vote_direction, src, auth=None):
 
     undo = reply.vote(user, vote_direction)
 
-    task_selector('vote_for_reply', user_id=user.id, reply_id=reply_id, vote_to_undo=undo, vote_direction=vote_direction)
+    task_selector('vote_for_reply', user_id=user.id, reply_id=reply_id, vote_to_undo=undo, vote_direction=vote_direction, federate=federate)
 
     if src == SRC_API:
         return user.id
@@ -312,13 +312,14 @@ def report_reply(reply_id, input, src, auth=None):
     for mod in reply.community.moderators():
         moderator = User.query.get(mod.user_id)
         if moderator and moderator.is_local():
-            notification = Notification(user_id=mod.user_id, title=_('A comment has been reported'),
-                                        url=f"https://{current_app.config['SERVER_NAME']}/comment/{reply.id}",
-                                        author_id=user_id, notif_type=NOTIF_REPORT,
-                                        subtype='comment_reported',
-                                        targets=targets_data)
-            db.session.add(notification)
-            already_notified.add(mod.user_id)
+            with force_locale(get_recipient_language(moderator.id)):
+                notification = Notification(user_id=mod.user_id, title=gettext('A comment has been reported'),
+                                            url=f"https://{current_app.config['SERVER_NAME']}/comment/{reply.id}",
+                                            author_id=user_id, notif_type=NOTIF_REPORT,
+                                            subtype='comment_reported',
+                                            targets=targets_data)
+                db.session.add(notification)
+                already_notified.add(mod.user_id)
     reply.reports += 1
     # todo: only notify admins for certain types of report
     for admin in Site.admins():

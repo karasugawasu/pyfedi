@@ -25,11 +25,12 @@ class AddCommunityForm(FlaskForm):
     community_name = StringField(_l('Name'), validators=[DataRequired()])
     url = StringField(_l('Url'), validators=[Length(max=50)])
     description = TextAreaField(_l('Description'))
+    posting_warning = StringField(_l('Posting warning'), validators=[Length(max=512)])
     icon_file = FileField(_l('Icon image'), render_kw={'accept': 'image/*'})
     banner_file = FileField(_l('Banner image'), render_kw={'accept': 'image/*'})
     nsfw = BooleanField('NSFW')
     local_only = BooleanField('Local only')
-    languages = SelectMultipleField(_l('Languages'), coerce=int, validators=[Optional()], render_kw={'class': 'form-select'})
+    languages = MultiCheckboxField(_l('Languages'), coerce=int, validators=[Optional()], render_kw={'class': 'form-multicheck-columns'})
     submit = SubmitField(_l('Create'))
 
     def validate(self, extra_validators=None):
@@ -69,6 +70,7 @@ class AddCommunityForm(FlaskForm):
 class EditCommunityForm(FlaskForm):
     title = StringField(_l('Title'), validators=[DataRequired()])
     description = TextAreaField(_l('Description'))
+    posting_warning = StringField(_l('Posting warning'), validators=[Length(max=512)])
     icon_file = FileField(_l('Icon image'), render_kw={'accept': 'image/*'})
     banner_file = FileField(_l('Banner image'), render_kw={'accept': 'image/*'})
     nsfw = BooleanField(_l('NSFW community'))
@@ -83,7 +85,7 @@ class EditCommunityForm(FlaskForm):
     ]
     downvote_accept_mode = SelectField(_l('Accept downvotes from'), coerce=int, choices=downvote_accept_modes, validators=[Optional()], render_kw={'class': 'form-select'})
     topic = SelectField(_l('Topic'), coerce=int, validators=[Optional()], render_kw={'class': 'form-select'})
-    languages = SelectMultipleField(_l('Languages'), coerce=int, validators=[Optional()], render_kw={'class': 'form-select'})
+    languages = MultiCheckboxField(_l('Languages'), coerce=int, validators=[Optional()], render_kw={'class': 'form-multicheck-columns'})
     layouts = [('', _l('List')),
                ('masonry', _l('Masonry')),
                ('masonry_wide', _l('Wide masonry'))]
@@ -153,7 +155,7 @@ class CreatePostForm(FlaskForm):
     notify_author = BooleanField(_l('Notify about replies'))
     language_id = SelectField(_l('Language'), validators=[DataRequired()], coerce=int, render_kw={'class': 'form-select'})
     scheduled_for = DateTimeLocalField(_l('Publish at'), validators=[Optional()], format="%Y-%m-%dT%H:%M")
-    repeat = SelectField(_l('Repeat'), validators=[Optional()], choices=[(None, _l('None')), ('daily', _l('Daily')), ('weekly', _l('Weekly')), ('monthly', _l('Monthly'))],
+    repeat = SelectField(_l('Repeat'), validators=[Optional()], choices=[('none', _l('None')), ('once', _l('Only once')), ('daily', _l('Daily')), ('weekly', _l('Weekly')), ('monthly', _l('Monthly'))],
         render_kw={'class': 'form-select'})
     timezone = HiddenField(render_kw={'id': 'timezone'})
     submit = SubmitField(_l('Publish'))
@@ -175,6 +177,12 @@ class CreatePostForm(FlaskForm):
     def validate_scheduled_for(self, field):
         if field.data and field.data < utcnow():
             self.scheduled_for.errors.append(_l('Choose a time in the future.'))
+            return False
+        return True
+
+    def validate_repeat(self, field):
+        if self.scheduled_for.data and field.data == 'none':
+            self.repeat.errors.append(_l('A scheduled post must have a frequency set.'))
             return False
         return True
 
@@ -206,6 +214,8 @@ class CreateVideoForm(CreatePostForm):
                            render_kw={'placeholder': 'https://...'})
 
     def validate(self, extra_validators=None) -> bool:
+        super().validate(extra_validators)
+        
         domain = domain_from_url(self.video_url.data, create=False)
         if domain and domain.banned:
             self.video_url.errors.append(_l("Videos from %(domain)s are not allowed.", domain=domain.name))
@@ -218,6 +228,8 @@ class CreateImageForm(CreatePostForm):
     image_file = FileField(_l('Image'), validators=[DataRequired()], render_kw={'accept': 'image/*'})
 
     def validate(self, extra_validators=None) -> bool:
+        super().validate(extra_validators)
+
         uploaded_file = request.files['image_file']
         if uploaded_file and uploaded_file.filename != '' and not uploaded_file.filename.endswith('.svg') and not uploaded_file.filename.endswith('.gif'):
             Image.MAX_IMAGE_PIXELS = 89478485
@@ -266,6 +278,8 @@ class EditImageForm(CreateImageForm):
     image_file = FileField(_l('Image'), validators=[Optional()], render_kw={'accept': 'image/*'})
     
     def validate(self, extra_validators=None) -> bool:
+        super().validate(extra_validators)
+
         if self.communities:
             community = Community.query.get(self.communities.data)
             if community.is_local() and g.site.allow_local_image_posts is False:
@@ -298,8 +312,14 @@ class CreatePollForm(CreatePostForm):
     choice_10 = StringField('Choice')
 
     def validate(self, extra_validators=None) -> bool:
-        choices_made = 0
+        super().validate(extra_validators)
 
+        # Polls shouldn't be scheduled more than once
+        if self.repeat.data in ['daily', 'weekly', 'monthly']:
+            self.repeat.errors.append(_l("Polls can't be scheduled more than once"))
+            return False
+
+        choices_made = 0
         for i in range(1, 10):
             choice_data = getattr(self, f"choice_{i}").data.strip()
             if choice_data != '':

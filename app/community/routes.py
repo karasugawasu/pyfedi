@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 
 from flask import redirect, url_for, flash, request, make_response, session, Markup, current_app, abort, g, json
 from flask_login import current_user
-from flask_babel import _
+from flask_babel import _, force_locale, gettext
 from slugify import slugify
 from sqlalchemy import or_, asc, desc, text
 from sqlalchemy.orm.exc import NoResultFound
@@ -49,6 +49,7 @@ from app.utils import get_setting, render_template, allowlist_html, markdown_to_
     possible_communities, reported_posts, user_notes, login_required
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
+from app.utils import get_recipient_language
 from feedgen.feed import FeedGenerator
 from datetime import timezone, timedelta
 
@@ -72,7 +73,7 @@ def add_local():
     if g.site.enable_nsfw is False:
         form.nsfw.render_kw = {'disabled': True}
 
-    form.languages.choices = languages_for_form()
+    form.languages.choices = languages_for_form(all=True)
 
     if form.validate_on_submit():
         if form.url.data.strip().lower().startswith('/c/'):
@@ -82,7 +83,7 @@ def add_local():
         community = Community(title=form.community_name.data, name=form.url.data, description=piefed_markdown_to_lemmy_markdown(form.description.data),
                               nsfw=form.nsfw.data, private_key=private_key,
                               public_key=public_key, description_html=markdown_to_html(form.description.data),
-                              local_only=form.local_only.data,
+                              local_only=form.local_only.data, posting_warning=form.posting_warning.data,
                               ap_profile_id='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data.lower(),
                               ap_public_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data,
                               ap_followers_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data + '/followers',
@@ -476,7 +477,7 @@ def show_community(community: Community):
                            recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted, community_feeds=community_feeds,
                            canonical=community.profile_id(), can_upvote_here=can_upvote(user, community), can_downvote_here=can_downvote(user, community),
                            rss_feed=f"https://{current_app.config['SERVER_NAME']}/community/{community.link()}/feed", rss_feed_name=f"{community.title} on {g.site.name}",
-                           content_filters=content_filters,  sort=sort, flair=flair,
+                           content_filters=content_filters,  sort=sort, flair=flair, show_post_community=False,
                            reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
                            user_notes=user_notes(current_user.get_id()), banned_from_community=banned_from_community,
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
@@ -862,15 +863,16 @@ def community_report(community_id: int):
         # Notify admin
         # todo: find all instance admin(s). for now just load User.id == 1
         admins = [User.query.get_or_404(1)]
-        targets_data = {'suspect_community_id':community.id,'reporter_id':current_user.id}
+        targets_data = {'gen':'0', 'suspect_community_id':community.id,'reporter_id':current_user.id}
         for admin in admins:
-            notification = Notification(user_id=admin.id, title=_('A community has been reported'),
-                                            url=community.local_url(),
-                                            author_id=current_user.id, notif_type=NOTIF_REPORT,
-                                            subtype='community_reported',
-                                            targets=targets_data)
-            db.session.add(notification)
-            admin.unread_notifications += 1
+            with force_locale(get_recipient_language(admin.id)):
+                notification = Notification(user_id=admin.id, title=gettext('A community has been reported'),
+                                                url=community.local_url(),
+                                                author_id=current_user.id, notif_type=NOTIF_REPORT,
+                                                subtype='community_reported',
+                                                targets=targets_data)
+                db.session.add(notification)
+                admin.unread_notifications += 1
         db.session.commit()
 
         # todo: federate report to originating instance
@@ -894,13 +896,14 @@ def community_edit(community_id: int):
     if community.is_owner() or current_user.is_admin() or community.is_moderator():
         form = EditCommunityForm()
         form.topic.choices = topics_for_form(0)
-        form.languages.choices = languages_for_form(all=current_user.is_admin_or_staff())
+        form.languages.choices = languages_for_form(all=True)
         if g.site.enable_nsfw is False:
             form.nsfw.render_kw = {'disabled': True}
         if form.validate_on_submit():
             community.title = form.title.data
             community.description = piefed_markdown_to_lemmy_markdown(form.description.data)
             community.description_html = markdown_to_html(form.description.data, anchors_new_tab=False)
+            community.posting_warning = form.posting_warning.data
             community.nsfw = form.nsfw.data
             community.local_only = form.local_only.data
             community.restricted_to_mods = form.restricted_to_mods.data
@@ -953,6 +956,7 @@ def community_edit(community_id: int):
         else:
             form.title.data = community.title
             form.description.data = community.description
+            form.posting_warning.data = community.posting_warning
             form.nsfw.data = community.nsfw
             form.local_only.data = community.local_only
             form.new_mods_wanted.data = community.new_mods_wanted
@@ -1155,7 +1159,7 @@ def community_ban_user(community_id: int, user_id: int):
 
             cache.delete_memoized(joined_communities, user.id)
             cache.delete_memoized(moderating_communities, user.id)
-            targets_data = {'community_id': community.id}
+            targets_data = {'gen':'0', 'community_id': community.id}
             notify = Notification(title=shorten_string('You have been banned from ' + community.title),
                                   url='/notifications', user_id=user.id,
                                   author_id=1, notif_type=NOTIF_BAN,
@@ -1208,7 +1212,7 @@ def community_unban_user(community_id: int, user_id: int):
     if user.is_local():
         cache.delete_memoized(joined_communities, user.id)
         cache.delete_memoized(moderating_communities, user.id)
-        targets_data = {'community_id': community.id}
+        targets_data = {'gen':'0', 'community_id': community.id}
         notify = Notification(title=shorten_string('You have been un-banned from ' + community.title),
                               url='/notifications', user_id=user.id,
                               author_id=1, notif_type=NOTIF_UNBAN,
@@ -1259,7 +1263,7 @@ def community_move(actor):
             send_email(f'Request to move {community.link()}', f'{current_app.config["MAIL_FROM"]}',
                        g.site.contact_email, text_body, html_body, current_user.email)
 
-            targets_data = {'community_id': community.id,'requestor_id':current_user.id}
+            targets_data = {'gen':'0', 'community_id': community.id,'requestor_id':current_user.id}
             notify = Notification(title='Community move requested, check your email.', url=f'/admin/community/{community.id}/move/{current_user.id}', user_id=1,
                                   author_id=current_user.id, notif_type=NOTIF_MENTION,
                                   subtype='community_move_request',
@@ -1733,7 +1737,7 @@ def community_moderate_report_escalate(community_id, report_id):
         if report:
             form = EscalateReportForm()
             if form.validate_on_submit():
-                targets_data = {'community_id': community.id,'report_id':report_id}
+                targets_data = {'gen':'0', 'community_id': community.id,'report_id':report_id}
                 notify = Notification(title='Escalated report', url='/admin/reports', user_id=1,
                                       author_id=current_user.id, notif_type=NOTIF_REPORT_ESCALATION,
                                       subtype='report_escalation_from_community_mod',

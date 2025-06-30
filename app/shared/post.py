@@ -12,10 +12,10 @@ from app.utils import render_template, authorise_api_user, shorten_string, gibbe
     piefed_markdown_to_lemmy_markdown, markdown_to_html, fixup_url, domain_from_url, \
     opengraph_parse, url_to_thumbnail_file, can_create_post, is_video_hosting_site, recently_upvoted_posts, \
     is_image_url, add_to_modlog_activitypub, store_files_in_s3, guess_mime_type, retrieve_image_hash, \
-    hash_matches_blocked_image, can_upvote, can_downvote
+    hash_matches_blocked_image, can_upvote, can_downvote, get_recipient_language
 
 from flask import abort, flash, request, current_app, g
-from flask_babel import _
+from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 import boto3
 from pillow_heif import register_heif_opener
@@ -24,7 +24,7 @@ from PIL import Image, ImageOps
 from sqlalchemy import text
 
 
-def vote_for_post(post_id: int, vote_direction, src, auth=None):
+def vote_for_post(post_id: int, vote_direction, federate: bool, src, auth=None):
     if src == SRC_API:
         post = Post.query.filter_by(id=post_id).one()
         user = authorise_api_user(auth, return_type='model')
@@ -36,12 +36,16 @@ def vote_for_post(post_id: int, vote_direction, src, auth=None):
         post = Post.query.get_or_404(post_id)
         user = current_user
 
+        if (vote_direction == 'upvote' and not can_upvote(user, post.community)) or (vote_direction == 'downvote' and not can_downvote(user, post.community)):
+            template = 'post/_post_voting_buttons.html' if request.args.get('style', '') == '' else 'post/_post_voting_buttons_masonry.html'
+            return render_template(template, post=post, community=post.community, recently_upvoted=[], recently_downvoted=[])
+
     undo = post.vote(user, vote_direction)
 
     # mark the post as read for the user
     user.mark_post_as_read(post)
 
-    task_selector('vote_for_post', user_id=user.id, post_id=post_id, vote_to_undo=undo, vote_direction=vote_direction)
+    task_selector('vote_for_post', user_id=user.id, post_id=post_id, vote_to_undo=undo, vote_direction=vote_direction, federate=federate)
 
     if src == SRC_API:
         return user.id
@@ -189,8 +193,6 @@ def make_post(input, community, type, src, auth=None, uploaded_file=None):
     db.session.commit()
 
     post.up_votes = 1
-    if user.reputation > 100:
-        post.up_votes += 1
     effect = user.instance.vote_weight
     post.score = post.up_votes * effect
     post.ranking = post.post_ranking(post.score, post.posted_at)
@@ -624,13 +626,14 @@ def report_post(post_id, input, src, auth=None):
     for mod in post.community.moderators():
         moderator = User.query.get(mod.user_id)
         if moderator and moderator.is_local():
-            notification = Notification(user_id=mod.user_id, title=_('A post has been reported'),
-                                        url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
-                                        author_id=user_id, notif_type=NOTIF_REPORT,
-                                        subtype='post_reported',
-                                        targets=targets_data)
-            db.session.add(notification)
-            already_notified.add(mod.user_id)
+            with force_locale(get_recipient_language(moderator.id)):
+                notification = Notification(user_id=mod.user_id, title=gettext('A post has been reported'),
+                                            url=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}",
+                                            author_id=user_id, notif_type=NOTIF_REPORT,
+                                            subtype='post_reported',
+                                            targets=targets_data)
+                db.session.add(notification)
+                already_notified.add(mod.user_id)
     post.reports += 1
     # todo: only notify admins for certain types of report
     for admin in Site.admins():
