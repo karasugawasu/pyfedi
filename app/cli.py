@@ -6,6 +6,7 @@
 
 import imaplib
 import re
+import uuid
 from datetime import datetime, timedelta
 from random import randint
 from time import sleep
@@ -24,11 +25,11 @@ from app.activitypub.signature import RsaKeys, send_post_request
 from app.activitypub.util import find_actor_or_create, extract_domain_and_actor, notify_about_post
 from app.auth.util import random_token
 from app.constants import NOTIF_COMMUNITY, NOTIF_POST, NOTIF_REPLY, POST_STATUS_SCHEDULED, POST_STATUS_PUBLISHED, \
-    NOTIF_UNBAN, POST_TYPE_LINK
+    NOTIF_UNBAN, POST_TYPE_LINK, POST_TYPE_POLL, POST_TYPE_IMAGE
 from app.email import send_email
 from app.models import Settings, BannedInstances, Role, User, RolePermission, Domain, ActivityPubLog, \
     utcnow, Site, Instance, File, Notification, Post, CommunityMember, NotificationSubscription, PostReply, Language, \
-    Tag, InstanceRole, Community, DefederationSubscription, SendQueue, CommunityBan, _store_files_in_s3, PostVote
+    Tag, InstanceRole, Community, DefederationSubscription, SendQueue, CommunityBan, _store_files_in_s3, PostVote, Poll
 from app.post.routes import post_delete_post
 from app.shared.post import edit_post
 from app.shared.tasks import task_selector
@@ -36,7 +37,8 @@ from app.utils import retrieve_block_list, blocked_domains, retrieve_peertube_bl
     shorten_string, get_request, blocked_communities, gibberish, get_request_instance, \
     instance_banned, recently_upvoted_post_replies, recently_upvoted_posts, jaccard_similarity, download_defeds, \
     get_setting, set_setting, get_redis_connection, instance_online, instance_gone_forever, find_next_occurrence, \
-    guess_mime_type, communities_banned_from, joined_communities, moderating_communities, ensure_directory_exists
+    guess_mime_type, communities_banned_from, joined_communities, moderating_communities, ensure_directory_exists, \
+    render_from_tpl
 
 
 def register(app):
@@ -217,7 +219,7 @@ def register(app):
                 community = Community.query.get(expired_ban.community_id)
                 if blocked.is_local():
                     # Notify unbanned person
-                    targets_data = {'community_id': community.id}
+                    targets_data = {'gen':'0', 'community_id': community.id}
                     notify = Notification(title=shorten_string('You have been unbanned from ' + community.display_name()),
                                           url=f'/chat/ban_from_mod/{blocked.id}/{community.id}', user_id=blocked.id,
                                           author_id=1, notif_type=NOTIF_UNBAN,
@@ -290,10 +292,60 @@ def register(app):
                                                                 {'community_id': community.id}).scalar()
                 db.session.commit()
 
-            # Delete voting data after 6 months
+            # Delete voting data after configured time (default ~6 months)
             print(f'Delete old voting data {datetime.now()}')
-            db.session.execute(text('DELETE FROM "post_vote" WHERE created_at < :cutoff'), {'cutoff': utcnow() - timedelta(days=28 * 6)})
-            db.session.execute(text('DELETE FROM "post_reply_vote" WHERE created_at < :cutoff'), {'cutoff': utcnow() - timedelta(days=28 * 6)})
+            
+            # Trim voting data
+            local_months = current_app.config['KEEP_LOCAL_VOTE_DATA_TIME']
+            remote_months = current_app.config['KEEP_REMOTE_VOTE_DATA_TIME']
+
+            if local_months != -1:
+                cutoff_local = utcnow() - timedelta(days=28 * local_months)
+
+                # delete all the rows from post_vote where the user who did the vote is a local user
+                db.session.execute(text('''
+                    DELETE FROM "post_vote" pv
+                    USING "user" u, "instance" i
+                    WHERE pv.user_id = u.id
+                      AND u.instance_id = i.id
+                      AND u.instance_id = :instance_id
+                      AND pv.created_at < :cutoff
+                '''), {'cutoff': cutoff_local, 'instance_id': 1})
+
+
+
+                # delete all the rows from post_reply_vote where the user who did the vote is a local user
+                db.session.execute(text('''
+                    DELETE FROM "post_reply_vote" prv
+                    USING "user" u, "instance" i
+                    WHERE prv.user_id = u.id
+                      AND u.instance_id = i.id
+                      AND u.instance_id = :instance_id
+                      AND prv.created_at < :cutoff
+                '''), {'cutoff': cutoff_local, 'instance_id': 1})
+
+            if remote_months != -1:
+                cutoff_remote = utcnow() - timedelta(days=28 * remote_months)
+                # delete all the rows from post_vote where the user who did the vote is a remote user
+                db.session.execute(text('''
+                    DELETE FROM "post_vote" pv
+                    USING "user" u, "instance" i
+                    WHERE pv.user_id = u.id
+                      AND u.instance_id = i.id
+                      AND u.instance_id != :instance_id
+                      AND pv.created_at < :cutoff
+                '''), {'cutoff': cutoff_remote, 'instance_id': 1})
+
+                # delete all the rows from post_reply_vote where the user who did the vote is a remote user
+                db.session.execute(text('''
+                    DELETE FROM "post_reply_vote" prv
+                    USING "user" u, "instance" i
+                    WHERE prv.user_id = u.id
+                      AND u.instance_id = i.id
+                      AND u.instance_id != :instance_id
+                      AND prv.created_at < :cutoff
+                '''), {'cutoff': cutoff_remote, 'instance_id': 1})
+
             db.session.commit()
 
             # Un-ban after ban expires
@@ -539,17 +591,23 @@ def register(app):
     def publish_scheduled_posts():
         with app.app_context():
             for post in Post.query.filter(Post.status == POST_STATUS_SCHEDULED, Post.scheduled_for < utcnow(),
-                                          Post.deleted == False):
-                if post.repeat and post.repeat != 'none':
+                                          Post.deleted == False, Post.repeat != 'none'):
+                if post.repeat and post.repeat != 'once':
                     next_occurrence = post.scheduled_for + find_next_occurrence(post)
                 else:
                     next_occurrence = None
+
                 # One shot scheduled post
                 if not next_occurrence:
                     post.status = POST_STATUS_PUBLISHED
                     post.scheduled_for = None
                     post.posted_at = utcnow()
                     post.edited_at = None
+                    post.title = render_from_tpl(post.title)
+                    if post.type == POST_TYPE_POLL:
+                        poll = Poll.query.get(post.id)
+                        time_difference = poll.end_poll - post.created_at
+                        poll.end_poll += time_difference
                     db.session.commit()
 
                     # Federate post
@@ -570,16 +628,23 @@ def register(app):
                     scheduled_post.posted_at = utcnow()
                     scheduled_post.edited_at = None
                     scheduled_post.status = POST_STATUS_PUBLISHED
+                    scheduled_post.title = render_from_tpl(scheduled_post.title)
                     db.session.add(scheduled_post)
                     db.session.commit()
 
                     scheduled_post.ap_id = f"https://{current_app.config['SERVER_NAME']}/post/{scheduled_post.id}"
                     # Update the scheduled_for with the next occurrence date
                     post.scheduled_for = next_occurrence
+
+                    # Small hack to make image urls unique and avoid creating
+                    # a crosspost when scheduling an image post
+                    if post.type == POST_TYPE_IMAGE:
+                        post.image.source_url += f"?uid={uuid.uuid4().hex}"
+
                     vote = PostVote(user_id=post.user_id, post_id=scheduled_post.id, author_id=scheduled_post.user_id, effect=1)
                     db.session.add(vote)
                     db.session.commit()
-    
+
                     task_selector('make_post', post_id=scheduled_post.id)
                     notify_about_post(scheduled_post)
 
@@ -973,6 +1038,7 @@ def register(app):
     @app.cli.command("remove-unnecessary-images")
     def remove_unnecessary_images():
         # link posts only need a thumbnail but for a long time we have been generating both a thumbnail and a medium-sized image
+        # AS OF JUN 2025 link posts DO need a medium-sized version, as some mobile apps need larger images. DO NOT RUN THIS.
         with app.app_context():
             import boto3
             sql = '''select file_path from "file" as f 

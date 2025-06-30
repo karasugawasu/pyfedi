@@ -25,23 +25,29 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0) ->
                         'ap_id': post.profile_id(),
                         'local': post.is_local(),
                         'language_id': post.language_id if post.language_id else 0,
-                        'removed': post.deleted,
+                        'removed': False,
                         'locked': not post.comments_enabled})
         if post.body:
             v1['body'] = post.body
         if post.edited_at:
             v1['edited_at'] = post.edited_at.isoformat() + 'Z'
+        if post.deleted == True:
+            if post.deleted_by and post.user_id != post.deleted_by:
+                v1['removed'] = True
+                v1['deleted'] = False
         if post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO:
             if post.url:
                 v1['url'] = post.url
             if post.image_id:
                 v1['thumbnail_url'] = post.image.medium_url()
+                v1['small_thumbnail_url'] = post.image.thumbnail_url()
                 if post.image.alt_text:
                     v1['alt_text'] = post.image.alt_text
         if post.type == POST_TYPE_IMAGE:
             if post.image_id:
                 v1['url'] = post.image.view_url()
                 v1['thumbnail_url'] = post.image.medium_url()
+                v1['small_thumbnail_url'] = post.image.thumbnail_url()
                 if post.image.alt_text:
                     v1['alt_text'] = post.image.alt_text
 
@@ -254,6 +260,8 @@ def community_view(community: Community | int | str, variant, stub=False, user_i
                    'ap_domain': community.ap_domain})
         if community.description and not stub:
             v1['description'] = community.description
+        if not stub:
+            v1['posting_warning'] = community.posting_warning
         if community.icon_id:
             v1['icon'] = community.icon.medium_url()
         if community.image_id and not stub:
@@ -361,6 +369,7 @@ def reply_view(reply: PostReply | int, variant: int, user_id=None, my_vote=0, re
             v1['body'] = ''
             if reply.deleted_by and reply.user_id != reply.deleted_by:
                 v1['removed'] = True
+                v1['deleted'] = False
 
         return v1
 
@@ -574,7 +583,7 @@ def instance_view(instance: Instance | int, variant) -> dict:
         return v1
 
 
-def private_message_view(cm: ChatMessage, user_id, ap_id) -> dict:
+def private_message_view(cm: ChatMessage, variant) -> dict:
     creator = user_view(cm.sender_id, variant=1)
     recipient = user_view(cm.recipient_id, variant=1)
     is_local = creator['instance_id'] == 1
@@ -583,19 +592,27 @@ def private_message_view(cm: ChatMessage, user_id, ap_id) -> dict:
       'private_message': {
         'id': cm.id,
         'creator_id': cm.sender_id,
-        'recipient_id': user_id,
+        'recipient_id': cm.recipient_id,
         'content': cm.body,
         'deleted': False,
         'read': cm.read,
         'published': cm.created_at.isoformat() + 'Z',
-        'ap_id': ap_id,
+        'ap_id': cm.ap_id,
         'local': is_local
       },
       'creator': creator,
       'recipient': recipient
     }
 
-    return v1
+    if variant == 1:
+        return v1
+
+    v2 = {
+      'private_message_view': v1
+    }
+
+    if variant == 2:
+        return v2
 
 
 def site_view(user) -> dict:

@@ -106,7 +106,7 @@ def _get_user_posts_and_replies(user, page):
         reply_select = f"SELECT id, posted_at, 'reply' AS type FROM post_reply WHERE user_id={user_id} AND (deleted = 'False' OR deleted_by = {user_id})"
     else:
         # Everyone else sees only non-deleted posts/replies
-        post_select = f"SELECT id, posted_at, 'post' AS type FROM post WHERE user_id = {user_id} AND deleted = 'False'"
+        post_select = f"SELECT id, posted_at, 'post' AS type FROM post WHERE user_id = {user_id} AND deleted = 'False' and status > {POST_STATUS_REVIEWING}"
         reply_select = f"SELECT id, posted_at, 'reply' AS type FROM post_reply WHERE user_id={user_id} AND deleted = 'False'"
 
     full_query = post_select + " UNION " + reply_select + f" ORDER BY posted_at DESC LIMIT {per_page + 1} OFFSET {offset_val};"
@@ -148,7 +148,7 @@ def _get_user_upvoted_posts(user):
 
 def _get_user_subscribed_communities(user):
     """Get communities subscribed to by user."""
-    if current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_staff() or current_user.is_admin()):
+    if current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_staff() or current_user.is_admin() or user.show_subscribed_communities):
         return Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id).all()
     return []
 
@@ -530,10 +530,8 @@ def user_settings():
         current_user.font = form.font.data
         current_user.additional_css = form.additional_css.data
         session['ui_language'] = form.interface_language.data
-        current_user.vote_privately = form.vote_privately.data
-        if form.vote_privately.data:
-            if current_user.alt_user_name is None or current_user.alt_user_name == '':
-                current_user.alt_user_name = gibberish(randint(8, 20))
+        current_user.vote_privately = not form.federate_votes.data
+        current_user.show_subscribed_communities = form.show_subscribed_communities.data
         if propagate_indexable:
             db.session.execute(text('UPDATE "post" set indexable = :indexable WHERE user_id = :user_id'),
                                {'user_id': current_user.id,
@@ -558,7 +556,7 @@ def user_settings():
         form.theme.data = current_user.theme
         form.markdown_editor.data = current_user.markdown_editor
         form.interface_language.data = current_user.interface_language
-        form.vote_privately.data = current_user.vote_privately
+        form.federate_votes.data = not current_user.vote_privately
         form.feed_auto_follow.data = current_user.feed_auto_follow
         form.feed_auto_leave.data = current_user.feed_auto_leave
         form.read_languages.data = current_user.read_language_ids
@@ -566,6 +564,7 @@ def user_settings():
         form.accept_private_messages.data = current_user.accept_private_messages
         form.font.data = current_user.font
         form.additional_css.data = current_user.additional_css
+        form.show_subscribed_communities.data = current_user.show_subscribed_communities
 
     return render_template('user/edit_settings.html', title=_('Change settings'), form=form, user=current_user,
                            )
@@ -1116,7 +1115,7 @@ def notifications():
     return render_template('user/notifications.html', title=_('Notifications'), notifications=notification_list,
                            notification_types=notification_types, has_notifications=has_notifications,
                            user=current_user, notification_links=notification_links, current_filter=current_filter,
-                           site=g.site
+                           site=g.site, markdown_to_html=markdown_to_html,
                            )
 
 
@@ -1143,7 +1142,39 @@ def notification_delete(notification_id):
             current_user.unread_notifications -= 1
         db.session.delete(notification)
         db.session.commit()
+        if request.headers.get("HX-Request"):
+            return ""
     return redirect(url_for('user.notifications'))
+
+
+@bp.route('/notification/<int:notification_id>/read', methods=['POST'])
+@login_required
+def notification_read(notification_id):
+    notification = Notification.query.get_or_404(notification_id)
+    if notification.user_id == current_user.id:
+        if not notification.read:
+            current_user.unread_notifications -= 1
+        notification.read = True
+        db.session.commit()
+        return render_template(f"user/notifs/{notification.notif_type}.html", notification=notification,
+                               markdown_to_html=markdown_to_html)
+    else:
+        abort(403)
+
+
+@bp.route('/notification/<int:notification_id>/unread', methods=['POST'])
+@login_required
+def notification_unread(notification_id):
+    notification = Notification.query.get_or_404(notification_id)
+    if notification.user_id == current_user.id:
+        if notification.read:
+            current_user.unread_notifications += 1
+        notification.read = False
+        db.session.commit()
+        return render_template(f"user/notifs/{notification.notif_type}.html", notification=notification,
+                               markdown_to_html=markdown_to_html)
+    else:
+        abort(403)
 
 
 @bp.route('/notifications/all_read', methods=['GET', 'POST'])
