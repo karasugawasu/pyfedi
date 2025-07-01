@@ -14,7 +14,7 @@ from furl import furl
 from app import db, constants, cache, limiter, celery
 from app.activitypub.signature import default_context, send_post_request
 from app.activitypub.util import update_post_from_activity
-from app.community.util import send_to_remote_instance, flair_from_form
+from app.community.util import send_to_remote_instance, flair_from_form, normalize_font_size
 from app.inoculation import inoculation
 from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm, ConfirmationForm, \
     ConfirmationMultiDeleteForm, EditReplyForm, FlairPostForm, DeleteConfirmationForm
@@ -225,6 +225,16 @@ def show_post(post_id: int):
             user = None
 
         community_flair = CommunityFlair.query.filter(CommunityFlair.community_id == post.community_id).order_by(CommunityFlair.flair).all()
+        tags = db.session.execute(text("""SELECT t.*, COUNT(post.id) AS pc
+        FROM "tag" AS t
+        INNER JOIN post_tag pt ON t.id = pt.tag_id
+        INNER JOIN "post" ON pt.post_id = post.id
+        WHERE post.community_id = :community_id
+          AND t.banned IS FALSE
+        GROUP BY t.id
+        ORDER BY pc DESC
+        LIMIT 30;"""), {'community_id': post.community_id}).mappings().all()
+        tags = [dict(row) for row in tags]
         # Get the language of the user being replied to
         recipient_language_id = post.language_id or post.author.language_id
         recipient_language_code = None
@@ -244,7 +254,7 @@ def show_post(post_id: int):
                                 description=description, og_image=og_image, show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff(),
                                 autoplay=request.args.get('autoplay', False), archive_link=archive_link,
                                 noindex=not post.author.indexable, preconnect=post.url if post.url else None,
-                                recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
+                                recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted, tags=normalize_font_size(tags),
                                 recently_upvoted_replies=recently_upvoted_replies, recently_downvoted_replies=recently_downvoted_replies,
                                 reply_collapse_threshold=reply_collapse_threshold,
                                 etag=f"{post.id}{sort}_{hash(post.last_active)}", markdown_editor=current_user.is_authenticated and current_user.markdown_editor,
@@ -1207,30 +1217,27 @@ def post_set_flair(post_id):
         
         if request.headers.get("HX-Request"):
             curr_url = request.headers.get("HX-Current-Url")
-            # Request came from htmx, send back just a partial
-            flair_id = request.args.get('flair_id', None)
-            if not flair_id:
-                # Something went wrong
-                return ""
+            flair_sent = []
             
-            flair_id = int(flair_id)
-            flair = CommunityFlair.query.get(flair_id) if flair_id else None
-            if not flair:
-                # Something went wrong
-                return ""
+
+            form_fields = [key for key in request.form]
+            for field in form_fields:
+                if field.startswith("flair-"):
+                    flair_sent.append(int(field.partition("flair-")[2]))
             
-            community_flair = CommunityFlair.query.filter(CommunityFlair.community_id == post.community_id).order_by(CommunityFlair.flair).all()
-            allowed_flair = [int(item.id) for item in community_flair]
-            if flair_id not in allowed_flair:
-                # Something went wrong, do nothing
-                return ""
-            
-            if flair in post.flair:
-                # Remove flair from post
-                post.flair.remove(flair)
-            else:
-                # Add flair to post
-                post.flair.append(flair)
+            flair_objs = [CommunityFlair.query.get(flair_id) for flair_id in flair_sent]
+            comm_flair = CommunityFlair.query.filter(CommunityFlair.community_id == post.community_id).order_by(CommunityFlair.flair).all()
+
+            # Reset flair for the post
+            post.flair = []
+
+            for flair in flair_objs:
+                if flair not in comm_flair:
+                    # Flair from wrong community, ignore
+                    continue
+                else:
+                    # Add flair to post
+                    post.flair.append(flair)
             
             db.session.commit()
             if post.status == POST_STATUS_PUBLISHED and post.author.is_local():
@@ -1282,7 +1289,11 @@ def post_flair_list(post_id):
         if not flair_choices:
             return ""
         
-        return render_template('post/_flair_choices.html', flair_choices=flair_choices, post_id=post.id, post_preview=post_preview)
+        flair_objs = [CommunityFlair.query.get(choice[0]) for choice in flair_choices]
+        post_flair = [flair.id for flair in post.flair]
+        
+        return render_template('post/_flair_choices.html', post_id=post.id, post_preview=post_preview,
+                               flair_objs=flair_objs, post_flair=post_flair)
     else:
         abort(401)
 
@@ -1474,7 +1485,7 @@ def post_reply_edit(post_id: int, comment_id: int):
         abort(401)
 
 
-@bp.route('/post/<int:post_id>/comment/<int:comment_id>/delete', methods=['POST'])
+@bp.route('/post/<int:post_id>/comment/<int:comment_id>/delete', methods=['GET', 'POST'])
 @login_required
 def post_reply_delete(post_id: int, comment_id: int):
     post = Post.query.get_or_404(post_id)
@@ -1483,46 +1494,53 @@ def post_reply_delete(post_id: int, comment_id: int):
 
     form = ConfirmationMultiDeleteForm()
 
-    if form.validate_on_submit():
-        if form.also_delete_replies.data:
-            num_deleted = 0
-            # Find all the post_replys that have the same IDs in the path. NB the @>
-            child_post_ids = db.session.execute(text('select id from "post_reply" where path @> ARRAY[:parent_path]'),
-                                                {'parent_path': post_reply.path}).scalars()
-            for child_post_id in child_post_ids:
-                if child_post_id != 0:
-                    reply = PostReply.query.get_or_404(child_post_id)
+    if post_reply.user_id == current_user.id or community.is_moderator() or community.is_owner() or current_user.is_admin_or_staff():
+        if form.validate_on_submit():
+            if form.also_delete_replies.data:
+                num_deleted = 0
+                # Find all the post_replys that have the same IDs in the path. NB the @>
+                child_post_ids = db.session.execute(
+                    text('select id from "post_reply" where path @> ARRAY[:parent_path]'),
+                    {'parent_path': post_reply.path}).scalars()
+                for child_post_id in child_post_ids:
+                    if child_post_id != 0:
+                        reply = PostReply.query.get_or_404(child_post_id)
 
-                    if reply.user_id == current_user.id:
-                        # User is deleting their own reply
-                        delete_reply(reply.id, SRC_WEB, None)
-                    elif post.community.is_moderator() or current_user.is_admin():
-                        # Moderator or admin is deleting the reply
-                        if form.reason.data:
-                            reason = 'Deleted by mod: ' + form.reason.data
-                        else:
-                            reason = 'Deleted by mod'
-                        mod_remove_reply(reply.id, reason, SRC_WEB, None)
-                    num_deleted += 1
+                        if reply.user_id == current_user.id:
+                            # User is deleting their own reply
+                            delete_reply(reply.id, SRC_WEB, None)
+                        elif post.community.is_moderator() or current_user.is_admin():
+                            # Moderator or admin is deleting the reply
+                            if form.reason.data:
+                                reason = 'Deleted by mod: ' + form.reason.data
+                            else:
+                                reason = 'Deleted by mod'
+                            mod_remove_reply(reply.id, reason, SRC_WEB, None)
+                        num_deleted += 1
+            else:
+                num_deleted = 0
+                if post_reply.user_id == current_user.id:
+                    # User is deleting their own reply
+                    delete_reply(post_reply.id, SRC_WEB, None)
+                    num_deleted = 1
+                elif community.is_moderator() or current_user.is_admin():
+                    # Moderator or admin is deleting the reply
+                    if form.reason.data:
+                        reason = 'Deleted by mod: ' + form.reason.data
+                    else:
+                        reason = 'Deleted by mod'
+                    mod_remove_reply(post_reply.id, reason, SRC_WEB, None)
+                    num_deleted = 1
+            if num_deleted > 0:
+                flash(_('Deleted %(num_deleted)s comments.', num_deleted=num_deleted))
+            return redirect(url_for('activitypub.post_ap', post_id=post.id, _anchor=f'comment_{comment_id}'))
         else:
-            num_deleted = 0
-            if post_reply.user_id == current_user.id:
-                # User is deleting their own reply
-                delete_reply(post_reply.id, SRC_WEB, None)
-                num_deleted = 1
-            elif community.is_moderator() or current_user.is_admin():
-                # Moderator or admin is deleting the reply
-                if form.reason.data:
-                    reason = 'Deleted by mod: ' + form.reason.data
-                else:
-                    reason = 'Deleted by mod'
-                mod_remove_reply(post_reply.id, reason, SRC_WEB, None)
-                num_deleted = 1
-        if num_deleted > 0:
-            flash(_('Deleted %(num_deleted)s comments.', num_deleted=num_deleted))
-        return redirect(url_for('activitypub.post_ap', post_id=post.id, _anchor=f'comment_{comment_id}'))
+            return render_template('generic_form.html', title=_('Are you sure you want to delete this comment?'),
+                                   form=form)
     else:
-        return render_template('generic_form.html', title=_('Are you sure you want to delete this comment?'), form=form)
+        abort(403)
+
+
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/restore', methods=['POST'])
