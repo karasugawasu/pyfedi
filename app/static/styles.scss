@@ -4,7 +4,6 @@
 @import "scss/typography";
 @import "scss/controls";
 
-
 $min-touch-target: 44px;
 
 @view-transition {
@@ -324,6 +323,25 @@ div.navbar {
   }
 }
 
+form {
+  > .mb-3 {
+    margin-bottom: 1.1rem;
+
+    &.required {
+      > label {
+        &:after {
+          content: '*';
+          color: red;
+          margin-left: 2px;
+          font-size: 80%;
+          position: relative;
+          top: -1px;
+        }
+      }
+    }
+  }
+}
+
 .form-group {
   margin-bottom: 1.1rem;
 
@@ -339,6 +357,11 @@ div.navbar {
       }
     }
   }
+}
+
+.form-label {
+  font-weight: 500;
+  margin-bottom: 0.25rem;
 }
 
 .post_reply_form {
@@ -779,6 +802,11 @@ time {
   }
 }
 
+.community_instance {
+  margin-left: -2px;
+  display: none;
+}
+
 .max_width_512 {
   max-width: 512px;
   display: inline-block;
@@ -1106,7 +1134,8 @@ time {
       }
     }
     &.voted_down {
-      color: darkred;
+      /* light red with a little transparnecy */
+      color: rgba(251, 74, 74, 0.846); 
       .fe {
         font-weight: bold;
         &:before {
@@ -1576,7 +1605,7 @@ a.unread, div.unread {
   float: right;
 }
 
-.post_body, .comment_body {
+.post_body, .comment_body, #preview, .reply_preview {
   word-wrap: break-word;
 
   img {
@@ -1894,6 +1923,26 @@ h1 .warning_badge {
     background-color: $super-dark-grey;
     color: $lightest-grey;
   }
+}
+
+[data-bs-theme="dark"] .full .ts-control {
+  background-color: #424549 !important;
+  color: #eee !important;
+}
+
+[data-bs-theme="dark"] .ts-dropdown {
+  background-color: #424549 !important;
+  color: #eee !important;
+}
+
+[data-bs-theme="dark"] .ts-dropdown .active {
+  background-color: #424549 !important;
+  color: #eee !important;
+}
+
+[data-bs-theme="dark"] .ts-dropdown .optgroup-header {
+  background-color: #424549 !important;
+  color: #eee !important;
 }
 
 .community_icon {

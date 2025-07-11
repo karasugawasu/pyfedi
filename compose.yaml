@@ -1,7 +1,7 @@
 services:
 
   db:
-    shm_size: 128mb
+    shm_size: 512mb
     image: postgres
     restart: unless-stopped
     user: "1000:1000"
@@ -17,6 +17,8 @@ services:
     restart: unless-stopped
     env_file:
      - ./.env.docker
+    volumes:
+     - redis_data:/data
     networks:
       - pf_network
 
@@ -38,6 +40,12 @@ services:
      - ./tmp/:/app/app/static/tmp/
     networks:
       - pf_network
+    healthcheck:
+      test: ["CMD", "celery", "-A", "celery_worker_docker.celery", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   web:
     build:
@@ -59,6 +67,12 @@ services:
       - '8030:5000'
     networks:
       - pf_network
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "gunicorn"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   adminer:
     image: adminer
@@ -75,3 +89,6 @@ networks:
   pf_network:
     name: pf_network
     external: false
+
+volumes:
+  redis_data:

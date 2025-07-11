@@ -44,7 +44,7 @@
 </h3>
 <div class="author small">{% if show_post_community -%}<a href="{{ url_for('activitypub.community_profile', actor=post.community.link(), _external=embed) }}" {{ 'target="_blank"' if embed }} aria-label="{{ _('Go to community %(name)s', name=post.community.name) }}">
     {% if post.community.icon_id and not low_bandwidth %}<img class="community_icon_small rounded-circle" src="{{ post.community.icon_image('tiny') }}" alt="Community icon" />{% endif -%}
-    c/{{ post.community.name }}</a>{% endif -%}
+    c/{{ post.community.name }}</a><span class="community_instance text-muted {{ 'local' if post.community.is_local() }}">@{{ post.community.ap_domain }}</span> {% endif -%}
     by {{ render_username(post.author, htmx_redirect_back_to=request.path + '#post_' + str(post.id), current_user=current_user, low_bandwidth=low_bandwidth, admin_ids=admin_ids, user_notes=user_notes) }}
     {% if user_flair and post.author.id in user_flair %}<span class="user_flair">{{ user_flair[post.author.id] }}</span>{% endif %}
     <time datetime="{{ post.last_active }}" title="{{ post.last_active }}">{{ post.posted_at_localized(sort, locale) }}</time></div>
@@ -65,14 +65,14 @@
                 {% if (can_upvote_here or can_upvote(current_user, post.community, communities_banned_from_list)) and not disable_voting -%}
                         <div class="upvote_button {{ 'voted_up' if in_sorted_list(recently_upvoted, post.id) }}" role="button" aria-label="{{ _('UpVote button, %(count)d upvotes so far.', count=post.up_votes) }}" aria-live="assertive"
                          hx-post="/post/{{ post.id }}/upvote/default" hx-trigger="click throttle:1s" hx-target="closest .voting_buttons_new" tabindex="0">
-                                <span class="fe fe-arrow-up"></span>
+                                <span class="fe {{ 'fe-arrow-up-circle' if in_sorted_list(recently_upvoted, post.id) else 'fe-arrow-up' }}"></span>
                         </div>
                 {% endif -%}
                 <span class="score" title="{{ post.up_votes }}, {{ post.down_votes }}" aria-live="assertive" aria-label="{{ _('Score: ') }}{{ post.up_votes - post.down_votes }}.">{{ shorten_number(post.up_votes - post.down_votes) }}</span>
                 {%- if (can_downvote_here or can_downvote(current_user, post.community, communities_banned_from_list)) and not disable_voting -%}
                         <div class="downvote_button {{ 'voted_down' if in_sorted_list(recently_downvoted, post.id) }}" role="button" aria-label="{{ _('DownVote button, %(count)d downvotes so far.', count=post.down_votes) }}" aria-live="assertive"
                          hx-post="/post/{{ post.id }}/downvote/default" hx-trigger="click throttle:1s" hx-target="closest .voting_buttons_new" tabindex="0">
-                                <span class="fe fe-arrow-down"></span>
+                                <span class="fe {{ 'fe-arrow-down-circle' if in_sorted_list(recently_downvoted, post.id) else 'fe-arrow-down' }}"></span>
                         </div>
                 {%- endif -%}
         {% else -%}
