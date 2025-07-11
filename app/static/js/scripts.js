@@ -10,6 +10,7 @@ if(!setTheme) {
 
 // fires after DOM is ready for manipulation
 document.addEventListener("DOMContentLoaded", function () {
+    let low_bandwidth = document.body.classList.contains('low_bandwidth');
     if(navigator.getBattery) {
         navigator.getBattery().then(function(battery) {
             // Only load youtube videos in teasers if there is plenty of power available
@@ -34,8 +35,10 @@ document.addEventListener("DOMContentLoaded", function () {
     setupMarkdownEditorEnabler();
     setupAddPollChoice();
     setupShowElementLinks();
-    setupLightboxTeaser();
-    setupLightboxPostBody();
+    if (!low_bandwidth) {
+      setupLightboxTeaser();
+      setupLightboxPostBody();
+    }
     setupPostTeaserHandler();
     setupPostTypeSwitcher();
     setupSelectNavigation();
@@ -1733,6 +1736,9 @@ function setupVotingLongPress() {
     votingElements.forEach(element => {
         let longPressTimer;
         let isLongPress = false;
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let hasMoved = false;
 
         // Mouse events
         element.addEventListener('mousedown', function(event) {
@@ -1754,10 +1760,29 @@ function setupVotingLongPress() {
         // Touch events for mobile
         element.addEventListener('touchstart', function(event) {
             isLongPress = false;
+            hasMoved = false;
+            touchStartX = event.touches[0].clientX;
+            touchStartY = event.touches[0].clientY;
             longPressTimer = setTimeout(() => {
-                isLongPress = true;
-                openVotingDialog(element);
+                if (!hasMoved) {
+                    isLongPress = true;
+                    openVotingDialog(element);
+                }
             }, 2000); // 2 seconds
+        });
+
+        element.addEventListener('touchmove', function(event) {
+            if (!hasMoved) {
+                const touch = event.touches[0];
+                const deltaX = Math.abs(touch.clientX - touchStartX);
+                const deltaY = Math.abs(touch.clientY - touchStartY);
+                
+                // If the user has moved more than 10 pixels in any direction, consider it scrolling
+                if (deltaX > 10 || deltaY > 10) {
+                    hasMoved = true;
+                    clearTimeout(longPressTimer);
+                }
+            }
         });
 
         element.addEventListener('touchend', function(event) {
