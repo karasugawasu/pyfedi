@@ -38,7 +38,7 @@ from app.utils import render_template, markdown_to_html, user_access, markdown_t
     read_language_choices, request_etag_matches, return_304, mimetype_from_url, notif_id_to_string, \
     login_required_if_private_instance, recently_upvoted_posts, recently_downvoted_posts, recently_upvoted_post_replies, \
     recently_downvoted_post_replies, reported_posts, user_notes, login_required, get_setting, filtered_out_communities, \
-    is_valid_xml_utf8
+    moderating_communities_ids, is_valid_xml_utf8
 
 
 @bp.route('/people', methods=['GET', 'POST'])
@@ -222,6 +222,7 @@ def show_profile(user):
                            noindex=not user.indexable, show_post_community=True, hide_vote_buttons=True,
                            show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff(),
                            reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                           moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                            rss_feed=f"https://{current_app.config['SERVER_NAME']}/u/{user.link()}/feed" if user.post_count > 0 else None,
                            rss_feed_name=f"{user.display_name()} on {g.site.name}" if user.post_count > 0 else None,
                            user_has_public_feeds=user_has_public_feeds, user_public_feeds=user_public_feeds,
@@ -254,8 +255,8 @@ def edit_profile(actor):
                   'warning')
         current_user.email = form.email.data.strip()
         password_updated = False
-        if form.password_field.data.strip() != '':
-            current_user.set_password(form.password_field.data)
+        if form.password.data.strip() != '':
+            current_user.set_password(form.password.data)
             current_user.password_updated_at = utcnow()
             password_updated = True
         current_user.about = piefed_markdown_to_lemmy_markdown(form.about.data)
@@ -309,7 +310,7 @@ def edit_profile(actor):
         # Sync to LDAP if password was provided
         if password_updated:
             try:
-                sync_user_to_ldap(current_user.user_name, current_user.email, form.password_field.data.strip())
+                sync_user_to_ldap(current_user.user_name, current_user.email, form.password.data.strip())
             except Exception as e:
                 # Log error but don't fail the profile update
                 current_app.logger.error(f"LDAP sync failed for user {current_user.user_name}: {e}")
@@ -329,7 +330,7 @@ def edit_profile(actor):
             i += 1
         form.matrixuserid.data = current_user.matrix_user_id
         form.bot.data = current_user.bot
-        form.password_field.data = ''
+        form.password.data = ''
 
     return render_template('user/edit_profile.html', title=_('Edit profile'), form=form, user=current_user,
                            markdown_editor=current_user.markdown_editor, delete_form=delete_form,
@@ -926,18 +927,19 @@ def report_profile(actor):
                 goto = request.args.get('redirect') if 'redirect' in request.args else f'/u/{actor}'
                 return redirect(goto)
 
-            report = Report(reasons=form.reasons_to_string(form.reasons.data), description=form.description.data,
-                            type=0, reporter_id=current_user.id, suspect_user_id=user.id, source_instance_id=1)
-            db.session.add(report)
-
-            # Notify site admin
-            already_notified = set()
             targets_data = {'gen': '0',
                             'suspect_user_id': user.id,
                             'suspect_user_user_name': user.ap_id if user.ap_id else user.user_name,
                             'reporter_id': current_user.id,
                             'reporter_user_name': current_user.user_name
                             }
+            report = Report(reasons=form.reasons_to_string(form.reasons.data), description=form.description.data,
+                            type=0, reporter_id=current_user.id, suspect_user_id=user.id, 
+                            source_instance_id=1, targets=targets_data)
+            db.session.add(report)
+
+            # Notify site admin
+            already_notified = set()
             for admin in Site.admins():
                 if admin.id not in already_notified:
                     notify = Notification(title='Reported user', url='/admin/reports', user_id=admin.id,
