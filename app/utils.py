@@ -4,6 +4,7 @@ import base64
 import bisect
 import hashlib
 import mimetypes
+import math
 import random
 import urllib
 import warnings
@@ -23,6 +24,7 @@ import jwt
 import markdown2
 import redis
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
+import orjson
 
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 import os
@@ -514,13 +516,22 @@ def handle_double_bolds(text: str) -> str:
     return text
 
 
+def escape_img(raw_html: str) -> str:
+    """Prevents embedding images for places where an image would break formatting."""
+    
+    re_img = re.compile(r"<img.+?>")
+    raw_html = re_img.sub(r"<code><image placeholder></code>", raw_html)
+
+    return raw_html
+
+
 # use this for Markdown irrespective of origin, as it can deal with both soft break newlines ('\n' used by PieFed) and hard break newlines ('  \n' or ' \\n')
 # ' \\n' will create <br /><br /> instead of just <br />, but hopefully that's acceptable.
-def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
-    # Lemmyの改行の仕方と揃える
-    # on_newlineをFalseにして、スペース2つを見つけたらバックスラッシュを入れてあげる
-    markdown_text = convert_soft_breaks(markdown_text)
+def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True) -> str:
     if markdown_text:
+        # Lemmyの改行の仕方と揃える
+        # on_newlineをFalseにして、スペース2つを見つけたらバックスラッシュを入れてあげる
+        markdown_text = convert_soft_breaks(markdown_text)
 
         # Escape <...> if it’s not a real HTML tag
         markdown_text = escape_non_html_angle_brackets(
@@ -541,6 +552,10 @@ def markdown_to_html(markdown_text, anchors_new_tab=True) -> str:
                                     'breaks': {'on_newline': False, 'on_backslash': True}, 'tag-friendly': True, 'task_list': True, 'footnotes': True})
             except TypeError:
                 raw_html = ''
+        
+        if not allow_img:
+            raw_html = escape_img(raw_html)
+
         return allowlist_html(raw_html, a_target='_blank' if anchors_new_tab else '')
     else:
         return ''
@@ -2258,6 +2273,21 @@ class CaptchaField(StringField):
 user2_cache = {}
 
 
+def wilson_confidence_lower_bound(ups, downs, z = 1.281551565545) -> float:
+    if ups is None or ups < 0:
+        ups = 0
+    if downs is None or downs < 0:
+        downs = 0
+    n = ups + downs
+    if n == 0:
+        return 0.0
+    p = float(ups) / n
+    left = p + 1 / (2 * n) * z * z
+    right = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    under = 1 + 1 / n * z * z
+    return (left - right) / under
+
+
 def jaccard_similarity(user1_upvoted: set, user2_id: int):
     if user2_id not in user2_cache:
         user2_upvoted_posts = ['post/' + str(id) for id in recently_upvoted_posts(user2_id)]
@@ -2453,6 +2483,20 @@ def post_ids_to_models(post_ids: List[int], sort: str):
     elif sort == 'active':
         posts = posts.order_by(desc(Post.last_active))
     return posts
+
+
+def total_comments_on_post_and_cross_posts(post_id):
+    sql = """SELECT
+            p.reply_count + (
+                SELECT COALESCE(SUM(cp.reply_count), 0)
+                FROM post cp
+                WHERE cp.id = ANY(p.cross_posts)
+            ) AS total_reply_count
+        FROM post p
+        WHERE p.id = :post_id;
+    """
+    result = db.session.execute(text(sql), {'post_id': post_id}).scalar_one_or_none()
+    return result if result is not None else 0
 
 
 def store_files_in_s3():
@@ -2892,6 +2936,15 @@ def get_timezones():
 def low_value_reposters() -> List[int]:
     result = db.session.execute(text('SELECT id FROM "user" WHERE bot = true or bot_override = true or suppress_crossposts = true')).scalars()
     return list(result)
+
+
+def orjson_response(obj, status=200, headers=None):
+    return Response(
+        response=orjson.dumps(obj),
+        status=status,
+        headers=headers,
+        mimetype="application/json"
+    )
 
 
 def is_valid_xml_utf8(pystring):

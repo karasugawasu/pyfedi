@@ -1047,6 +1047,9 @@ time {
     p {
       padding-right: 9px;
     }
+    p:last-child {
+      margin-bottom: 0px;
+    }
   }
 
   &:first-child {
@@ -1326,7 +1329,6 @@ time {
   }
 
   .comment_actions {
-    margin-top: -18px;
     display: flex;
     min-height: $min-touch-target;
     container-type: inline-size;
@@ -1576,6 +1578,60 @@ a.unread, div.unread {
   }
 }
 
+.accordion-preview {
+  .collapse {
+    &:not(.show) {
+      display: block;
+
+      p:last-of-type {
+        margin-bottom: 0;
+      }
+
+      .accordion-body {
+        max-height: 4rem;
+        position: relative;
+        overflow-y: hidden;
+        overflow-x: auto;
+
+        &:after {
+          position: absolute;
+          bottom: 0;
+          left: 0;
+          height: 100%;
+          width: 100%;
+          content: "";
+          background: linear-gradient(to bottom,
+            transparent,
+            transparent 60%,
+            var(--bs-secondary-bg)
+          );
+          pointer-events: none;
+        }
+      }
+    }
+  }
+
+  .collapsing {
+    transition: none;
+  }
+
+  .accordion-item:first-of-type {
+    .accordion-button {
+      border-top-right-radius: 0;
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+
+      &:not(.collapsed) {
+        background-color: var(--bs-accordion-active-bg) !important;
+      }
+    }
+  }
+}
+
+.notification-table {
+  table-layout: fixed;
+}
+
 .profile_action_buttons, .rh_action_buttons {
   float: right;
 }
@@ -1605,7 +1661,7 @@ a.unread, div.unread {
   float: right;
 }
 
-.post_body, .comment_body, #preview, .reply_preview {
+.post_body, .comment_body, #preview, .reply_preview, .accordion-body {
   word-wrap: break-word;
 
   img {
@@ -2397,6 +2453,23 @@ form {
     }
   }
 
+}
+
+/* password eye */
+.password-container {
+	position: relative;
+}
+
+.showPassword, .hidePassword {
+	position: absolute;
+	right: 6px;
+    top: 30px;
+
+	img {
+		opacity: 0.5;
+  	    width: 30px;
+  		height: 30px;
+	}
 }
 
 .blink {

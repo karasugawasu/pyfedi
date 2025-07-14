@@ -12,7 +12,7 @@ from slugify import slugify
 from sqlalchemy import or_, asc, desc, text
 from sqlalchemy.orm.exc import NoResultFound
 
-from app import db, cache, celery, httpx_client, limiter
+from app import db, cache, celery, httpx_client, limiter, plugins
 from app.activitypub.signature import RsaKeys, post_request, send_post_request
 from app.activitypub.util import extract_domain_and_actor, find_actor_or_create
 from app.chat.util import send_message
@@ -43,7 +43,7 @@ from app.shared.community import invite_with_chat, invite_with_email, subscribe_
 from app.utils import get_setting, render_template, allowlist_html, markdown_to_html, validation_required, \
     shorten_string, gibberish, community_membership, ap_datetime, \
     request_etag_matches, return_304, can_upvote, can_downvote, user_filters_posts, \
-    joined_communities, moderating_communities, blocked_domains, mimetype_from_url, blocked_instances, \
+    joined_communities, moderating_communities, moderating_communities_ids, blocked_domains, mimetype_from_url, blocked_instances, \
     community_moderators, communities_banned_from, show_ban_message, recently_upvoted_posts, recently_downvoted_posts, \
     blocked_users, languages_for_form, menu_topics, add_to_modlog, \
     blocked_communities, remove_tracking_from_link, piefed_markdown_to_lemmy_markdown, \
@@ -556,6 +556,7 @@ def show_community(community: Community):
                            tags=hashtags_used_in_community(community.id, content_filters),
                            reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
                            user_notes=user_notes(current_user.get_id()), banned_from_community=banned_from_community,
+                           moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            post_layout=post_layout, content_type=content_type, current_app=current_app,
                            user_has_feeds=user_has_feeds, current_feed_id=current_feed_id,
@@ -877,6 +878,16 @@ def add_post(actor, type):
 
     if form.validate_on_submit():
         try:
+            # Fire before_post_create hook for plugins
+            post_data = {
+                'title': form.title.data,
+                'content': form.body.data if hasattr(form, 'body') else '',
+                'community': community.name,
+                'post_type': post_type,
+                'user_id': current_user.id
+            }
+            plugins.fire_hook('before_post_create', post_data)
+            
             uploaded_file = request.files['image_file'] if type == 'image' else None
             post = make_post(form, community, post_type, SRC_WEB, uploaded_file=uploaded_file)
         except Exception as ex:
@@ -948,14 +959,15 @@ def community_report(community_id: int):
     community = Community.query.get_or_404(community_id)
     form = ReportCommunityForm()
     if form.validate_on_submit():
+        targets_data = {'gen': '0', 'suspect_community_id': community.id, 'reporter_id': current_user.id}
         report = Report(reasons=form.reasons_to_string(form.reasons.data), description=form.description.data,
-                        type=1, reporter_id=current_user.id, suspect_community_id=community.id, source_instance_id=1)
+                        type=1, reporter_id=current_user.id, suspect_community_id=community.id, source_instance_id=1,
+                        targets=targets_data)
         db.session.add(report)
 
         # Notify admin
         # todo: find all instance admin(s). for now just load User.id == 1
         admins = [User.query.get_or_404(1)]
-        targets_data = {'gen': '0', 'suspect_community_id': community.id, 'reporter_id': current_user.id}
         for admin in admins:
             with force_locale(get_recipient_language(admin.id)):
                 notification = Notification(user_id=admin.id, title=gettext('A community has been reported'),
@@ -1363,7 +1375,10 @@ def community_move(actor):
             send_email(f'Request to move {community.link()}', f'{current_app.config["MAIL_FROM"]}',
                        g.site.contact_email, text_body, html_body, current_user.email)
 
-            targets_data = {'gen': '0', 'community_id': community.id, 'requestor_id': current_user.id}
+            targets_data = {'gen': '0',
+                            'community_id': community.id,
+                            'requestor_id': current_user.id,
+                            'author_user_name': community.name}
             notify = Notification(title='Community move requested, check your email.',
                                   url=f'/admin/community/{community.id}/move/{current_user.id}', user_id=1,
                                   author_id=current_user.id, notif_type=NOTIF_MENTION,

@@ -46,7 +46,8 @@ from app.utils import render_template, markdown_to_html, validation_required, \
     permission_required, blocked_users, get_request, is_local_image_url, is_video_url, can_upvote, can_downvote, \
     referrer, can_create_post_reply, communities_banned_from, \
     block_bots, flair_for_form, login_required_if_private_instance, retrieve_image_hash, posts_with_blocked_images, \
-    possible_communities, user_notes, login_required, get_recipient_language, user_filters_posts
+    possible_communities, user_notes, login_required, get_recipient_language, user_filters_posts, \
+    total_comments_on_post_and_cross_posts
 
 
 @login_required_if_private_instance
@@ -116,19 +117,26 @@ def show_post(post_id: int):
 
             return redirect(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{reply.id}'))
         else:
-            replies = post_replies(community, post.id, sort, current_user)
-            more_replies = defaultdict(list)
-            if post.cross_posts:
-                cbf = communities_banned_from(current_user.get_id())
-                bc = blocked_communities(current_user.get_id())
-                bi = blocked_instances(current_user.get_id())
-                for cross_posted_post in Post.query.filter(Post.id.in_(post.cross_posts)):
-                    if cross_posted_post.community_id not in cbf \
-                            and cross_posted_post.community_id not in bc \
-                            and cross_posted_post.community.instance_id not in bi:
-                        cross_posted_replies = post_replies(cross_posted_post.community, cross_posted_post.id, sort, current_user)
-                        if len(cross_posted_replies):
-                            more_replies[cross_posted_post.community].extend(cross_posted_replies)
+            if total_comments_on_post_and_cross_posts(post.id) < 100:   # if there are not many comments then we might as well load them with the post
+                lazy_load_replies = False
+                replies = post_replies(community, post.id, sort, current_user)
+                more_replies = defaultdict(list)
+                if post.cross_posts:
+                    cbf = communities_banned_from(current_user.get_id())
+                    bc = blocked_communities(current_user.get_id())
+                    bi = blocked_instances(current_user.get_id())
+                    for cross_posted_post in Post.query.filter(Post.id.in_(post.cross_posts)):
+                        if cross_posted_post.community_id not in cbf \
+                                and cross_posted_post.community_id not in bc \
+                                and cross_posted_post.community.instance_id not in bi:
+                            cross_posted_replies = post_replies(cross_posted_post.community, cross_posted_post.id, sort, current_user)
+                            if len(cross_posted_replies):
+                                more_replies[cross_posted_post.community].extend(cross_posted_replies)
+            else:
+                replies = []
+                more_replies = {}
+                lazy_load_replies = True
+
             form.notify_author.data = True
 
             # user flair
@@ -246,9 +254,9 @@ def show_post(post_id: int):
                                    poll_form=poll_form, poll_results=poll_results, poll_data=poll_data,
                                    poll_choices=poll_choices, poll_total_votes=poll_total_votes,
                                    canonical=post.ap_id, form=form, replies=replies, more_replies=more_replies,
-                                   user_flair=user_flair,
+                                   user_flair=user_flair, lazy_load_replies=lazy_load_replies,
                                    THREAD_CUTOFF_DEPTH=constants.THREAD_CUTOFF_DEPTH,
-                                   description=description, og_image=og_image,
+                                   description=description, og_image=og_image, sort=sort,
                                    show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff(),
                                    autoplay=request.args.get('autoplay', False), archive_link=archive_link,
                                    noindex=not post.author.indexable, preconnect=post.url if post.url else None,
@@ -275,6 +283,69 @@ def show_post(post_id: int):
         oembed_url = url_for('post.post_oembed', post_id=post.id, _external=True)
         response.headers.set('Link', f'<{oembed_url}>; rel="alternate"; type="application/json+oembed"')
         return response
+
+
+@bp.route('/post/<int:post_id>/lazy_replies/<nonce>', methods=['GET', 'OPTIONS'])
+def post_lazy_replies(post_id, nonce):
+    if request.method == 'OPTIONS':
+        return ''
+    post = Post.query.get_or_404(post_id)
+    sort = request.args.get('sort', 'hot')
+    community = post.community
+    user = current_user if current_user.is_authenticated else None
+
+    # user flair
+    user_flair = {}
+    for u_flair in UserFlair.query.filter(UserFlair.community_id == community.id):
+        user_flair[u_flair.user_id] = u_flair.flair
+
+    # Voting history
+    if current_user.is_authenticated:
+        recently_upvoted_replies = recently_upvoted_post_replies(current_user.id)
+        recently_downvoted_replies = recently_downvoted_post_replies(current_user.id)
+        reply_collapse_threshold = current_user.reply_collapse_threshold if current_user.reply_collapse_threshold else -1000
+    else:
+        recently_upvoted_replies = []
+        recently_downvoted_replies = []
+        reply_collapse_threshold = -10
+    
+    # Get necessary data for comment rendering
+    communities_banned_from_list = communities_banned_from(current_user.get_id()) if current_user.is_authenticated else []
+    
+    replies = post_replies(post.community, post.id, sort, current_user)
+    more_replies = defaultdict(list)
+    if post.cross_posts:
+        cbf = communities_banned_from_list
+        bc = blocked_communities(current_user.get_id())
+        bi = blocked_instances(current_user.get_id())
+        for cross_posted_post in Post.query.filter(Post.id.in_(post.cross_posts)):
+            if cross_posted_post.community_id not in cbf \
+                    and cross_posted_post.community_id not in bc \
+                    and cross_posted_post.community.instance_id not in bi:
+                cross_posted_replies = post_replies(cross_posted_post.community, cross_posted_post.id, sort,
+                                                    current_user)
+                if len(cross_posted_replies):
+                    more_replies[cross_posted_post.community].extend(cross_posted_replies)
+    
+    return render_template('post/post_reply_lazy.html', 
+                           replies=replies, 
+                           more_replies=more_replies,
+                           post=post, 
+                           community=post.community, 
+                           nonce=nonce,
+                           THREAD_CUTOFF_DEPTH=constants.THREAD_CUTOFF_DEPTH,
+                           reply_collapse_threshold=reply_collapse_threshold,
+                           recently_upvoted_replies=recently_upvoted_replies,
+                           recently_downvoted_replies=recently_downvoted_replies,
+                           can_upvote_here=can_upvote(user, community),
+                           can_downvote_here=can_downvote(user, community),
+                           communities_banned_from_list=communities_banned_from_list,
+                           user_notes=user_notes(current_user.get_id()) if current_user.is_authenticated else {},
+                           show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff() if current_user.is_authenticated else False,
+                           low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
+                           user_flair=user_flair if current_user.is_authenticated else {},
+                           upvoted_class='',
+                           downvoted_class='')
 
 
 @bp.route('/post/<int:post_id>/embed', methods=['GET', 'HEAD'])
@@ -494,6 +565,60 @@ def continue_discussion(post_id, comment_id):
                                community=post.community,
                                SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                                inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
+    response.headers.set('Vary', 'Accept, Cookie, Accept-Language')
+    return response
+
+
+@bp.route('/post/<int:post_id>/comment/<int:comment_id>/ajax/<nonce>', methods=['POST'])
+@login_required_if_private_instance
+def continue_discussion_ajax(post_id, comment_id, nonce):
+    post = Post.query.get_or_404(post_id)
+    comment = PostReply.query.get_or_404(comment_id)
+
+    mods = post.community.moderators()
+    if post.community.private_mods:
+        mod_list = []
+    else:
+        mod_user_ids = [mod.user_id for mod in mods]
+        mod_list = User.query.filter(User.id.in_(mod_user_ids)).all()
+    replies = get_comment_branch(post.id, comment.id, 'top')
+
+    # user flair
+    user_flair = {}
+    for u_flair in UserFlair.query.filter(UserFlair.community_id == post.community.id):
+        user_flair[u_flair.user_id] = u_flair.flair
+
+    # Voting history
+    if current_user.is_authenticated:
+        recently_upvoted_replies = recently_upvoted_post_replies(current_user.id)
+        recently_downvoted_replies = recently_downvoted_post_replies(current_user.id)
+        reply_collapse_threshold = current_user.reply_collapse_threshold if current_user.reply_collapse_threshold else -1000
+
+    else:
+        recently_upvoted_replies = []
+        recently_downvoted_replies = []
+        reply_collapse_threshold = -10
+
+    communities_banned_from_list = communities_banned_from(current_user.get_id()) if current_user.is_authenticated else []
+
+    response = render_template('post/continue_discussion_ajax.html',
+                               post=post, mods=mod_list,
+                               replies=replies,
+                               community=post.community,
+                               nonce=nonce,
+                               THREAD_CUTOFF_DEPTH=1000,
+                               reply_collapse_threshold=reply_collapse_threshold,
+                               recently_upvoted_replies=recently_upvoted_replies,
+                               recently_downvoted_replies=recently_downvoted_replies,
+                               can_upvote_here=can_upvote(current_user, post.community) if current_user.is_authenticated else True,
+                               can_downvote_here=can_downvote(current_user, post.community) if current_user.is_authenticated else True,
+                               communities_banned_from_list=communities_banned_from_list,
+                               user_notes=user_notes(current_user.get_id()) if current_user.is_authenticated else {},
+                               show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff() if current_user.is_authenticated else False,
+                               low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
+                               user_flair=user_flair if current_user.is_authenticated else {},
+                               upvoted_class='',
+                               downvoted_class='')
     response.headers.set('Vary', 'Accept, Cookie, Accept-Language')
     return response
 
@@ -1024,14 +1149,7 @@ def post_report(post_id: int):
         if post.reports == -1:
             flash(_('Post has already been reported, thank you!'))
             return redirect(post.community.local_url())
-        report = Report(reasons=form.reasons_to_string(form.reasons.data), description=form.description.data,
-                        type=1, reporter_id=current_user.id, suspect_user_id=post.author.id, suspect_post_id=post.id,
-                        suspect_community_id=post.community.id, in_community_id=post.community.id, source_instance_id=1)
-        db.session.add(report)
-
-        # Notify moderators
-        already_notified = set()
-
+        
         suspect_user = User.query.get(post.author.id)
         targets_data = {'gen': '0',
                         'suspect_post_id': post.id,
@@ -1042,6 +1160,15 @@ def post_report(post_id: int):
                         'orig_post_title': post.title,
                         'orig_post_body': post.body
                         }
+        report = Report(reasons=form.reasons_to_string(form.reasons.data), description=form.description.data,
+                        type=1, reporter_id=current_user.id, suspect_user_id=post.author.id, suspect_post_id=post.id,
+                        suspect_community_id=post.community.id, in_community_id=post.community.id, 
+                        source_instance_id=1, targets=targets_data)
+        db.session.add(report)
+
+        # Notify moderators
+        already_notified = set()
+
         for mod in post.community.moderators():
             with force_locale(get_recipient_language(mod.user_id)):
                 notification = Notification(user_id=mod.user_id, title=gettext('A post has been reported'),
@@ -1346,16 +1473,6 @@ def post_reply_report(post_id: int, comment_id: int):
             flash(_('Comment has already been reported, thank you!'))
             return redirect(post.community.local_url())
 
-        report = Report(reasons=form.reasons_to_string(form.reasons.data), description=form.description.data,
-                        type=2, reporter_id=current_user.id, suspect_post_id=post.id,
-                        suspect_community_id=post.community.id,
-                        suspect_user_id=post_reply.author.id, suspect_post_reply_id=post_reply.id,
-                        in_community_id=post.community.id,
-                        source_instance_id=1)
-        db.session.add(report)
-
-        # Notify moderators
-        already_notified = set()
         suspect_author = User.query.get(post_reply.author.id)
         targets_data = {'gen': '0',
                         'suspect_comment_id': post_reply.id,
@@ -1365,6 +1482,16 @@ def post_reply_report(post_id: int, comment_id: int):
                         'reporter_user_name': current_user.user_name,
                         'orig_comment_body': post_reply.body
                         }
+        report = Report(reasons=form.reasons_to_string(form.reasons.data), description=form.description.data,
+                        type=2, reporter_id=current_user.id, suspect_post_id=post.id,
+                        suspect_community_id=post.community.id,
+                        suspect_user_id=post_reply.author.id, suspect_post_reply_id=post_reply.id,
+                        in_community_id=post.community.id,
+                        source_instance_id=1, targets=targets_data)
+        db.session.add(report)
+
+        # Notify moderators
+        already_notified = set()
         for mod in post.community.moderators():
             with force_locale(get_recipient_language(mod.user_id)):
                 notification = Notification(user_id=mod.user_id, title=gettext('A comment has been reported'),

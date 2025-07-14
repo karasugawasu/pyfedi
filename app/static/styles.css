@@ -1466,6 +1466,9 @@ time {
 .comments > .comment .comment_body p {
   padding-right: 9px;
 }
+.comments > .comment .comment_body p:last-child {
+  margin-bottom: 0px;
+}
 .comments > .comment:first-child {
   border-top: none;
   padding-top: 0;
@@ -1696,7 +1699,6 @@ time {
   text-decoration: none;
 }
 .comment .comment_actions {
-  margin-top: -18px;
   display: flex;
   min-height: 44px;
   container-type: inline-size;
@@ -1901,6 +1903,44 @@ a.unread:before, div.unread:before {
   text-overflow: ellipsis;
 }
 
+.accordion-preview .collapse:not(.show) {
+  display: block;
+}
+.accordion-preview .collapse:not(.show) p:last-of-type {
+  margin-bottom: 0;
+}
+.accordion-preview .collapse:not(.show) .accordion-body {
+  max-height: 4rem;
+  position: relative;
+  overflow-y: hidden;
+  overflow-x: auto;
+}
+.accordion-preview .collapse:not(.show) .accordion-body:after {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 100%;
+  width: 100%;
+  content: "";
+  background: linear-gradient(to bottom, transparent, transparent 60%, var(--bs-secondary-bg));
+  pointer-events: none;
+}
+.accordion-preview .collapsing {
+  transition: none;
+}
+.accordion-preview .accordion-item:first-of-type .accordion-button {
+  border-top-right-radius: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.accordion-preview .accordion-item:first-of-type .accordion-button:not(.collapsed) {
+  background-color: var(--bs-accordion-active-bg) !important;
+}
+
+.notification-table {
+  table-layout: fixed;
+}
+
 .profile_action_buttons, .rh_action_buttons {
   float: right;
 }
@@ -1937,15 +1977,15 @@ a.unread:before, div.unread:before {
   float: right;
 }
 
-.post_body, .comment_body, #preview, .reply_preview {
+.post_body, .comment_body, #preview, .reply_preview, .accordion-body {
   word-wrap: break-word;
 }
-.post_body img, .comment_body img, #preview img, .reply_preview img {
+.post_body img, .comment_body img, #preview img, .reply_preview img, .accordion-body img {
   max-height: 40vh;
   max-width: 100%;
   height: auto;
 }
-.post_body blockquote, .comment_body blockquote, #preview blockquote, .reply_preview blockquote {
+.post_body blockquote, .comment_body blockquote, #preview blockquote, .reply_preview blockquote, .accordion-body blockquote {
   padding: 0.2em 5px;
   font-style: italic;
   font-family: "Open Sans", "Segoe UI", Tahoma, Arial, sans-serif;
@@ -1954,10 +1994,10 @@ a.unread:before, div.unread:before {
   border-left-style: solid;
   border-left-width: 4px;
 }
-.post_body blockquote p, .comment_body blockquote p, #preview blockquote p, .reply_preview blockquote p {
+.post_body blockquote p, .comment_body blockquote p, #preview blockquote p, .reply_preview blockquote p, .accordion-body blockquote p {
   margin-bottom: 0px;
 }
-.post_body pre, .comment_body pre, #preview pre, .reply_preview pre {
+.post_body pre, .comment_body pre, #preview pre, .reply_preview pre, .accordion-body pre {
   background: var(--bs-secondary-bg);
   font-family: monospace;
   padding-left: 0.5rem;
@@ -1967,20 +2007,20 @@ a.unread:before, div.unread:before {
   border-width: 2px;
   border-radius: 5px;
 }
-.post_body p > code, .comment_body p > code, #preview p > code, .reply_preview p > code {
+.post_body p > code, .comment_body p > code, #preview p > code, .reply_preview p > code, .accordion-body p > code {
   background: var(--bs-secondary-bg);
   padding: 0.25rem 0.5rem;
   border-radius: 5px;
 }
-.post_body table.table, .comment_body table.table, #preview table.table, .reply_preview table.table {
+.post_body table.table, .comment_body table.table, #preview table.table, .reply_preview table.table, .accordion-body table.table {
   display: block;
   width: 100%;
   overflow-x: auto;
 }
-.post_body ol li, .post_body ul li, .comment_body ol li, .comment_body ul li, #preview ol li, #preview ul li, .reply_preview ol li, .reply_preview ul li {
+.post_body ol li, .post_body ul li, .comment_body ol li, .comment_body ul li, #preview ol li, #preview ul li, .reply_preview ol li, .reply_preview ul li, .accordion-body ol li, .accordion-body ul li {
   margin-bottom: 7px;
 }
-.post_body ol li > p, .post_body ul li > p, .comment_body ol li > p, .comment_body ul li > p, #preview ol li > p, #preview ul li > p, .reply_preview ol li > p, .reply_preview ul li > p {
+.post_body ol li > p, .post_body ul li > p, .comment_body ol li > p, .comment_body ul li > p, #preview ol li > p, #preview ul li > p, .reply_preview ol li > p, .reply_preview ul li > p, .accordion-body ol li > p, .accordion-body ul li > p {
   margin-bottom: 0;
 }
 
@@ -2651,6 +2691,22 @@ form h5 {
 }
 #voting_dialog .btn i {
   margin-right: 0.5rem;
+}
+
+/* password eye */
+.password-container {
+  position: relative;
+}
+
+.showPassword, .hidePassword {
+  position: absolute;
+  right: 6px;
+  top: 30px;
+}
+.showPassword img, .hidePassword img {
+  opacity: 0.5;
+  width: 30px;
+  height: 30px;
 }
 
 .blink {

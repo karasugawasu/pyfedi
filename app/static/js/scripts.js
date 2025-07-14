@@ -57,6 +57,7 @@ document.addEventListener("DOMContentLoaded", function () {
     setupDynamicContentObserver();
     setupCommunityFilter();
     setupPopupTooltips();
+    setupPasswordEye();
 
     // save user timezone into a timezone field, if it exists
     const timezoneField = document.getElementById('timezone');
@@ -599,6 +600,37 @@ function setupCommunityNameInput() {
 }
 
 
+function processToBeHiddenArray() {
+    if(typeof toBeHidden !== "undefined" && toBeHidden) {
+        toBeHidden.forEach((arrayElement) => {
+          // Build the ID of the outer div
+          const divId = "comment_" + arrayElement;
+
+          // Access the outer div by its ID
+          const commentDiv = document.getElementById(divId);
+
+          if (commentDiv) {
+            // Access the inner div with class "hide_button" inside the outer div
+            const hideButton = commentDiv.querySelectorAll(".hide_button a");
+
+            if (hideButton && hideButton.length > 0) {
+              // Programmatically trigger a click event on the "hide_button" anchor
+              hideButton[0].click();
+            } else {
+              console.log(`"hide_button" not found in ${divId}`);
+            }
+          } else {
+            console.log(`Div with ID ${divId} not found`);
+          }
+        });
+    }
+}
+
+function checkForCollapsedComments() {
+    // This function can be used for debugging if needed
+    // Currently not performing any actions
+}
+
 function setupHideButtons() {
     const hideEls2 = document.querySelectorAll('.hide_button a');
     hideEls2.forEach(hideEl => {
@@ -630,29 +662,7 @@ function setupHideButtons() {
         });
     });
 
-    if(typeof toBeHidden !== "undefined" && toBeHidden) {
-        toBeHidden.forEach((arrayElement) => {
-          // Build the ID of the outer div
-          const divId = "comment_" + arrayElement;
-
-          // Access the outer div by its ID
-          const commentDiv = document.getElementById(divId);
-
-          if (commentDiv) {
-            // Access the inner div with class "hide_button" inside the outer div
-            const hideButton = commentDiv.querySelectorAll(".hide_button a");
-
-            if (hideButton) {
-              // Programmatically trigger a click event on the "hide_button" anchor
-              hideButton[0].click();
-            } else {
-              console.log(`"hide_button" not found in ${divId}`);
-            }
-          } else {
-            console.log(`Div with ID ${divId} not found`);
-          }
-        });
-    }
+    processToBeHiddenArray();
 }
 
 function titleToURL(title) {
@@ -1462,9 +1472,15 @@ function setupDynamicContentObserver() {
                             node.querySelector('.showElement') ||
                             node.querySelector('.show-more') ||
                             node.querySelector('.user_preview') ||
+                            node.querySelector('.hide_button') ||
+                            node.querySelector('.unhide') ||
+                            node.querySelector('.comment') ||
                             node.classList.contains('send_post') ||
                             node.classList.contains('confirm_first') ||
-                            node.classList.contains('showElement')
+                            node.classList.contains('showElement') ||
+                            node.classList.contains('hide_button') ||
+                            node.classList.contains('unhide') ||
+                            node.classList.contains('comment')
                         )) {
                             shouldResetup = true;
                         }
@@ -1520,6 +1536,15 @@ function setupDynamicContent() {
     setupUserPopup();
     setupVotingLongPress();
     setupDynamicKeyboardShortcuts();
+    setupHideButtons();
+    setupPopupTooltips();
+    
+    // Process toBeHidden array after a short delay to allow inline scripts to run
+    setTimeout(() => {
+        processToBeHiddenArray();
+        // Also manually check for any comments that should be collapsed
+        checkForCollapsedComments();
+    }, 100);
 }
 
 // Setup keyboard shortcuts for dynamically loaded content
@@ -1931,4 +1956,37 @@ function setupPopupTooltips() {
           delay: { show: 750, hide: 200 }
       })
     );
+}
+
+function setupPasswordEye() {
+    const showPasswordBtn = document.querySelector('.showPassword');
+    const hidePasswordBtn = document.querySelector('.hidePassword');
+    const passwordElement = document.getElementById('password');
+
+    if(showPasswordBtn && hidePasswordBtn && passwordElement) {
+            function togglePassword() {
+                if (passwordElement.type === 'password') {
+                    passwordElement.type = 'text';
+                    showPasswordBtn.style.display = 'inline';
+                    hidePasswordBtn.style.display = 'none';
+                } else {
+                    passwordElement.type = 'password';
+                    showPasswordBtn.style.display = 'none';
+                    hidePasswordBtn.style.display = 'inline';
+                }
+            }
+
+            showPasswordBtn.addEventListener('click', function (e) {
+                togglePassword();
+                e.preventDefault();
+            });
+
+            hidePasswordBtn.addEventListener('click', function (e) {
+                togglePassword();
+                e.preventDefault();
+            });
+
+            // Initially hide the showPassword button
+            showPasswordBtn.style.display = 'none';
+    }
 }
