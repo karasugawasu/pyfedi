@@ -12,7 +12,7 @@ class ProfileForm(FlaskForm):
     title = StringField(_l('Display name'), validators=[Optional(), Length(max=255)])
     email = EmailField(_l('Email address'), validators=[Email(), DataRequired(), Length(min=5, max=255)])
     password = PasswordField(_l('Set new password'), validators=[Optional(), Length(min=8, max=129)],
-                             render_kw={"autocomplete": 'new-password'})
+                             render_kw={'autocomplete': 'new-password', 'title': _l('Minimum length 8, maximum 128')})
     about = TextAreaField(_l('Bio'), validators=[Optional(), Length(min=3, max=5000)], render_kw={'rows': 5})
     extra_label_1 = StringField(_l('Extra field 1 - label'), validators=[Optional(), Length(max=50)], render_kw={"placeholder": _l('Label')})
     extra_text_1 = StringField(_l('Extra field 1 - text'), validators=[Optional(), Length(max=256)], render_kw={"placeholder": _l('Content')})
@@ -56,6 +56,7 @@ class SettingsForm(FlaskForm):
     reply_collapse_threshold = IntegerField(_l('Reply collapse threshold'), validators=[Optional()])
     reply_hide_threshold = IntegerField(_l('Reply hide threshold'), validators=[Optional()])
     markdown_editor = BooleanField(_l('Use markdown editor GUI when writing'))
+    low_bandwidth_mode = BooleanField(_l('Low bandwidth mode'))
     searchable = BooleanField(_l('Show profile in user list'))
     indexable = BooleanField(_l('My posts appear in search results'))
     hide_read_posts = BooleanField(_l('Do not display posts with which I have already interacted (opened/upvoted/downvoted)'))

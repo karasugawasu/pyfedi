@@ -47,7 +47,7 @@ from app.utils import render_template, markdown_to_html, validation_required, \
     referrer, can_create_post_reply, communities_banned_from, \
     block_bots, flair_for_form, login_required_if_private_instance, retrieve_image_hash, posts_with_blocked_images, \
     possible_communities, user_notes, login_required, get_recipient_language, user_filters_posts, \
-    total_comments_on_post_and_cross_posts
+    total_comments_on_post_and_cross_posts, approval_required
 
 
 @login_required_if_private_instance
@@ -463,6 +463,7 @@ def post_oembed(post_id):
 @bp.route('/post/<int:post_id>/<vote_direction>/<federate>', methods=['GET', 'POST'])
 @login_required
 @validation_required
+@approval_required
 def post_vote(post_id: int, vote_direction, federate):
     if federate == 'default':
         federate = not current_user.vote_privately
@@ -474,6 +475,7 @@ def post_vote(post_id: int, vote_direction, federate):
 @bp.route('/comment/<int:comment_id>/<vote_direction>/<federate>', methods=['POST'])
 @login_required
 @validation_required
+@approval_required
 def comment_vote(comment_id, vote_direction, federate):
     if federate == 'default':
         federate = not current_user.vote_privately
@@ -485,6 +487,7 @@ def comment_vote(comment_id, vote_direction, federate):
 @bp.route('/poll/<int:post_id>/vote', methods=['POST'])
 @login_required
 @validation_required
+@approval_required
 def poll_vote(post_id):
     poll_data = Poll.query.get_or_404(post_id)
     if poll_data.mode == 'single':
@@ -699,6 +702,8 @@ def add_reply_inline(post_id: int, comment_id: int, nonce):
 
     if in_reply_to.author.has_blocked_user(current_user.id):
         return _('You cannot reply to %(name)s', name=in_reply_to.author.display_name())
+    if not in_reply_to.replies_enabled:
+        return _('This comment cannot be replied to.')
 
     if request.method == 'GET':
         # Get the language of the user being replied to
@@ -1603,6 +1608,23 @@ def post_reply_block_instance(post_id: int, comment_id: int):
         return resp
 
     return redirect(url_for('activitypub.post_ap', post_id=post_id))
+
+
+@bp.route('/post/<int:post_id>/comment/<int:comment_id>/distinguish', methods=['POST'])
+@login_required
+def post_reply_distinguish(post_id: int, comment_id: int):
+    post = Post.query.get_or_404(post_id)
+    post_reply = PostReply.query.get_or_404(comment_id)
+
+    if (post.community.is_moderator() or post.community.is_owner()) and current_user.id == post_reply.user_id:
+        if post_reply.distinguished:
+            post_reply.distinguished = False
+        else:
+            post_reply.distinguished = True
+        db.session.commit()
+        return redirect(url_for('activitypub.post_ap', post_id=post.id))
+    else:
+        abort(401)
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/edit', methods=['GET', 'POST'])

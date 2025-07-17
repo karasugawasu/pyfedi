@@ -633,7 +633,7 @@ class Community(db.Model):
         else:
             return f"!{self.ap_id.lower()}"
 
-    @cache.memoize(timeout=3)
+    @cache.memoize(timeout=300)
     def moderators(self):
         return CommunityMember.query.filter((CommunityMember.community_id == self.id) &
                                             (or_(
@@ -661,10 +661,16 @@ class Community(db.Model):
     def is_owner(self, user=None):
         if user is None:
             return any(moderator.user_id == current_user.get_id() and moderator.is_owner for moderator in
-                       self.moderators()) or current_user.get_id() == self.user_id
+                       self.moderators())
         else:
-            return any(moderator.user_id == user.id and moderator.is_owner for moderator in
-                       self.moderators()) or user.id == self.user_id
+            return any(moderator.user_id == user.id and moderator.is_owner for moderator in self.moderators())
+
+    def num_owners(self):
+        result = 0
+        for moderator in self.moderators():
+            if moderator.is_owner:
+                result += 1
+        return result
 
     def is_instance_admin(self, user):
         if self.instance_id:
@@ -698,6 +704,22 @@ class Community(db.Model):
         else:
             return f"https://{current_app.config['SERVER_NAME']}/c/{self.ap_id}"
 
+    def humanize_subscribers(self, total=True):
+        """Return an abbreviated, human readable number of followers (e.g. 1.2k instead of 1215)"""
+
+        if total:
+            subscribers = self.total_subscriptions_count if self.total_subscriptions_count else self.subscriptions_count
+        else:
+            subscribers = self.subscriptions_count
+        
+        if not subscribers:
+            return "0"
+
+        if subscribers < 1000:
+            return str(subscribers)
+        else:
+            return str(int(subscribers / 100) / 10) + "k"
+    
     def notify_new_posts(self, user_id: int) -> bool:
         existing_notification = NotificationSubscription.query.filter(NotificationSubscription.entity_id == self.id,
                                                                       NotificationSubscription.user_id == user_id,
@@ -1151,7 +1173,7 @@ class User(UserMixin, db.Model):
         total_downvotes = downvotes + comment_downvotes
 
         # Calculate the new attitude value
-        if total_upvotes + total_downvotes > 2:  # Only calculate attitude if they've done 3 or more votes
+        if total_upvotes + total_downvotes > 9:  # Only calculate attitude if they've done 10 or more votes
             new_attitude = (total_upvotes - total_downvotes) / (total_upvotes + total_downvotes)
         else:
             new_attitude = None
@@ -2111,6 +2133,8 @@ class PostReply(db.Model):
     posted_at = db.Column(db.DateTime, index=True, default=utcnow)
     deleted = db.Column(db.Boolean, default=False, index=True)
     deleted_by = db.Column(db.Integer, index=True)
+    replies_enabled = db.Column(db.Boolean, default=True)
+    sticky = db.Column(db.Boolean, default=False, index=True)
     ip = db.Column(db.String(50))
     from_bot = db.Column(db.Boolean, default=False, index=True)
     up_votes = db.Column(db.Integer, default=0)

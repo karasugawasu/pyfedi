@@ -932,6 +932,28 @@ def validation_required(func):
     return decorated_view
 
 
+def approval_required(func):
+    @wraps(func)
+    def decorated_view(*args, **kwargs):
+        if not (current_user.private_key is None and (g.site.registration_mode == 'RequireApplication' or g.site.registration_mode == 'Closed')):
+            return func(*args, **kwargs)
+        else:
+            return redirect(url_for('auth.please_wait'))
+
+    return decorated_view
+
+
+def trustworthy_account_required(func):
+    @wraps(func)
+    def decorated_view(*args, **kwargs):
+        if current_user.trustworthy():
+            return func(*args, **kwargs)
+        else:
+            return redirect(url_for('auth.not_trustworthy'))
+
+    return decorated_view
+
+
 def login_required_if_private_instance(func):
     @wraps(func)
     def decorated_view(*args, **kwargs):
@@ -1221,6 +1243,10 @@ def can_create_post(user, content: Community) -> bool:
     if user.ban_posts:
         return False
 
+    if user.is_local():
+        if user.verified is False or user.private_key is None:
+            return False
+
     if content.is_moderator(user) or user.is_admin():
         return True
 
@@ -1242,6 +1268,10 @@ def can_create_post_reply(user, content: Community) -> bool:
 
     if user.ban_comments:
         return False
+
+    if user.is_local():
+        if user.verified is False or user.private_key is None:
+            return False
 
     if content.is_moderator(user) or user.is_admin():
         return True
