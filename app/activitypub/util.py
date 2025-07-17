@@ -219,7 +219,8 @@ def comment_model_to_json(reply: PostReply) -> dict:
             'identifier': reply.language_code(),
             'name': reply.language_name()
         },
-        'flair': reply.author.community_flair(reply.community_id)
+        'flair': reply.author.community_flair(reply.community_id),
+        'repliesEnabled': reply.replies_enabled
     }
     if reply.edited_at:
         reply_data['updated'] = ap_datetime(reply.edited_at)
@@ -333,6 +334,10 @@ def find_flair_or_create(flair: dict, community_id: int) -> CommunityFlair:
     existing_flair = CommunityFlair.query.filter(CommunityFlair.flair == flair['display_name'].strip(),
                                                  CommunityFlair.community_id == community_id).first()
     if existing_flair:
+        # Update colors and blur in case they have changed
+        existing_flair.text_color = flair['text_color']
+        existing_flair.background_color = flair['background_color']
+        existing_flair.blur_images = flair['blur_images'] if 'blur_images' in flair else False
         return existing_flair
     else:
         new_flair = CommunityFlair(flair=flair['display_name'].strip(), community_id=community_id,
@@ -1026,6 +1031,8 @@ def actor_json_to_model(activity_json, address, server):
                     flair_dict['text_color'] = flair['text_color']
                 if 'background_color' in flair:
                     flair_dict['background_color'] = flair['background_color']
+                if 'blur_images' in flair:
+                    flair_dict['blur_images'] = flair['blur_images']
                 community.flair.append(find_flair_or_create(flair_dict, community.id))
             db.session.commit()
         if community.icon_id:
@@ -1852,6 +1859,9 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             if parent_comment.author.has_blocked_user(user.id) or parent_comment.author.has_blocked_instance(user.instance_id):
                 log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'Parent comment author blocked replier')
                 return None
+            if not parent_comment.replies_enabled:
+                log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'Parent comment is locked')
+                return None
         else:
             parent_comment = None
         if post_id is None:
@@ -2203,6 +2213,9 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
     # Distinguished
     if 'distinguished' in request_json['object']:
         reply.distinguished = request_json['object']['distinguished']
+
+    if 'repliesEnabled' in request_json['object']:
+        reply.replies_enabled = request_json['object']['repliesEnabled']
 
     reply.edited_at = utcnow()
 

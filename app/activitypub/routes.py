@@ -742,7 +742,7 @@ def process_inbox_request(request_json, store_ap_json):
                         log_incoming_ap(id, APLOG_ANNOUNCE, APLOG_FAILURE, saved_json, 'Actor was not a feed or a community')
                         return
                 else:
-                    actor = find_actor_or_create(actor_id, create_if_not_found=False)
+                    actor = find_actor_or_create(actor_id)
                     if actor and isinstance(actor, User):
                         user = actor
                         # Update user's last_seen in a separate transaction to avoid deadlocks
@@ -824,7 +824,7 @@ def process_inbox_request(request_json, store_ap_json):
                 if core_activity['type'] == 'Follow':
                     target_ap_id = core_activity['object']
                     follow_id = core_activity['id']
-                    target = find_actor_or_create(target_ap_id, create_if_not_found=False)
+                    target = find_actor_or_create(target_ap_id)
                     if not target:
                         log_incoming_ap(id, APLOG_FOLLOW, APLOG_FAILURE, saved_json, 'Could not find target of Follow')
                         return
@@ -945,7 +945,7 @@ def process_inbox_request(request_json, store_ap_json):
                             user = session.query(User).get(join_request.user_id)
                     elif core_activity['object']['type'] == 'Follow':
                         user_ap_id = core_activity['object']['actor']
-                        user = find_actor_or_create(user_ap_id, create_if_not_found=False)
+                        user = find_actor_or_create(user_ap_id)
                         if user and user.banned:
                             log_incoming_ap(id, APLOG_ACCEPT, APLOG_FAILURE, saved_json, f'{user_ap_id} is banned')
                             return
@@ -993,7 +993,7 @@ def process_inbox_request(request_json, store_ap_json):
                 if core_activity['type'] == 'Reject':
                     if core_activity['object']['type'] == 'Follow':
                         user_ap_id = core_activity['object']['actor']
-                        user = find_actor_or_create(user_ap_id, create_if_not_found=False)
+                        user = find_actor_or_create(user_ap_id)
                         if not user:
                             log_incoming_ap(id, APLOG_ACCEPT, APLOG_FAILURE, saved_json, 'Could not find recipient of Reject')
                             return
@@ -1429,7 +1429,7 @@ def process_inbox_request(request_json, store_ap_json):
                 if core_activity['type'] == 'Undo':
                     if core_activity['object']['type'] == 'Follow':  # Unsubscribe from a community or user
                         target_ap_id = core_activity['object']['object']
-                        target = find_actor_or_create(target_ap_id, create_if_not_found=False)
+                        target = find_actor_or_create(target_ap_id)
                         if isinstance(target, Community):
                             community = target
                             member = session.query(CommunityMember).filter_by(user_id=user.id, community_id=community.id).first()
@@ -1502,7 +1502,7 @@ def process_inbox_request(request_json, store_ap_json):
                         if post_or_comment:
                             log_incoming_ap(id, APLOG_UNDO_VOTE, APLOG_SUCCESS, saved_json)
                             if not announced:
-                                announce_activity_to_followers(post_or_comment.community, user, request_json)
+                                announce_activity_to_followers(post_or_comment.community, user, request_json, can_batch=True)
                         else:
                             log_incoming_ap(id, APLOG_UNDO_VOTE, APLOG_FAILURE, saved_json,
                                             'Unfound object ' + target_ap_id)
@@ -1564,8 +1564,7 @@ def process_inbox_request(request_json, store_ap_json):
                             session.commit()
                             log_incoming_ap(id, APLOG_USERBAN, APLOG_SUCCESS, saved_json)
                         else:  # undo community ban (community will already known if activity was Announced)
-                            community = community if community else find_actor_or_create(target, create_if_not_found=False,
-                                                                                         community_only=True)
+                            community = community if community else find_actor_or_create(target, community_only=True)
                             if not community:
                                 log_incoming_ap(id, APLOG_USERBAN, APLOG_IGNORED, saved_json,
                                                 'Blocked or unfound community')
@@ -1919,7 +1918,7 @@ def process_new_content(user, community, store_ap_json, request_json, announced)
             if activity_json['type'] == 'Create':
                 log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'Create processed after Update')
                 return
-            if user.id == reply.user_id:
+            if user.id == reply.user_id or reply.community.is_moderator(user):
                 update_post_reply_from_activity(reply, activity_json)
                 log_incoming_ap(id, APLOG_UPDATE, APLOG_SUCCESS, saved_json)
                 if not announced:
@@ -1998,22 +1997,22 @@ def process_chat(user, store_ap_json, core_activity, session):
             len(core_activity['object']['to']) > 0):
         return False
     recipient_ap_id = core_activity['object']['to'][0]
-    recipient = find_actor_or_create(recipient_ap_id, create_if_not_found=False)
+    recipient = find_actor_or_create(recipient_ap_id)
     if recipient and recipient.is_local():
-        if sender.ap_profile_id != 'https://fediseer.com/api/v1/user/fediseer' and (sender.created_recently() or sender.reputation <= -10):
-            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender not eligible to send', session=session)
+        if sender.ap_profile_id != 'https://fediseer.com/api/v1/user/fediseer' and not sender.trustworthy():
+            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender not eligible to send')
             return True
         elif recipient.has_blocked_user(sender.id) or recipient.has_blocked_instance(sender.instance_id):
-            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender blocked by recipient', session=session)
+            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender blocked by recipient')
             return True
         elif recipient.accept_private_messages is None or recipient.accept_private_messages == 0:
-            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Recipient has turned off PMs', session=session)
+            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Recipient has turned off PMs')
             return True
         elif recipient.accept_private_messages == 1:
-            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Recipient only accepts local PMs', session=session)
+            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Recipient only accepts local PMs')
             return True
         elif recipient.accept_private_messages == 2 and not sender.instance.trusted:
-            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender from untrusted instance', session=session)
+            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender from untrusted instance')
             return True
         else:
             blocked_phrases_list = blocked_phrases()
@@ -2054,7 +2053,7 @@ def process_chat(user, store_ap_json, core_activity, session):
             recipient.unread_notifications += 1
             existing_conversation.read = False
             session.commit()
-            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_SUCCESS, saved_json, session=session)
+            log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_SUCCESS, saved_json)
 
         return True
 
