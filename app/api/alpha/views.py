@@ -14,7 +14,7 @@ from app.utils import blocked_communities, blocked_instances, blocked_users, com
 
 
 def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, communities_moderating=None, banned_from=None,
-              bookmarked_posts=None, post_subscriptions=None, communities_joined=None, read_posts=None) -> dict:
+              bookmarked_posts=None, post_subscriptions=None, communities_joined=None, read_posts=None, content_filters=None) -> dict:
     if isinstance(post, int):
         post = Post.query.filter_by(id=post, deleted=False).one()
 
@@ -124,6 +124,8 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
         v2 = {'post': post_view(post=post, variant=1, stub=stub), 'counts': counts, 'banned_from_community': False,
               'subscribed': subscribe_type,
               'saved': saved, 'read': read, 'hidden': False, 'unread_comments': post.reply_count, 'my_vote': my_vote,
+              'filtered': post.blocked_by_content_filter(content_filters, user_id) == '-1',
+              'blurred': post.blurred(g.user if hasattr(g, 'user') else None),
               'activity_alert': activity_alert,
               'creator_banned_from_community': creator_banned_from_community,
               'creator_is_moderator': creator_is_moderator, 'creator_is_admin': creator_is_admin}
@@ -243,7 +245,9 @@ def user_view(user: User | int, variant, stub=False, user_id=None, flair_communi
             "local_user_view": {
                 "local_user": {
                     "show_nsfw": not user.hide_nsfw == 1,
+                    "show_nsfl": not user.hide_nsfl == 1,
                     "default_sort_type": user.default_sort.capitalize(),
+                    "default_comment_sort_type": user.default_comment_sort.capitalize() if user.default_comment_sort else 'HOT',
                     "default_listing_type": user.default_filter.capitalize(),
                     "show_scores": True,
                     "show_bot_accounts": not user.ignore_bots == 1,

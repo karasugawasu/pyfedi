@@ -419,7 +419,7 @@ def show_community(community: Community):
                 comments = comments.filter(PostReply.user_id.not_in(blocked_accounts))
 
         if sort == '' or sort == 'hot':
-            comments = comments.order_by(desc(PostReply.ranking)).order_by(desc(PostReply.posted_at))
+            comments = comments.order_by(desc(PostReply.posted_at))
         elif sort == 'top_12h':
             comments = comments.filter(PostReply.posted_at > utcnow() - timedelta(hours=12)).order_by(
                 desc(PostReply.up_votes - PostReply.down_votes))
@@ -1207,7 +1207,9 @@ def community_remove_owner(community_id: int, user_id: int):
     community = Community.query.get_or_404(community_id)
     user = User.query.get_or_404(user_id)
 
-    if (community.is_owner() or current_user.is_admin_or_staff()) and community.is_moderator(user):
+    if ((current_user.is_admin_or_staff() and community.is_owner(user)) or 
+        (community.is_owner() and community.is_moderator(user) and not community.is_owner(user)) or 
+        (community.is_owner() and user.id == current_user.id)):
 
         if community.num_owners() == 1:
             flash(_('A community must have one or more owners. Make someone else an owner before removing this owner.'), 'error')
