@@ -8,9 +8,11 @@ from app.api.alpha.utils.validators import required, integer_expected, boolean_e
     array_of_integers_expected
 from app.api.alpha.views import post_view, post_report_view
 from app.constants import *
-from app.models import Post, Community, CommunityMember, utcnow, User
+from app.feed.routes import get_all_child_feed_ids
+from app.models import Post, Community, CommunityMember, utcnow, User, Feed, FeedItem, Topic
 from app.shared.post import vote_for_post, bookmark_post, remove_bookmark_post, subscribe_post, make_post, edit_post, \
-    delete_post, restore_post, report_post, lock_post, sticky_post, mod_remove_post, mod_restore_post
+    delete_post, restore_post, report_post, lock_post, sticky_post, mod_remove_post, mod_restore_post, mark_post_read
+from app.topic.routes import get_all_child_topic_ids
 from app.utils import authorise_api_user, blocked_users, blocked_communities, blocked_instances, recently_upvoted_posts, \
     site_language_id, filtered_out_communities, communities_banned_from, joined_or_modding_communities, \
     moderating_communities_ids, user_filters_home, user_filters_posts
@@ -36,6 +38,8 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     if auth:
         user_id = authorise_api_user(auth)
 
+    user_id = 1
+
     # get the user to check if the user has hide_read posts set later down the function
     if user_id:
         user = User.query.get(user_id)
@@ -45,6 +49,8 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     # person_id: the author of the posts being requested
 
     community_id = int(data['community_id']) if data and 'community_id' in data else None
+    feed_id = int(data['feed_id']) if data and 'feed_id' in data else None
+    topic_id = int(data['topic_id']) if data and 'topic_id' in data else None
     community_name = data['community_name'] if data and 'community_name' in data else None
     person_id = int(data['person_id']) if data and 'person_id' in data else None
 
@@ -58,6 +64,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         blocked_instance_ids = []
 
     content_filters = {}
+    u_rp_ids = []
 
     # Post.user_id.not_in(blocked_person_ids)               # exclude posts by blocked users
     # Post.community_id.not_in(blocked_community_ids)       # exclude posts in blocked communities
@@ -115,8 +122,53 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                       Post.user_id.not_in(blocked_person_ids),
                                       Post.community_id.not_in(blocked_community_ids),
                                       Post.instance_id.not_in(blocked_instance_ids)). \
-                join(Community, Community.id == Post.community_id).filter(Community.show_all == True,
-                                                                          Community.id == community_id,
+                join(Community, Community.id == Post.community_id).filter(Community.id == community_id,
+                                                                          Community.instance_id.not_in(
+                                                                              blocked_instance_ids))
+            content_filters = user_filters_posts(user_id) if user_id else {}
+        elif feed_id:
+            feed = Feed.query.get(feed_id)
+            if feed.show_posts_in_children:  # include posts from child feeds
+                feed_ids = get_all_child_feed_ids(feed)
+            else:
+                feed_ids = [feed.id]
+
+            # for each feed get the community ids (FeedItem) in the feed
+            # used for the posts searching
+            feed_community_ids = []
+            for fid in feed_ids:
+                feed_items = FeedItem.query.join(Feed, FeedItem.feed_id == fid).all()
+                for item in feed_items:
+                    feed_community_ids.append(item.community_id)
+
+            posts = Post.query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
+                                      Post.user_id.not_in(blocked_person_ids),
+                                      Post.community_id.not_in(blocked_community_ids),
+                                      Post.instance_id.not_in(blocked_instance_ids)). \
+                join(Community, Community.id == Post.community_id).filter(Community.id.in_(feed_community_ids),
+                                                                          Community.instance_id.not_in(
+                                                                              blocked_instance_ids))
+            content_filters = user_filters_posts(user_id) if user_id else {}
+        elif topic_id:
+            topic = Topic.query.get(topic_id)
+            if topic.show_posts_in_children:  # include posts from child feeds
+                topic_ids = get_all_child_topic_ids(topic)
+            else:
+                topic_ids = [topic.id]
+
+            # for each feed get the community ids (FeedItem) in the feed
+            # used for the posts searching
+            topic_community_ids = []
+            for tid in topic_ids:
+                communities = Community.query.filter(Community.topic_id == tid).all()
+                for item in communities:
+                    topic_community_ids.append(item.id)
+
+            posts = Post.query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
+                                      Post.user_id.not_in(blocked_person_ids),
+                                      Post.community_id.not_in(blocked_community_ids),
+                                      Post.instance_id.not_in(blocked_instance_ids)). \
+                join(Community, Community.id == Post.community_id).filter(Community.id.in_(topic_community_ids),
                                                                           Community.instance_id.not_in(
                                                                               blocked_instance_ids))
             content_filters = user_filters_posts(user_id) if user_id else {}
@@ -150,13 +202,13 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
             upvoted_post_ids = recently_upvoted_posts(user_id)
             posts = posts.filter(Post.id.in_(upvoted_post_ids), Post.user_id != user_id)
         elif saved_only:
-            bookmarked_post_ids = db.session.execute(text('SELECT post_id FROM "post_bookmark" WHERE user_id = :user_id'),
-                                                     {"user_id": user_id}).scalars()
+            bookmarked_post_ids = tuple(db.session.execute(text('SELECT post_id FROM "post_bookmark" WHERE user_id = :user_id'),
+                                                     {"user_id": user_id}).scalars())
             posts = posts.filter(Post.id.in_(bookmarked_post_ids))
         elif user.hide_read_posts:
-            u_rp_ids = db.session.execute(text('SELECT read_post_id FROM "read_posts" WHERE user_id = :user_id'),
-                                          {"user_id": user_id}).scalars()
-            posts = posts.filter(Post.id.not_in(u_rp_ids))
+            u_rp_ids = tuple(db.session.execute(text('SELECT read_post_id FROM "read_posts" WHERE user_id = :user_id'),
+                                          {"user_id": user_id}).scalars())
+            posts = posts.filter(Post.id.not_in(u_rp_ids))              # do not pass set() into not_in(), only tuples or lists
 
         filtered_out_community_ids = filtered_out_communities(user)
         if len(filtered_out_community_ids):
@@ -222,9 +274,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         if post_subscriptions is None:
             post_subscriptions = []
 
-        read_posts = list(db.session.execute(
-            text('SELECT read_post_id FROM "read_posts" WHERE user_id = :user_id'),
-            {'user_id': user_id}).scalars())
+        read_posts = set(u_rp_ids)  # lookups ("in") on a set is O(1), tuples/lists are O(n). read_posts can be very large so this makes a difference.
 
         communities_moderating = moderating_communities_ids(user.id)
         communities_joined = joined_or_modding_communities(user.id)
@@ -232,7 +282,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         bookmarked_posts = []
         banned_from = []
         post_subscriptions = []
-        read_posts = []
+        read_posts = set()
         communities_moderating = []
         communities_joined = []
 
@@ -461,40 +511,8 @@ def post_post_mark_as_read(auth, data):
     user_id = authorise_api_user(auth)
 
     if 'post_id' in data:
-        post = Post.query.filter_by(id=data['post_id']).one()
-        if data['read'] == True:
-            # no compound primary key on user_id and read_post_id ??
-            existing = db.session.execute(
-                text('SELECT user_id FROM "read_posts" WHERE user_id = :user_id AND read_post_id = :post_id'),
-                {"user_id": user_id, "post_id": post.id}).scalar()
-            if not existing:
-                db.session.execute(text(
-                    'INSERT INTO "read_posts" (user_id, read_post_id, interacted_at) VALUES (:user_id, :post_id, :stamp)'),
-                                   {"user_id": user_id, "post_id": post.id, "stamp": utcnow()})
-                db.session.commit()
-        else:
-            db.session.execute(text('DELETE FROM "read_posts" WHERE user_id = :user_id AND read_post_id = :post_id'),
-                               {"user_id": user_id, "post_id": post.id})
-            db.session.commit()
+        mark_post_read([data['post_id']], data['read'], user_id)
     elif 'post_ids' in data:
-        posts = Post.query.filter(Post.id.in_(data['post_ids']))
-        if posts.count() == 0:
-            raise Exception('No posts from post_ids array found')
-        if data['read'] == True:
-            for post in posts:
-                existing = db.session.execute(
-                    text('SELECT user_id FROM "read_posts" WHERE user_id = :user_id AND read_post_id = :post_id'),
-                    {"user_id": user_id, "post_id": post.id}).scalar()
-                if not existing:
-                    db.session.execute(text(
-                        'INSERT INTO "read_posts" (user_id, read_post_id, interacted_at) VALUES (:user_id, :post_id, :stamp)'),
-                                       {"user_id": user_id, "post_id": post.id, "stamp": utcnow()})
-            db.session.commit()
-        else:
-            for post in posts:
-                db.session.execute(
-                    text('DELETE FROM "read_posts" WHERE user_id = :user_id AND read_post_id = :post_id'),
-                    {"user_id": user_id, "post_id": post.id})
-            db.session.commit()
+        mark_post_read(data['post_ids'], data['read'], user_id)
 
     return {"success": True}
