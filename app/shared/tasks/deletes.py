@@ -1,9 +1,11 @@
 from app import celery, db
 from app.activitypub.signature import default_context, send_post_request
-from app.models import Community, Instance, Post, PostReply, User, UserFollower, File
+from app.constants import NOTIF_REPORT, NOTIF_REPORT_ESCALATION
+from app.models import Community, Instance, Post, PostReply, User, UserFollower, File, Notification
 from app.utils import gibberish, instance_banned, get_task_session, patch_db_session
 
 from flask import current_app
+from sqlalchemy import Integer
 
 
 """ JSON format
@@ -29,7 +31,7 @@ def delete_reply(send_async, user_id, reply_id, reason=None):
         session = get_task_session()
         try:
             with patch_db_session(session):
-                reply = PostReply.query.filter_by(id=reply_id).one()
+                reply = session.query(PostReply).filter_by(id=reply_id).one()
                 delete_object(user_id, reply, reason=reason, session=session)
         except Exception:
             session.rollback()
@@ -44,7 +46,7 @@ def restore_reply(send_async, user_id, reply_id, reason=None):
         session = get_task_session()
         try:
             with patch_db_session(session):
-                reply = PostReply.query.filter_by(id=reply_id).one()
+                reply = session.query(PostReply).filter_by(id=reply_id).one()
                 delete_object(user_id, reply, is_restore=True, reason=reason, session=session)
         except Exception:
             session.rollback()
@@ -74,7 +76,7 @@ def restore_post(send_async, user_id, post_id, reason=None):
         session = get_task_session()
         try:
             with patch_db_session(session):
-                post = Post.query.filter_by(id=post_id).one()
+                post = session.query(Post).filter_by(id=post_id).one()
                 delete_object(user_id, post, is_post=True, is_restore=True, reason=reason, session=session)
         except Exception:
             session.rollback()
@@ -89,7 +91,7 @@ def delete_community(send_async, user_id, community_id):
         session = get_task_session()
         try:
             with patch_db_session(session):
-                community = Community.query.filter_by(id=community_id).one()
+                community = session.query(Community).filter_by(id=community_id).one()
                 delete_object(user_id, community, session=session)
         except Exception:
             session.rollback()
@@ -104,7 +106,7 @@ def restore_community(send_async, user_id, community_id):
         session = get_task_session()
         try:
             with patch_db_session(session):
-                community = Community.query.filter_by(id=community_id).one()
+                community = session.query(Community).filter_by(id=community_id).one()
                 delete_object(user_id, community, is_restore=True, session=session)
         except Exception:
             session.rollback()
@@ -214,6 +216,17 @@ def delete_object(user_id, object, is_post=False, is_restore=False, reason=None,
         for instance in instances:
             if instance.domain not in domains_sent_to:
                 send_post_request(instance.inbox, payload, user.private_key, user.public_url() + '#main-key')
+
+    # remove any notifications about deleted posts
+    if is_post:
+        notifs = session.query(Notification).filter(Notification.targets.op("->>")("post_id").cast(Integer) == object.id)
+        for notif in notifs:
+            # dont delete report notifs
+            if notif.notif_type == NOTIF_REPORT or notif.notif_type == NOTIF_REPORT_ESCALATION:
+                continue
+            session.delete(notif)
+        session.commit()
+
 
 
 @celery.task

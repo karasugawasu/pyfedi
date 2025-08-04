@@ -8,7 +8,7 @@ from flask import redirect, url_for, flash, current_app, abort, request, g, make
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 from furl import furl
-from sqlalchemy import text, desc
+from sqlalchemy import text, desc, Integer
 from sqlalchemy.orm.exc import NoResultFound
 
 from app import db, constants, cache, limiter
@@ -16,7 +16,7 @@ from app.activitypub.signature import default_context, send_post_request
 from app.activitypub.util import update_post_from_activity
 from app.community.forms import CreateLinkForm, CreateDiscussionForm, CreateVideoForm, CreatePollForm, EditImageForm
 from app.community.util import send_to_remote_instance, flair_from_form, hashtags_used_in_community
-from app.constants import NOTIF_REPORT, POST_STATUS_SCHEDULED, POST_STATUS_PUBLISHED
+from app.constants import NOTIF_REPORT, NOTIF_REPORT_ESCALATION, POST_STATUS_SCHEDULED, POST_STATUS_PUBLISHED
 from app.constants import SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, POST_TYPE_LINK, \
     POST_TYPE_IMAGE, \
     POST_TYPE_ARTICLE, POST_TYPE_VIDEO, POST_TYPE_POLL, SRC_WEB
@@ -29,12 +29,12 @@ from app.post import bp
 from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm, ConfirmationForm, \
     ConfirmationMultiDeleteForm, EditReplyForm, FlairPostForm, DeleteConfirmationForm
 from app.post.util import post_replies, get_comment_branch, tags_to_string, url_needs_archive, \
-    generate_archive_link, body_has_no_archive_link
+    generate_archive_link, body_has_no_archive_link, retrieve_archived_post
 from app.post.util import post_type_to_form_url_type
 from app.shared.post import edit_post, sticky_post, lock_post, bookmark_post, remove_bookmark_post, subscribe_post, \
-    vote_for_post
+    vote_for_post, mark_post_read
 from app.shared.reply import make_reply, edit_reply, bookmark_reply, remove_bookmark_reply, subscribe_reply, \
-    delete_reply, mod_remove_reply, vote_for_reply
+    delete_reply, mod_remove_reply, vote_for_reply, lock_post_reply
 from app.shared.site import block_remote_instance
 from app.shared.tasks import task_selector
 from app.utils import render_template, markdown_to_html, validation_required, \
@@ -65,6 +65,10 @@ def show_post(post_id: int):
                           'warning')
                 else:
                     flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
+        
+        if current_user.is_anonymous and (post.nsfw or post.nsfl):
+            flash(_('This post is only visible to logged in users.'))
+            return redirect(url_for("auth.login", next=f"/post/{post_id}"))
 
         sort = request.args.get('sort', 'hot' if current_user.is_anonymous else current_user.default_comment_sort or 'hot')
 
@@ -119,7 +123,7 @@ def show_post(post_id: int):
         else:
             if total_comments_on_post_and_cross_posts(post.id) < 100:   # if there are not many comments then we might as well load them with the post
                 lazy_load_replies = False
-                replies = post_replies(community, post.id, sort, current_user)
+                replies = post_replies(post, sort, current_user if current_user.is_authenticated else None)
                 more_replies = defaultdict(list)
                 if post.cross_posts:
                     cbf = communities_banned_from(current_user.get_id())
@@ -129,7 +133,8 @@ def show_post(post_id: int):
                         if cross_posted_post.community_id not in cbf \
                                 and cross_posted_post.community_id not in bc \
                                 and cross_posted_post.community.instance_id not in bi:
-                            cross_posted_replies = post_replies(cross_posted_post.community, cross_posted_post.id, sort, current_user)
+                            cross_posted_replies = post_replies(cross_posted_post, sort,
+                                                                current_user if current_user.is_authenticated else None)
                             if len(cross_posted_replies):
                                 more_replies[cross_posted_post.community].extend(cross_posted_replies)
             else:
@@ -138,6 +143,8 @@ def show_post(post_id: int):
                 lazy_load_replies = True
 
             form.notify_author.data = True
+            if current_user.is_authenticated:
+                form.language_id.data = current_user.language_id or g.site.language_id
 
             # user flair
             user_flair = {}
@@ -227,8 +234,7 @@ def show_post(post_id: int):
         if current_user.is_authenticated:
             user = current_user
             if current_user.hide_read_posts:
-                current_user.mark_post_as_read(post)
-                db.session.commit()
+                mark_post_read([post.id], True, current_user.id)
         else:
             user = None
 
@@ -246,6 +252,11 @@ def show_post(post_id: int):
                 recipient_language_name = lang.name
 
         content_filters = user_filters_posts(current_user.id) if current_user.is_authenticated else {}
+
+        if post.archived:
+            sort = 'hot'
+            archived_post = retrieve_archived_post(post.archived)
+            post.body_html = archived_post['body_html']     # do this last to avoid the db.session.commit() in mark_post_read(). We don't want to save data in .body_html to the DB, just have it there for display in the jinja template
 
         response = render_template('post/post.html', title=post.title, post=post, is_moderator=is_moderator,
                                    is_owner=community.is_owner(),
@@ -267,8 +278,9 @@ def show_post(post_id: int):
                                    reply_collapse_threshold=reply_collapse_threshold,
                                    etag=f"{post.id}{sort}_{hash(post.last_active)}",
                                    markdown_editor=current_user.is_authenticated and current_user.markdown_editor,
-                                   can_upvote_here=can_upvote(user, community),
-                                   can_downvote_here=can_downvote(user, community),
+                                   can_upvote_here=can_upvote(user, community) and post.archived is None,
+                                   can_downvote_here=can_downvote(user, community) and post.archived is None,
+                                   disable_voting=post.archived is not None,
                                    user_notes=user_notes(current_user.get_id()),
                                    banned_from_community=banned_from_community,
                                    low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
@@ -290,7 +302,7 @@ def post_lazy_replies(post_id, nonce):
     if request.method == 'OPTIONS':
         return ''
     post = Post.query.get_or_404(post_id)
-    sort = request.args.get('sort', 'hot')
+    sort = request.args.get('sort', 'hot') if post.archived is None else 'hot'  # archived posts can only show comments sorted by 'hot'
     community = post.community
     user = current_user if current_user.is_authenticated else None
 
@@ -312,7 +324,7 @@ def post_lazy_replies(post_id, nonce):
     # Get necessary data for comment rendering
     communities_banned_from_list = communities_banned_from(current_user.get_id()) if current_user.is_authenticated else []
     
-    replies = post_replies(post.community, post.id, sort, current_user)
+    replies = post_replies(post, sort, current_user if current_user.is_authenticated else None)
     more_replies = defaultdict(list)
     if post.cross_posts:
         cbf = communities_banned_from_list
@@ -322,8 +334,8 @@ def post_lazy_replies(post_id, nonce):
             if cross_posted_post.community_id not in cbf \
                     and cross_posted_post.community_id not in bc \
                     and cross_posted_post.community.instance_id not in bi:
-                cross_posted_replies = post_replies(cross_posted_post.community, cross_posted_post.id, sort,
-                                                    current_user)
+                cross_posted_replies = post_replies(cross_posted_post, sort,
+                                                    current_user if current_user.is_authenticated else None)
                 if len(cross_posted_replies):
                     more_replies[cross_posted_post.community].extend(cross_posted_replies)
     
@@ -549,7 +561,7 @@ def continue_discussion(post_id, comment_id):
     else:
         mod_user_ids = [mod.user_id for mod in mods]
         mod_list = User.query.filter(User.id.in_(mod_user_ids)).all()
-    replies = get_comment_branch(post.id, comment.id, 'top')
+    replies = get_comment_branch(post, comment.id, 'top', current_user if current_user.is_authenticated else None)
 
     # Voting history
     if current_user.is_authenticated:
@@ -584,7 +596,7 @@ def continue_discussion_ajax(post_id, comment_id, nonce):
     else:
         mod_user_ids = [mod.user_id for mod in mods]
         mod_list = User.query.filter(User.id.in_(mod_user_ids)).all()
-    replies = get_comment_branch(post.id, comment.id, 'top')
+    replies = get_comment_branch(post, comment.id, 'top', current_user if current_user.is_authenticated else None)
 
     # user flair
     user_flair = {}
@@ -672,6 +684,7 @@ def add_reply(post_id: int, comment_id: int):
             return redirect(url_for('post.continue_discussion', post_id=post_id, comment_id=reply.parent_id))
     else:
         form.notify_author.data = True
+        form.language_id.data = current_user.language_id or g.site.language_id
 
         return render_template('post/add_reply.html', title=_('Discussing %(title)s', title=post.title), post=post,
                                is_moderator=is_moderator, form=form, comment=in_reply_to,
@@ -710,7 +723,7 @@ def add_reply_inline(post_id: int, comment_id: int, nonce):
         recipient_language_id = in_reply_to.language_id or in_reply_to.author.language_id
         recipient_language_code = None
         recipient_language_name = None
-        if recipient_language_id:
+        if recipient_language_id and (current_user.language_id and current_user.language_id != recipient_language_id):
             lang = Language.query.get(recipient_language_id)
             if lang:
                 recipient_language_code = lang.code
@@ -939,16 +952,18 @@ def post_delete(post_id: int):
 
 
 def post_delete_post(community: Community, post: Post, user_id: int, reason: str | None, federate_deletion=True):
-    user: User = User.query.get(user_id)
-    if post.url:
-        post.calculate_cross_posts(delete_only=True)
-    post.deleted = True
-    post.deleted_by = user_id
-    post.author.post_count -= 1
-    community.post_count -= 1
-    if hasattr(g, 'site'):  # g.site is invalid when running from cli
-        flash(_('Post deleted.'))
-    db.session.commit()
+    user: User = db.session.query(User).get(user_id)
+    from app import redis_client
+    with redis_client.lock(f"lock:post:{post.id}", timeout=10, blocking_timeout=6):
+        if post.url:
+            post.calculate_cross_posts(delete_only=True)
+        post.deleted = True
+        post.deleted_by = user_id
+        post.author.post_count -= 1
+        community.post_count -= 1
+        if hasattr(g, 'site'):  # g.site is invalid when running from cli
+            flash(_('Post deleted.'))
+        db.session.commit()
 
     if federate_deletion:
 
@@ -959,9 +974,7 @@ def post_delete_post(community: Community, post: Post, user_id: int, reason: str
             'audience': post.community.public_url(),
             'to': [post.community.public_url(), 'https://www.w3.org/ns/activitystreams#Public'],
             'published': ap_datetime(utcnow()),
-            'cc': [
-                user.followers_url()
-            ],
+            'cc': [user.followers_url()],
             'object': post.ap_id,
             'uri': post.ap_id
         }
@@ -972,8 +985,7 @@ def post_delete_post(community: Community, post: Post, user_id: int, reason: str
         if not community.local_only:  # local_only communities do not federate
             # if this is a remote community and we are a mod of that community
             if not post.community.is_local() and user.is_local() and (post.user_id == user.id or community.is_moderator(user)):
-                send_post_request(post.community.ap_inbox_url, delete_json, user.private_key,
-                                  user.public_url() + '#main-key')
+                send_post_request(post.community.ap_inbox_url, delete_json, user.private_key, user.public_url() + '#main-key')
             elif post.community.is_local():  # if this is a local community - Announce it to followers on remote instances
                 announce = {
                     "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}",
@@ -993,9 +1005,9 @@ def post_delete_post(community: Community, post: Post, user_id: int, reason: str
                         send_to_remote_instance(instance.id, post.community.id, announce)
 
         # Federate to microblog followers
-        followers = UserFollower.query.filter_by(local_user_id=post.user_id)
+        followers = db.session.query(UserFollower).filter_by(local_user_id=post.user_id)
         if followers:
-            instances = Instance.query.join(User, User.instance_id == Instance.id).join(UserFollower,
+            instances = db.session.query(Instance).join(User, User.instance_id == Instance.id).join(UserFollower,
                                                                                         UserFollower.remote_user_id == User.id)
             instances = instances.filter(UserFollower.local_user_id == post.user_id)
             for instance in instances:
@@ -1005,6 +1017,16 @@ def post_delete_post(community: Community, post: Post, user_id: int, reason: str
     if post.user_id != user.id and reason is not None:
         add_to_modlog('delete_post', actor=user, target_user=post.author, reason=reason, community=community, post=post,
                       link_text=shorten_string(post.title), link=f'post/{post.id}')
+        
+    # remove any notifications about the post
+    notifs = db.session.query(Notification).filter(Notification.targets.op("->>")("post_id").cast(Integer) == post.id)
+    for notif in notifs:
+        # dont delete report notifs
+        if notif.notif_type == NOTIF_REPORT or notif.notif_type == NOTIF_REPORT_ESCALATION:
+            continue
+        db.session.delete(notif)
+    db.session.commit()
+
 
 
 @bp.route('/post/<int:post_id>/restore', methods=['POST'])
@@ -1396,7 +1418,7 @@ def post_set_flair(post_id):
                     post.flair.append(flair)
 
             db.session.commit()
-            if post.status == POST_STATUS_PUBLISHED and post.author.is_local():
+            if post.status == POST_STATUS_PUBLISHED:
                 task_selector('edit_post', post_id=post.id)
 
             if "/c/" in curr_url:
@@ -1420,7 +1442,7 @@ def post_set_flair(post_id):
             post.flair.clear()
             post.flair = flair_from_form(form.flair.data)
             db.session.commit()
-            if post.status == POST_STATUS_PUBLISHED and post.author.is_local():
+            if post.status == POST_STATUS_PUBLISHED:
                 task_selector('edit_post', post_id=post.id)
             return redirect(url_for('activitypub.community_profile', actor=post.community.link()))
         form.referrer.data = referrer()
@@ -1455,14 +1477,18 @@ def post_flair_list(post_id):
         abort(401)
 
 
-@bp.route('/post/<int:post_id>/lock/<mode>', methods=['GET', 'POST'])
+@bp.route('/post/<int:post_id>/lock/<mode>', methods=['POST'])
 @login_required
 def post_lock(post_id: int, mode):
-    try:
-        lock_post(post_id, mode == 'yes', SRC_WEB)
-    except:
-        abort(404)
+    lock_post(post_id, mode == 'yes', SRC_WEB)
     return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id)))
+
+
+@bp.route('/post/<int:post_id>/<int:post_reply_id>/lock/<mode>', methods=['POST'])
+@login_required
+def post_reply_lock(post_id: int, post_reply_id: int, mode):
+    lock_post_reply(post_reply_id, mode == 'yes', SRC_WEB)
+    return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{post_reply_id}')))
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/report', methods=['GET', 'POST'])
@@ -1815,9 +1841,11 @@ def post_reply_purge(post_id: int, comment_id: int):
         abort(404)
     if post_reply.deleted_by == current_user.id or post.community.is_moderator() or current_user.is_admin():
         if not post_reply.has_replies():
-            post_reply.delete_dependencies()
-            db.session.delete(post_reply)
-            db.session.commit()
+            from app import redis_client
+            with redis_client.lock(f"lock:post_reply:{post_reply.id}", timeout=10, blocking_timeout=6):
+                post_reply.delete_dependencies()
+                db.session.delete(post_reply)
+                db.session.commit()
             flash(_('Comment purged.'))
         else:
             flash(_('Comments that have been replied to cannot be purged.'))
@@ -1911,38 +1939,44 @@ def post_block_image_purge_posts(post_id: int):
 
 @bp.route('/post/<int:post_id>/voting_activity', methods=['GET'])
 @login_required
-@permission_required('change instance settings')
 def post_view_voting_activity(post_id: int):
     post = Post.query.get_or_404(post_id)
 
-    post_title = post.title
-    upvoters = User.query.join(PostVote, PostVote.user_id == User.id).filter_by(post_id=post_id, effect=1.0).\
-        order_by(User.ap_domain, User.user_name)
-    downvoters = User.query.join(PostVote, PostVote.user_id == User.id).filter_by(post_id=post_id, effect=-1.0).\
-        order_by(User.ap_domain, User.user_name)
+    if current_user.is_admin_or_staff() or post.community.is_moderator():
 
-    # local users will be at the bottom of each list as ap_domain is empty for those.
+        post_title = post.title
+        upvoters = User.query.join(PostVote, PostVote.user_id == User.id).filter_by(post_id=post_id, effect=1.0).\
+            order_by(User.ap_domain, User.user_name)
+        downvoters = User.query.join(PostVote, PostVote.user_id == User.id).filter_by(post_id=post_id, effect=-1.0).\
+            order_by(User.ap_domain, User.user_name)
 
-    return render_template('post/post_voting_activity.html', title=_('Voting Activity'),
-                           post_title=post_title, upvoters=upvoters, downvoters=downvoters)
+        # local users will be at the bottom of each list as ap_domain is empty for those.
+
+        return render_template('post/post_voting_activity.html', title=_('Voting Activity'),
+                               post_title=post_title, upvoters=upvoters, downvoters=downvoters)
+    else:
+        abort(403)
 
 
 @bp.route('/comment/<int:comment_id>/voting_activity', methods=['GET'])
 @login_required
-@permission_required('change instance settings')
 def post_reply_view_voting_activity(comment_id: int):
     post_reply = PostReply.query.get_or_404(comment_id)
 
-    reply_text = post_reply.body
-    upvoters = User.query.join(PostReplyVote, PostReplyVote.user_id == User.id).filter_by(post_reply_id=comment_id, effect=1.0).\
-        order_by(User.ap_domain, User.user_name)
-    downvoters = User.query.join(PostReplyVote, PostReplyVote.user_id == User.id).filter_by(post_reply_id=comment_id, effect=-1.0).\
-        order_by(User.ap_domain, User.user_name)
+    if current_user.is_admin_or_staff() or post_reply.community.is_moderator():
 
-    # local users will be at the bottom of each list as ap_domain is empty for those.
+        reply_text = post_reply.body
+        upvoters = User.query.join(PostReplyVote, PostReplyVote.user_id == User.id).filter_by(post_reply_id=comment_id, effect=1.0).\
+            order_by(User.ap_domain, User.user_name)
+        downvoters = User.query.join(PostReplyVote, PostReplyVote.user_id == User.id).filter_by(post_reply_id=comment_id, effect=-1.0).\
+            order_by(User.ap_domain, User.user_name)
 
-    return render_template('post/post_reply_voting_activity.html', title=_('Voting Activity'),
-                           reply_text=reply_text, upvoters=upvoters, downvoters=downvoters)
+        # local users will be at the bottom of each list as ap_domain is empty for those.
+
+        return render_template('post/post_reply_voting_activity.html', title=_('Voting Activity'),
+                               reply_text=reply_text, upvoters=upvoters, downvoters=downvoters)
+    else:
+        abort(403)
 
 
 @bp.route('/post/<int:post_id>/fixup_from_remote', methods=['POST'])
