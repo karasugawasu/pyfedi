@@ -19,7 +19,6 @@
     "background_color": "#c6e2ff",
     "display": "standalone",
     "display_override": ["window-controls-overlay"],
-    "orientation": "any",
     "start_url": "/",
     "scope": "/",
     "piefed_manifest_version": "default",
