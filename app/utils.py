@@ -2748,16 +2748,18 @@ def notif_id_to_string(notif_id) -> str:
 @cache.memoize(timeout=6000)
 def filtered_out_communities(user: User) -> List[int]:
     if user.community_keyword_filter:
-        communities = Community.query
+        keyword_filters = []
         for community_filter in user.community_keyword_filter.split(','):
-            if community_filter.strip():
-                communities = communities.filter(or_(Community.name.ilike(f"%{community_filter}%"),
-                                                     Community.title.ilike(f"%{community_filter}%"))
-                                                 )
-
-        return [community.id for community in communities.all()]
-    else:
-        return []
+            keyword = community_filter.strip()
+            if keyword:
+                keyword_filters.append(or_(Community.name.ilike(f"%{keyword}%"),
+                                           Community.title.ilike(f"%{keyword}%")))
+        
+        if keyword_filters:
+            communities = Community.query.filter(or_(*keyword_filters))
+            return [community.id for community in communities.all()]
+    
+    return []
 
 
 @cache.memoize(timeout=300)
@@ -3112,6 +3114,9 @@ def archive_post(post_id: int):
                 filename = f'post_{post_id}.json'
             with redis_client.lock(f"lock:post:{post_id}", timeout=300, blocking_timeout=6):
                 post = session.query(Post).get(post_id)
+
+                if post is None:
+                    return
 
                 # Delete thumbnail and medium sized versions if post has an image
                 if post.image_id is not None:

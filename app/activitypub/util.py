@@ -1265,11 +1265,30 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                     boto3_session = None
                                     s3 = None
 
-                                    # Use environment variables to determine medium and thumbnail format and quality
-
-                                    medium_image_format = current_app.config['MEDIA_IMAGE_MEDIUM_FORMAT']
+                                    # Use environment variables to determine medium and thumbnail format and quality.
+                                    # But for communities and users directories, preserve original file type.
+                                    if original_directory in ['communities', 'users']:
+                                        # Preserve original format by using the file extension
+                                        if file_ext.lower() in ['.jpg', '.jpeg']:
+                                            medium_image_format = 'JPEG'
+                                            thumbnail_image_format = 'JPEG'
+                                        elif file_ext.lower() == '.png':
+                                            medium_image_format = 'PNG'
+                                            thumbnail_image_format = 'PNG'
+                                        elif file_ext.lower() == '.webp':
+                                            medium_image_format = 'WEBP'
+                                            thumbnail_image_format = 'WEBP'
+                                        elif file_ext.lower() == '.avif':
+                                            medium_image_format = 'AVIF'
+                                            thumbnail_image_format = 'AVIF'
+                                        else:
+                                            # Default to PNG for other formats
+                                            medium_image_format = 'PNG'
+                                            thumbnail_image_format = 'PNG'
+                                    else:
+                                        medium_image_format = current_app.config['MEDIA_IMAGE_MEDIUM_FORMAT']
+                                        thumbnail_image_format = current_app.config['MEDIA_IMAGE_THUMBNAIL_FORMAT']
                                     medium_image_quality = current_app.config['MEDIA_IMAGE_MEDIUM_QUALITY']
-                                    thumbnail_image_format = current_app.config['MEDIA_IMAGE_THUMBNAIL_FORMAT']
                                     thumbnail_image_quality = current_app.config['MEDIA_IMAGE_THUMBNAIL_QUALITY']
 
                                     final_ext = file_ext  # track file extension for conversion
@@ -2161,41 +2180,23 @@ def notify_about_post_reply(parent_reply: Union[PostReply, None], new_reply: Pos
         for notify_id in send_notifs_to:
             if new_reply.user_id != notify_id:
                 author = User.query.get(new_reply.user_id)
-                if new_reply.depth <= THREAD_CUTOFF_DEPTH:
-                    targets_data = {'gen': '0',
-                                    'post_id': parent_reply.post.id,
-                                    'parent_reply_body': parent_reply.body,
-                                    'comment_id': new_reply.id,
-                                    'comment_body': new_reply.body,
-                                    'author_id': new_reply.user_id,
-                                    'author_user_name': author.ap_id if author.ap_id else author.user_name, }
-                    with force_locale(get_recipient_language(notify_id)):
-                        new_notification = Notification(
-                            title=shorten_string(gettext('Reply to comment on %(post_title)s',
-                                                         post_title=parent_reply.post.title), 150),
-                            url=f"/post/{parent_reply.post.id}#comment_{new_reply.id}",
-                            user_id=notify_id, author_id=new_reply.user_id,
-                            notif_type=NOTIF_REPLY,
-                            subtype='new_reply_on_followed_comment',
-                            targets=targets_data)
-                else:
-                    targets_data = {'gen': '0',
-                                    'post_id': parent_reply.post.id,
-                                    'parent_comment_id': parent_reply.id,
-                                    'parent_reply_body': parent_reply.body,
-                                    'comment_id': new_reply.id,
-                                    'comment_body': new_reply.body,
-                                    'author_id': new_reply.user_id,
-                                    'author_user_name': author.ap_id if author.ap_id else author.user_name, }
-                    with force_locale(get_recipient_language(notify_id)):
-                        new_notification = Notification(
-                            title=shorten_string(gettext('Reply to comment on %(post_title)s',
-                                                         post_title=parent_reply.post.title), 150),
-                            url=f"/post/{parent_reply.post.id}/comment/{parent_reply.id}#comment_{new_reply.id}",
-                            user_id=notify_id, author_id=new_reply.user_id,
-                            notif_type=NOTIF_REPLY,
-                            subtype='new_reply_on_followed_comment',
-                            targets=targets_data)
+                targets_data = {'gen': '0',
+                                'post_id': parent_reply.post.id,
+                                'parent_comment_id': new_reply.parent_id,
+                                'parent_reply_body': parent_reply.body,
+                                'comment_id': new_reply.id,
+                                'comment_body': new_reply.body,
+                                'author_id': new_reply.user_id,
+                                'author_user_name': author.ap_id if author.ap_id else author.user_name, }
+                with force_locale(get_recipient_language(notify_id)):
+                    new_notification = Notification(
+                        title=shorten_string(gettext('Reply to comment on %(post_title)s',
+                                                     post_title=parent_reply.post.title), 150),
+                        url=f"/post/{parent_reply.post.id}/comment/{new_reply.parent_id}#comment_{new_reply.id}",
+                        user_id=notify_id, author_id=new_reply.user_id,
+                        notif_type=NOTIF_REPLY,
+                        subtype='new_reply_on_followed_comment',
+                        targets=targets_data)
                 db.session.add(new_notification)
                 user = User.query.get(notify_id)
                 user.unread_notifications += 1
