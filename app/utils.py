@@ -624,30 +624,37 @@ def microblog_content_to_title(html: str) -> str:
     else:
         title = html_to_text(html)
 
-    period_index = title.find('.')
-    question_index = title.find('?')
-    exclamation_index = title.find('!')
+    # pタグで１行検出に変更しているのでこの一連の処理は不要
+    # period_index = title.find('.')
+    # question_index = title.find('?')
+    # exclamation_index = title.find('!')
 
-    # Find the earliest occurrence of either '.' or '?' or '!'
-    end_index = min(period_index if period_index != -1 else float('inf'),
-                    question_index if question_index != -1 else float('inf'),
-                    exclamation_index if exclamation_index != -1 else float('inf'))
+    # # Find the earliest occurrence of either '.' or '?' or '!'
+    # end_index = min(period_index if period_index != -1 else float('inf'),
+    #                 question_index if question_index != -1 else float('inf'),
+    #                 exclamation_index if exclamation_index != -1 else float('inf'))
 
     # there's no recognised punctuation
-    if end_index == float('inf'):
-        if len(title) >= 3:
-            title = title.replace(' @ ', '').replace(' # ', '')
-            title = shorten_string(title, 197)
-        else:
-            title = '(no title)'
-        return title.strip()
+    # if end_index == float('inf'):
+    #     if len(title) >= 3:
+    #         title = title.replace(' @ ', '').replace(' # ', '')
+    #         title = shorten_string(title, 197)
+    #     else:
+    #         title = '(no title)'
+    #     return title.strip()
 
-    if end_index != -1:
-        if question_index != -1 and question_index == end_index:
-            end_index += 1  # Add the ? back on
-        if exclamation_index != -1 and exclamation_index == end_index:
-            end_index += 1  # Add the ! back on
-        title = title[:end_index]
+    # if end_index != -1:
+    #     if question_index != -1 and question_index == end_index:
+    #         end_index += 1  # Add the ? back on
+    #     if exclamation_index != -1 and exclamation_index == end_index:
+    #         end_index += 1  # Add the ! back on
+    #     title = title[:end_index]
+
+    if len(title) >= 3:
+        title = title.replace(' @ ', '').replace(' # ', '')
+        title = shorten_string(title, 197)
+    else:
+        title = '(no title)'
 
     if len(title) > 150:
         for i in range(149, -1, -1):
