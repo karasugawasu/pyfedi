@@ -493,7 +493,8 @@ def get_alpha_post_list(data):
     try:
         auth = request.headers.get('Authorization')
         resp = get_post_list(auth, data)
-        return ListPostsResponse().load(resp)
+        validated = ListPostsResponse().load(resp)
+        return orjson_response(validated)
     except Exception as ex:
         return abort(400, message=str(ex))
 
