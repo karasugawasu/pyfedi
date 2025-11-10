@@ -136,7 +136,7 @@ def add_local():
         cache.delete_memoized(moderating_communities, current_user.id)
         return redirect('/c/' + community.name)
     else:
-        form.publicize.data = True
+        form.publicize.data = not current_app.debug
 
     return render_template('community/add_local.html', title=_('Create community'), form=form,
                            current_app=current_app)
@@ -151,6 +151,11 @@ def add_remote():
         return show_ban_message()
     form = SearchRemoteCommunity()
     new_community = None
+    
+    if get_setting("allow_default_user_add_remote_community", True) is False and not current_user.is_admin_or_staff():
+        flash(_('Adding remote communities is restricted to admin and staff users only.'))
+        return redirect(url_for('main.list_communities'))
+
     if form.validate_on_submit():
         address = form.address.data.strip().lower()
         if address.startswith('!') and '@' in address:
@@ -255,6 +260,8 @@ def show_community(community: Community):
 
     page = request.args.get('page', 1, type=int)
     sort = request.args.get('sort', '' if current_user.is_anonymous else current_user.default_sort)
+    if sort == 'scaled':
+        sort = ''
     content_type = request.args.get('content_type', 'posts')
     flair = request.args.get('flair', '')
     tag = request.args.get('tag', '')
@@ -417,6 +424,7 @@ def show_community(community: Community):
             posts = posts.order_by(asc(Post.posted_at))
         elif sort == 'active':
             sticky_posts = sticky_posts.order_by(desc(Post.sticky)).order_by(desc(Post.last_active))
+            posts = posts.filter(Post.reply_count > 0)
             posts = posts.order_by(desc(Post.sticky)).order_by(desc(Post.last_active))
         per_page = 20 if low_bandwidth else current_app.config['PAGE_LENGTH']
         if post_layout == 'masonry':
@@ -658,7 +666,10 @@ def show_community_rss(actor):
         for post in posts:
             fe = fg.add_entry()
             fe.title(post.title)
-            fe.link(href=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}")
+            if post.slug:
+                fe.link(href=f"https://{current_app.config['SERVER_NAME']}{post.slug}")
+            else:
+                fe.link(href=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}")
             if post.url:
                 type = mimetype_from_url(post.url)
                 if type and not type.startswith('text/'):
@@ -919,11 +930,11 @@ def join_then_add(actor):
 
 
 @bp.route('/<actor>/submit/<string:type>', methods=['GET', 'POST'])
-@bp.route('/<actor>/submit', defaults={'type': 'discussion'}, methods=['GET', 'POST'])
+@bp.route('/<actor>/submit', methods=['GET', 'POST'])
 @login_required
 @validation_required
 @approval_required
-def add_post(actor, type):
+def add_post(actor, type=None):
     if current_user.banned or current_user.ban_posts:
         return show_ban_message()
     if request.method == 'GET':
@@ -934,8 +945,12 @@ def add_post(actor, type):
         else:
             community = actor_to_community(actor)
 
-    post_type = POST_TYPE_ARTICLE
+    if type is None:
+        type = community.default_post_type or 'link'
+
+    post_type = POST_TYPE_LINK
     if type == 'discussion':
+        post_type = POST_TYPE_ARTICLE
         form = CreateDiscussionForm()
     elif type == 'link':
         post_type = POST_TYPE_LINK
@@ -1001,7 +1016,7 @@ def add_post(actor, type):
         if post.sticky:
             sticky_post(post.id, True, SRC_WEB)  # federating post's stickiness is separate from creating it
 
-        resp = make_response(redirect(f"/post/{post.id}"))
+        resp = make_response(redirect(post.slug))
         # remove cookies used to maintain state when switching post type
         resp.delete_cookie('post_title')
         resp.delete_cookie('post_description')
@@ -1115,8 +1130,9 @@ def community_edit(community_id: int):
             community.local_only = form.local_only.data
             community.restricted_to_mods = form.restricted_to_mods.data
             community.new_mods_wanted = form.new_mods_wanted.data
-            community.topic_id = form.topic.data if form.topic.data != 0 else None
+            community.topic_id = form.topic.data if form.topic.data > 0 else None
             community.default_layout = form.default_layout.data
+            community.default_post_type = form.default_post_type.data
             community.downvote_accept_mode = form.downvote_accept_mode.data
 
             icon_file = request.files['icon_file']
@@ -1172,6 +1188,7 @@ def community_edit(community_id: int):
             form.topic.data = community.topic_id if community.topic_id else None
             form.languages.data = community.language_ids()
             form.default_layout.data = community.default_layout
+            form.default_post_type.data = community.default_post_type
             form.downvote_accept_mode.data = community.downvote_accept_mode
         return render_template('community/community_edit.html', title=_('Edit community'), form=form,
                                current_app=current_app, current="edit_settings",
@@ -1393,7 +1410,7 @@ def community_block(community_id: int):
         resp = make_response()
         curr_url = request.headers.get('HX-Current-Url')
 
-        if "/post/" in curr_url:
+        if "/post/" in curr_url or ("/c/" in curr_url and "/p/" in curr_url):
             post_id = request.args.get('post_id', None)
             if post_id:
                 post = Post.query.get_or_404(post_id)
@@ -1780,7 +1797,7 @@ def community_wiki_add(actor):
             if form.validate_on_submit():
                 new_page = CommunityWikiPage(community_id=community.id, slug=form.slug.data, title=form.title.data,
                                              body=form.body.data, who_can_edit=form.who_can_edit.data)
-                new_page.body_html = markdown_to_html(new_page.body)
+                new_page.body_html = markdown_to_html(new_page.body, a_target="")
                 db.session.add(new_page)
                 db.session.commit()
 
@@ -1947,7 +1964,7 @@ def community_wiki_edit(actor, page_id):
                 page.title = form.title.data
                 page.slug = form.slug.data
                 page.body = form.body.data
-                page.body_html = markdown_to_html(page.body)
+                page.body_html = markdown_to_html(page.body, a_target="")
                 page.who_can_edit = form.who_can_edit.data
                 page.edited_at = utcnow()
                 new_revision = CommunityWikiPageRevision(wiki_page_id=page.id, user_id=current_user.id,
@@ -2431,8 +2448,9 @@ def check_url_already_posted():
         url = remove_tracking_from_link(url.strip())
         communities = Community.query.filter_by(banned=False).join(Post).filter(Post.url == url, Post.deleted == False,
                                                                                 Post.status > POST_STATUS_REVIEWING).all()
+        title, description = retrieve_metadata_of_url(url)
         return flask.render_template('community/check_url_posted.html', communities=communities,
-                                     title=retrieve_title_of_url(url))
+                                     title=title, description=description)
     else:
         abort(404)
 
@@ -2453,7 +2471,9 @@ def get_sidebar(community_id):
     return flask.render_template('community/description.html', community=community, hide_community_actions=True)
 
 
-def retrieve_title_of_url(url):
+def retrieve_metadata_of_url(url):
+    title = ''
+    description = ''
     try:
         response = httpx_client.get(url, timeout=10, follow_redirects=True)
         if response.status_code == 200:
@@ -2462,18 +2482,23 @@ def retrieve_title_of_url(url):
             # Try og:title first
             og_title = soup.find('meta', property='og:title')
             if og_title and og_title.get('content'):
-                return og_title.get('content').strip()
+                title = og_title.get('content').strip()
 
-            # Fall back to HTML title
-            title_tag = soup.find('title')
-            if title_tag:
-                return title_tag.get_text().strip()
+            if title == '':
+                # Fall back to HTML title
+                title_tag = soup.find('title')
+                if title_tag:
+                    title = title_tag.get_text().strip()
 
-            return ""
+            meta_description = soup.find('meta', {'name': 'description'})
+            if meta_description and meta_description.get('content'):
+                description = meta_description.get('content').strip()
+
+            return title, description
         else:
-            return ""
+            return title, description
     except Exception:
-        return ""
+        return title, description
 
 
 @bp.route('/c/<actor>/fixup_from_remote')

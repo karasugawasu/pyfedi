@@ -37,7 +37,7 @@
             {% if post_reply.author.id == post_reply.post.author.id -%}
                 <span title="Submitter of original post" aria-label="{{ _('Post creator') }}" class="user_flair original_poster">OP</span>
             {% endif -%}
-            <span class="comment_time"><a href="/post/{{ post_reply.post_id }}#comment_{{ post_reply.id }}">
+            <span class="comment_time">{% if has_continued %}<a href="{{ url_for('post.continue_discussion', post_id=post_reply.post.id, comment_id=post_reply.id) }}">{% else %}<a href="/post/{{ post_reply.post_id }}#comment_{{ post_reply.id }}">{% endif %}
                 {% if post_reply.edited_at -%}
                     edited <time datetime="{{ arrow.get(post_reply.posted_at) }}" title="{{ arrow.get(post_reply.posted_at) }}">{{ arrow.get(post_reply.edited_at).humanize(locale=locale) }}</time>
                 {% else -%}
@@ -130,7 +130,7 @@
                 {{ render_reply_notification_toggle(dict(comment=post_reply), current_user=current_user) }}
             {% endif -%}
         </div>
-        {% if can_translate and current_user.is_authenticated and current_user.language_id and post_reply.language_id and current_user.language_id != post_reply.language_id -%}
+        {% if can_translate and current_user.is_authenticated and current_user.language_id and post_reply.language_id and (current_user.language_id != post_reply.language_id or post_reply.community.always_translate) -%}
             <div class="post_translate_icon">
                 <a rel="nofollow noindex" title="{{ _('Translate') }}" href="#"
                    hx-post="{{ url_for('post.post_reply_translate', post_reply_id=post_reply.id) }}"

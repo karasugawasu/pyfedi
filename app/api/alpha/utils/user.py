@@ -1,4 +1,6 @@
 from flask import current_app
+from flask_login import current_user
+from furl import furl
 from sqlalchemy import text, desc, func
 from sqlalchemy.orm.exc import NoResultFound
 
@@ -6,17 +8,17 @@ from app import db, cache
 from app.activitypub.util import make_image_sizes
 from app.api.alpha.utils.post import get_post_list
 from app.api.alpha.utils.reply import get_reply_list
-from app.api.alpha.utils.validators import required, integer_expected, boolean_expected, string_expected
 from app.api.alpha.views import user_view, reply_view, post_view, community_view
 from app.constants import *
-from app.models import Conversation, ChatMessage, Notification, PostReply, User, Post, Community, File, UserFlair
+from app.models import Conversation, ChatMessage, Notification, PostReply, User, Post, Community, File, UserFlair, \
+    user_file, UserExtraField
 from app.shared.user import block_another_user, unblock_another_user, subscribe_user
-from app.utils import authorise_api_user, communities_banned_from, blocked_users, in_sorted_list, user_in_restricted_country
+from app.utils import authorise_api_user, in_sorted_list, user_in_restricted_country
 
 
 def get_user(auth, data):
-    if not data or ('person_id' not in data and 'username' not in data):
-        raise Exception('missing_parameters')
+    if 'person_id' not in data and 'username' not in data:
+        raise Exception('person_id or username required')
     if 'person_id' in data:
         person = int(data['person_id'])
     elif 'username' in data:
@@ -35,10 +37,9 @@ def get_user(auth, data):
                                    User.deleted == False).one()
         data['person_id'] = person.id
     include_content = data['include_content'] if 'include_content' in data else False
-    # include_content = True if include_content == 'true' else False
     saved_only = data['saved_only'] if 'saved_only' in data else False
-    # saved_only = True if saved_only == 'true' else False
-    data["limit"] = data["limit"] if data and "limit" in data else 20
+    if 'limit' not in data:
+        data['limit'] = 20
 
     user_details = None
     user_id = None
@@ -64,16 +65,24 @@ def get_user(auth, data):
     return user_json
 
 
+def get_user_details(auth):
+    person = authorise_api_user(auth, return_type='model')
+
+    user_json = user_view(user=person, variant=6, user_id=person.id)
+
+    return user_json
+
+
 def get_user_list(auth, data):
     # only support 'api/alpha/search?q&type_=Users&sort=Top&listing_type=Local&page=1&limit=15' for now
     # (enough for instance view)
 
-    type = data['type_'] if data and 'type_' in data else "All"
-    page = int(data['page']) if data and 'page' in data else 1
-    sort = data['sort'] if data and 'sort' in data else "Hot"
-    limit = int(data['limit']) if data and 'limit' in data else 10
+    type = data['type_'] if 'type_' in data else "All"
+    page = int(data['page']) if 'page' in data else 1
+    sort = data['sort'] if 'sort' in data else "Hot"
+    limit = int(data['limit']) if 'limit' in data else 10
 
-    query = data['q'] if data and 'q' in data else ''
+    query = data['q'] if 'q' in data else ''
 
     user_id = authorise_api_user(auth) if auth else None
 
@@ -109,10 +118,6 @@ def get_user_list(auth, data):
 
 
 def post_user_block(auth, data):
-    required(['person_id', 'block'], data)
-    integer_expected(['post_id'], data)
-    boolean_expected(['block'], data)
-
     person_id = data['person_id']
     block = data['block']
 
@@ -161,10 +166,10 @@ def get_user_unread_count(auth):
 
 
 def get_user_replies(auth, data, mentions=False):
-    page = int(data['page']) if data and 'page' in data else 1
-    limit = int(data['limit']) if data and 'limit' in data else 10
-    sort = data['sort'] if data and 'sort' in data else "New"
-    unread_only = data['unread_only'] if data and 'unread_only' in data else True
+    page = int(data['page']) if 'page' in data else 1
+    limit = int(data['limit']) if 'limit' in data else 10
+    sort = data['sort'] if 'sort' in data else "New"
+    unread_only = data['unread_only'] if 'unread_only' in data else True
 
     user_details = authorise_api_user(auth, return_type='dict')
     user_id = user_details['id']
@@ -237,6 +242,34 @@ def get_user_replies(auth, data, mentions=False):
     return list_json
 
 
+def get_user_media(auth, data):
+    page = int(data['page']) if 'page' in data else 1
+    limit = int(data['limit']) if 'limit' in data else 50
+
+    try:
+        user_id = authorise_api_user(auth)
+    except Exception:
+        if current_user.is_authenticated:
+            user_id = current_user.id
+        else:
+            raise Exception('incorrect_login')
+    files = File.query.join(user_file).filter(user_file.c.user_id == user_id).order_by(-File.id)
+
+    files = files.paginate(page=page, per_page=limit, error_out=False)
+    file_list = []
+    for file in files:
+        file_json = {}
+        file_json['name'] = file.file_name or str(furl(file.source_url).path).split('/')[-1]
+        file_json['url'] = file.source_url
+        file_list.append(file_json)
+
+    result_json = {
+        'media': file_list,
+        'next_page': str(files.next_num) if files.next_num else None
+    }
+    return result_json
+
+
 def post_user_mark_all_as_read(auth):
     user = authorise_api_user(auth, return_type='model')
 
@@ -262,10 +295,6 @@ def post_user_mark_all_as_read(auth):
 
 
 def put_user_subscribe(auth, data):
-    required(['person_id', 'subscribe'], data)
-    integer_expected(['person_id'], data)
-    boolean_expected(['subscribe'], data)
-
     person_id = data['person_id']
     subscribe = data['subscribe']
 
@@ -281,10 +310,9 @@ def put_user_save_user_settings(auth, data):
     show_nsfl = data['show_nsfl'] if 'show_nsfl' in data else None
     show_read_posts = data['show_read_posts'] if 'show_read_posts' in data else None
     about = data['bio'] if 'bio' in data else None
-    # avatar = data['avatar'] if 'avatar' in data else None
-    cover = data['cover'] if 'cover' in data else None
     default_sort = data['default_sort_type'] if 'default_sort' in data else None
     default_comment_sort = data['default_comment_sort_type'] if 'default_comment_sort' in data else None
+    extra_fields = data['extra_fields'] if 'extra_fields' in data else None
 
     if "avatar" in data:
         if not data["avatar"]:
@@ -380,6 +408,54 @@ def put_user_save_user_settings(auth, data):
         user.default_sort = default_sort.lower()
     if default_comment_sort is not None:
         user.default_comment_sort = default_comment_sort.lower()
+    
+    if extra_fields:
+        current_num_fields = user.extra_fields.count()
+        new_extra_fields = []
+        fields_to_remove = []
+
+        if current_num_fields > 0:
+            user_field_ids = [field.id for field in user.extra_fields]
+        else:
+            user_field_ids = []
+
+        for field in extra_fields:
+            if 'id' in field:
+                # Editing or deleting existing field
+                if field['id'] not in user_field_ids:
+                    raise Exception(f"Permission denied. Extra field {field['id']} belongs to different user")
+                
+                user_field = UserExtraField.query.get(field['id'])
+                label = field['label'] if 'label' in field else None
+                text = field['text'] if 'text' in field else None
+                
+                if not label or not text:
+                    # Mark field for deletion
+                    fields_to_remove.append(user_field)
+                    current_num_fields -= 1
+                else:
+                    # Edit existing field
+                    user_field.label = label
+                    user_field.text = text
+            
+            elif 'label' in field and 'text' in field:
+                # Create new field
+                label = field['label']
+                text = field['text']
+
+                if label and text:
+                    new_extra_fields.append(UserExtraField(label=label.strip(), text=text.strip()))
+                    current_num_fields += 1
+            
+        if current_num_fields <= 4:
+            # Remove fields
+            for field in fields_to_remove:
+                db.session.delete(field)
+            # Add new fields
+            for field in new_extra_fields:
+                user.extra_fields.append(field)
+        elif current_num_fields > 4:
+            raise Exception("Cannot have more than four extra fields")
 
     # save the change to the db
     db.session.commit()
@@ -396,8 +472,8 @@ def get_user_notifications(auth, data):
     status = data['status']
 
     # get the page for pagination from the data.page
-    page = int(data['page']) if data and 'page' in data else 1
-    limit = int(data['limit']) if data and 'limit' in data else 10
+    page = int(data['page']) if 'page' in data else 1
+    limit = int(data['limit']) if 'limit' in data else 10
 
     # items dict
     items = []
@@ -418,7 +494,7 @@ def get_user_notifications(auth, data):
     ]
 
     # new
-    if status == 'Unread':
+    if status == 'Unread' or status == 'New':
         for item in user_notifications:
             if item.read == False and item.notif_type in supported_notif_types:
                 if isinstance(item.subtype, str):
@@ -493,7 +569,7 @@ def _process_notification_item(item):
         notification_json['author'] = user_view(user=author.id, variant=1)
         notification_json['post'] = post_view(post, variant=2)
         notification_json['post_id'] = post.id
-        notification_json['community'] = community_view(community, variant=2)
+        notification_json['community'] = community_view(community, variant=1)
         notification_json['notif_body'] = post.body if post.body else ''
         notification_json['status'] = 'Read' if item.read else 'Unread'
         return notification_json
@@ -541,6 +617,7 @@ def _process_notification_item(item):
         notification_json['post'] = post_view(post, variant=2)
         notification_json['post_id'] = post.id
         notification_json['comment'] = reply_view(comment, variant=1)
+        notification_json['comment_view'] = reply_view(comment, variant=3)
         notification_json['comment_id'] = comment.id
         notification_json['notif_body'] = comment.body if comment.body else ''
         notification_json['status'] = 'Read' if item.read else 'Unread'
@@ -591,10 +668,6 @@ def _process_notification_item(item):
 
 
 def put_user_notification_state(auth, data):
-    required(['notif_id', 'read_state'], data)
-    integer_expected(['notif_id'], data)
-    boolean_expected(['read_state'], data)
-
     user_id = authorise_api_user(auth)
     notif_id = data['notif_id']
     read_state = data['read_state']
@@ -647,28 +720,22 @@ def put_user_mark_all_notifications_read(auth):
 
 
 def post_user_verify_credentials(data):
-    required(["username", "password"], data)
-    string_expected(["username", "password"], data)
-
     username = data['username'].lower()
     password = data['password']
 
     if '@' in username:
-        user = User.query.filter(func.lower(User.email) == username, User.ap_id == None, User.deleted == False).one()
+        user = User.query.filter(func.lower(User.email) == username, User.ap_id == None, User.deleted == False).first()
     else:
-        user = User.query.filter(func.lower(User.user_name) == username, User.ap_id == None, User.deleted == False).one()
+        user = User.query.filter(func.lower(User.user_name) == username, User.ap_id == None, User.deleted == False).first()
 
     if user is None or not user.check_password(password):
-        raise NoResultFound
+        raise BlockingIOError
 
     return {}
 
 
 def post_user_set_flair(auth, data):
-    required(['community_id'], data)
-    integer_expected(['community_id'], data)
-
-    flair_text = data['flair_text'] if data and 'flair_text' in data else None
+    flair_text = data['flair_text'] if 'flair_text' in data else None
 
     if flair_text is not None and len(flair_text) > 50:
         raise Exception('Flair text is too long (50 chars max)')

@@ -42,6 +42,7 @@
             <div id="tom_select">
                 {{ render_field(form.languages) }}
             </div>
+            {{ render_field(form.always_translate) }}
             {% if not community.is_local() %}
             <fieldset class="border pl-2 pt-2 mb-4">
                 <legend>{{ _('Will not be overwritten by remote server') }}</legend>

@@ -32,7 +32,7 @@ from app.models import Settings, BannedInstances, Role, User, RolePermission, Do
     Community, SendQueue, _store_files_in_s3, PostVote, Poll, \
     ActivityBatch, Reminder
 from app.shared.tasks import task_selector
-from app.shared.tasks.maintenance import add_remote_communities
+from app.shared.tasks.maintenance import add_remote_communities, remove_old_bot_content
 from app.utils import retrieve_block_list, blocked_domains, retrieve_peertube_block_list, \
     shorten_string, get_request, blocked_communities, gibberish, \
     recently_upvoted_post_replies, recently_upvoted_posts, jaccard_similarity, \
@@ -99,6 +99,12 @@ def register(app):
                 return
 
             db.drop_all()
+
+            # Drop PostgreSQL functions that are created by migrations but not dropped by drop_all()
+            # These functions persist even after tables are dropped and cause errors on db.create_all(), later.
+            db.session.execute(text("DROP FUNCTION IF EXISTS post_search_vector_update() CASCADE"))
+            db.session.commit()
+
             db.configure_mappers()
             db.create_all()
             private_key, public_key = RsaKeys.generate_keypair()
@@ -119,7 +125,8 @@ def register(app):
                                 'poa.st', 'freespeechextremist.com', 'bae.st', 'nicecrew.digital',
                                 'detroitriotcity.com',
                                 'pawoo.net', 'shitposter.club', 'spinster.xyz', 'catgirl.life', 'gameliberty.club',
-                                'yggdrasil.social', 'beefyboys.win', 'brighteon.social', 'cum.salon', 'wizard.casa']
+                                'yggdrasil.social', 'beefyboys.win', 'brighteon.social', 'cum.salon', 'wizard.casa',
+                                'maga.place']
             for bi in banned_instances:
                 db.session.add(BannedInstances(domain=bi))
                 print("Added banned instance", bi)
@@ -364,7 +371,64 @@ def register(app):
 
     @app.cli.command('daily-maintenance')
     def daily_maintenance():
-        daily_maintenance_celery()
+        from app.shared.tasks.maintenance import (
+            cleanup_old_notifications, cleanup_send_queue, process_expired_bans,
+            remove_old_community_content, update_hashtag_counts, delete_old_soft_deleted_content,
+            update_community_stats, cleanup_old_voting_data, unban_expired_users,
+            sync_defederation_subscriptions, check_instance_health, monitor_healthy_instances,
+            recalculate_user_attitudes, calculate_community_activity_stats, cleanup_old_activitypub_logs,
+            archive_old_posts, archive_old_users, cleanup_old_read_posts, refresh_instance_chooser,
+            clean_up_tmp
+        )
+
+        if not current_app.debug:
+            sleep(uniform(0, 10))  # Cron jobs are not very granular so there is a danger all instances will send in the same instant. A random delay avoids this.
+        print(f'1 {datetime.now()}')
+        if get_setting('enable_instance_chooser', False):
+            refresh_instance_chooser()
+        print(f'2 {datetime.now()}')
+        cleanup_old_notifications()
+        print(f'3 {datetime.now()}')
+        cleanup_old_read_posts()
+        print(f'4 {datetime.now()}')
+        cleanup_send_queue()
+        print(f'5 {datetime.now()}')
+        process_expired_bans()
+        print(f'6 {datetime.now()}')
+        remove_old_community_content()
+        remove_old_bot_content()
+        print(f'7 {datetime.now()}')
+        update_hashtag_counts()
+        print(f'8 {datetime.now()}')
+        update_community_stats()
+        print(f'9 {datetime.now()}')
+        cleanup_old_voting_data()
+        print(f'10 {datetime.now()}')
+        unban_expired_users()
+        print(f'11 {datetime.now()}')
+        sync_defederation_subscriptions()
+        print(f'12 {datetime.now()}')
+        check_instance_health.delay()
+        print(f'13 {datetime.now()}')
+        monitor_healthy_instances.delay()
+        print(f'14 {datetime.now()}')
+        recalculate_user_attitudes()
+        print(f'15 {datetime.now()}')
+        calculate_community_activity_stats()
+        print(f'16 {datetime.now()}')
+        cleanup_old_activitypub_logs()
+        print(f'17 {datetime.now()}')
+        if get_setting('auto_add_remote_communities', False):
+            add_remote_communities()
+            print(f'18 {datetime.now()}')
+        clean_up_tmp()
+        print(f'19 {datetime.now()}')
+        delete_old_soft_deleted_content()   # 35 mins
+        print(f'20 {datetime.now()}')
+        archive_old_posts()                 # 2 hours
+        print(f'21 {datetime.now()}')
+        archive_old_users()
+        print(f'Finished {datetime.now()}')
 
     @app.cli.command('archive-old-posts')
     def archive_old_p():
@@ -493,7 +557,7 @@ def register(app):
                         db.session.add(scheduled_post)
                         db.session.commit()
 
-                        scheduled_post.ap_id = f"https://{current_app.config['SERVER_NAME']}/post/{scheduled_post.id}"
+                        scheduled_post.generate_ap_id(scheduled_post.community)
                         # Update the scheduled_for with the next occurrence date
                         post.scheduled_for = next_occurrence
 

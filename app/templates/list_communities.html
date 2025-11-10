@@ -16,11 +16,13 @@
                             <a href="{{ url_for('community.add_local') }}" class="btn btn-sm btn-primary" aria-label="{{ _('Create local community') }}">{{ _('Create local community') }}</a>
                         </div>
                     {% endif -%}
-                    <div class="p-1">
-                        <a href="{{ url_for('community.add_remote') }}" class="btn btn-sm btn-primary" aria-label="{{ _('Add community from another instance') }}">
-                            {{ _('Add remote community') }}
-                        </a>
-                    </div>
+                    {% if default_user_add_remote or (is_staff or is_admin)  %}
+                        <div class="p-1">
+                            <a href="{{ url_for('community.add_remote') }}" class="btn btn-sm btn-primary" aria-label="{{ _('Add community from another instance') }}">
+                                {{ _('Add remote community') }}
+                            </a>
+                        </div>
+                    {% endif %}
                 </div>
             </div>
         {% endif -%}
@@ -107,7 +109,7 @@
                                         <select name="topic_id" id="topic_id"
                                                 class="form-control-sm form-select"
                                                 aria-label="{{ _('Choose a topic to filter communities by') }}">
-                                            <option value="0">
+                                            <option value="0" {{ 'selected' if topic_id == 0 }}>
                                                 {{ _('All') }}
                                             </option>
                                             {% for topic in topics -%}
@@ -154,7 +156,7 @@
                                         </select>
                                     </div>
                                 {% endif -%}
-                                {% if nsfw is not none -%}
+                                {% if not hide_nsfw -%}
                                     <div class="col-12 col-sm-6 col-lg-4 mb-2 px-1">
                                         <label for="language_id">
                                             {{ _('NSFW') }}:
@@ -327,7 +329,7 @@
                             <td>
                                 {{ arrow.get(community.created_at).humanize(locale=locale) }}
                             </td>
-                            <td>
+                            <td align="center">
                                 {{ loop.index }}
                             </td>
                         </tr>

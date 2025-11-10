@@ -76,8 +76,8 @@ def create_app(config_class=Config):
 
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
-    app.config["API_TITLE"] = "PieFed 1.2 Alpha API"
-    app.config["API_VERSION"] = "alpha 1.2"
+    app.config["API_TITLE"] = "PieFed 1.3 Alpha API"
+    app.config["API_VERSION"] = "alpha 1.3"
     app.config["OPENAPI_VERSION"] = "3.1.1"
     if app.config["SERVE_API_DOCS"]:
         app.config["OPENAPI_URL_PREFIX"] = "/api/alpha"
@@ -118,7 +118,7 @@ def create_app(config_class=Config):
                 }
             ],
             "info": {
-                "title": "PieFed 1.2 Alpha API",
+                "title": "PieFed 1.3 Alpha API",
                 "contact": {
                     "name": "Developer",
                     "url": "https://codeberg.org/rimu/pyfedi"
@@ -153,7 +153,6 @@ def create_app(config_class=Config):
         'app.shared.tasks.maintenance.*': {'queue': 'background'},
         'app.admin.routes.*': {'queue': 'background'},
         'app.admin.util.*': {'queue': 'background'},
-        'app.utils.archive_post': {'queue': 'background'},
     })
 
     # Initialize redis_client

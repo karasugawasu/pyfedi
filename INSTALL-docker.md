@@ -11,7 +11,7 @@ Note: This guide uses `docker compose`. Depending on your docker setup, you may 
 ```bash
 git clone https://codeberg.org/rimu/pyfedi.git
 cd pyfedi/
-git checkout v1.1.x
+git checkout v1.2.x
 ```
 
 Change the 'git checkout' line to be the latest release. Check the branch name to find what to use after 'checkout' by
@@ -36,6 +36,10 @@ Note: If your testing/dev instance needs to federate with other instances then y
 ```bash
 sudo nano compose.yaml
 ```
+
+If you want to customise compose.yaml it is better to
+[make a copy of it named compose.override.yaml](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/#example)
+and make your changes in there.
 
 #### CREATE REQUIRED FOLDERS WITH REQUIRED PERMISSIONS
 

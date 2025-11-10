@@ -63,6 +63,7 @@ class SiteMiscForm(FlaskForm):
     public_modlog = BooleanField(_l('Show moderation actions publicly'))
     private_instance = BooleanField(_l('Private instance - require login to browse'))
     show_inoculation_block = BooleanField(_l('Show Rational Discourse Toolkit in sidebar'))
+    allow_default_user_add_remote_community = BooleanField(_l('Allow non-admins to add remote communities'))
 
     submit = SubmitField(_l('Save'))
 
@@ -152,6 +153,7 @@ class EditCommunityForm(FlaskForm):
     posting_warning = StringField(_l('Posting warning'), validators=[Optional(), Length(min=3, max=512)])
     languages = SelectMultipleField(_l('Languages'), coerce=int, validators=[Optional()], render_kw={'class': 'form-select'})
     ignore_remote_language = BooleanField(_l('Override remote language setting'))
+    always_translate = BooleanField(_l('Always show translation icon on posts'))
     can_be_archived = BooleanField(_l('Old posts can be archived'))
     submit = SubmitField(_l('Save'))
 

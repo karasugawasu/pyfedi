@@ -1,5 +1,6 @@
 # Contents
 
+* [Minimum server requirements](#minimum)
 * [Choose your path - easy way or hard way](#choose-path)
 * [Setup Database](#setup-database)
 * [Install Python Libraries](#install-python-libraries)
@@ -17,6 +18,20 @@
 * [Pre-requisites for Mac OS](#pre-requisites-for-mac-os)
 * [Notes for Windows (WSL2)](#notes-for-windows-wsl2)        
 * [Notes for Pip Package Management](#notes-for-pip-package-management)
+
+<div id="minimum"></div>
+
+## Minimum server requirements
+
+Any OS that runs Python 3.9+
+2 CPU cores
+4 GB of RAM
+40 GB of storage (eventually)
+
+If your server will be used by more than 10 people, double the CPU and RAM.
+
+PieFed is quite frugal with storage usage but it will grow over time. After 18 months of operation PieFed.social uses 100 GB of space, for example.
+
 
 <div id="choose-path"></div>
 
@@ -41,19 +56,6 @@ whether your OS is compatible with what PieFed needs:
  - PostgreSQL 13+
  - Redis 6.x
 
-#### Hardware requirements
-
-It really depends on how many communities you will be subscribing to and how many users you have.
-
-Minimum:
- - 2 CPU cores
- - 3 GB of RAM
-
-Recommended:
- - 4 CPU cores
- - 5+ GB of RAM
-
-PieFed is quite frugal with storage usage but it will grow over time. After 18 months of operation PieFed.social uses 100 GB of space, for example.
 
 <div id="setup-database"></div>
 
@@ -141,7 +143,7 @@ source venv/bin/activate
 * Use pip to install requirements           
 
 ```bash
-pip install wheel
+pip install wheel setuptools
 pip install -r requirements.txt
 ```
 (see [Notes for Windows (WSL2)](#windows-wsl2) if appropriate)        
@@ -632,40 +634,48 @@ Under "Authorized Redirect URIs", use `https://yourdomain.tld/auth/google_author
 
 #### Log in with LDAP
 
-PieFed can connect to a LDAP server and use that to verify people's login details. You need to set the following environment variables:
+PieFed can connect to a LDAP server and use it in two different ways (you can enable one of the two, or both):
 
-```
-LDAP_SERVER_LOGIN = 'ip address'
-LDAP_PORT_LOGIN = 389
-LDAP_USE_SSL_LOGIN = 0
-LDAP_USE_TLS_LOGIN = 0
-LDAP_BIND_DN_LOGIN = 'cn=admin,dc=piefed,dc=social'
-LDAP_BIND_PASSWORD_LOGIN = ''
-LDAP_BASE_DN_LOGIN = 'ou=users,dc=piefed,dc=social'
-LDAP_USER_FILTER_LOGIN = '(uid={username})'
-LDAP_ATTR_USERNAME_LOGIN = 'uid'
-LDAP_ATTR_EMAIL_LOGIN = 'mail'
-LDAP_ATTR_PASSWORD_LOGIN = 'userPassword'
-```
+- read users
+- write users
 
-Test this out by going to `https://yourinstance.tld/test_ldap_login?username=something&password=something_else`
-
-PieFed can also **write to** a LDAP server so that other services can log in using the account details they use on your instance. 
-piefed.social uses this to let people log in to chat.piefed.social and translate.piefed.social using their piefed.social account. The
-environment variables for this are very similar:
+Either ways, you need to set the following environment variables:
 
 ```
 LDAP_SERVER = 'ip address'
 LDAP_PORT = 389
 LDAP_USE_SSL = 0
 LDAP_USE_TLS = 0
-LDAP_BIND_DN = 'cn=admin,dc=piefed,dc=social'
-LDAP_BIND_PASSWORD = ''
 LDAP_BASE_DN = 'ou=users,dc=piefed,dc=social'
-LDAP_USER_FILTER = '(uid={username})'
-LDAP_ATTR_USERNAME = 'uid'
-LDAP_ATTR_EMAIL = 'mail'
-LDAP_ATTR_PASSWORD = 'userPassword'
+```
+
+Then, depending on you use case, you can use the LDAP server to:
+
+1. Read users: log people in using their LDAP credentials.
+
+Set the following environment variables:
+
+```
+LDAP_READ_ENABLE = 1
+LDAP_READ_USER_FILTER_LOGIN = '(uid={username})'
+LDAP_READ_ATTR_USERNAME_LOGIN = 'uid'
+LDAP_READ_ATTR_EMAIL_LOGIN = 'mail'
+```
+
+Test this out by going to `https://yourinstance.tld/test_ldap_login?user_name=something&password=something_else`
+
+2. Write users: sync people info and credentials to the LDAP server so that other services can log in using the account
+details they use on your instance. piefed.social uses this to let people log in to chat.piefed.social and
+translate.piefed.social using their piefed.social account.
+
+```
+LDAP_WRITE_ENABLE = 1
+LDAP_WRITE_BIND_DN = 'cn=admin,dc=piefed,dc=social'
+LDAP_WRITE_BIND_PASSWORD = ''
+LDAP_WRITE_USER_FILTER = '(uid={username})'
+LDAP_WRITE_ATTR_USERNAME = 'uid'
+LDAP_WRITE_ATTR_EMAIL = 'mail'
+LDAP_WRITE_ATTR_PASSWORD = 'userPassword'
 ```
 
 Test this out by going to `https://yourinstance.tld/test_ldap`
@@ -683,14 +693,94 @@ All other urls have no special behaviour and will just display the page.
 
 ## Push notifications
 
-To have realtime popup notifications your instance needs to install another web app: [https://codeberg.org/PieFed/piefed-notifs](https://codeberg.org/PieFed/piefed-notifs)
+To have realtime popup notifications your instance needs to run another service using systemd, similar to the pyfedi service from earlier.
 
-This service needs to have access to the same redis service that the main PieFed app uses so putting it on the same server is simplest.
+Create a file called `/etc/systemd/system/piefed-notifs.service`:
+
+```
+[Unit]
+Description=Uvicorn service to serve PieFed notifications
+After=network.target
+
+[Service]
+User=rimu
+Group=rimu
+WorkingDirectory=/home/rimu/pyfedi/
+Environment="PATH=/home/rimu/pyfedi/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+ExecStart=/home/rimu/pyfedi/venv/bin/uvicorn fastapi_server:app --host 0.0.0.0 --port 8000
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+
+KillSignal=SIGTERM
+TimeoutStopSec=5
+KillMode=control-group
+
+
+[Install]
+WantedBy=multi-user.target
+```
+
+This is basically the same as the pyfedi.service file from earlier, with a different ExecStart and a couple of extras.
+
+Then enable it:
+
+```bash
+sudo systemctl enable piefed-notifs.service
+
+sudo systemctl start piefed-notifs.service
+```
+
+Check status of service:
+
+```bash
+sudo systemctl status piefed-notifs.service
+```
 
 You need to configure Nginx on the main PieFed app server to proxy requests to /notifications/stream through to the piefed-notifs service.
-See [the readme](https://codeberg.org/PieFed/piefed-notifs/src/branch/main/README.md) for more details. If you do this then you
-can set the `NOTIF_SERVER` environment variable to the same url as your instance. If you want to run piefed-notifs on an entirely different
-server then you can set `NOTIF_SERVER` to that url instead but I expect most will not need to -  Piefed-notifs is very lightweight.
+
+To do that, add this to your nginx config:
+
+```
+upstream notif_server {
+    server 127.0.0.1:8000 fail_timeout=0;
+    keepalive 6000;
+}
+```
+
+also, within the `server` block:
+
+```
+    location /notifications/stream {
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Host $http_host;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_pass http://notif_server;
+
+            # Disable buffering and allow long-lived connections
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_redirect off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            send_timeout 3600s;
+
+            # For nginx event-based connection handling
+            chunked_transfer_encoding on;
+            keepalive_requests 10000;
+
+            # Disable Nginx response buffering (important!)
+            gzip off;
+            tcp_nopush on;
+   }
+
+```
+
+In .env, set the `NOTIF_SERVER` environment variable to the same url as your instance, e.g. `NOTIF_SERVER = 'https://piefed.social'` 
+(no slash on the end, https:// on the start).
+
+The piefed-notifs service also significantly improves the efficiency of federation if your instance has busy local communities.
 
 ---
 

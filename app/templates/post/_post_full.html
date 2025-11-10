@@ -280,7 +280,7 @@
                                 <form action='/poll/{{ post.id }}/vote' method="post">
                             {% else -%}
                                 <form action='/auth/login' method="get">
-                                    <input type="hidden" name="next" value="/post/{{ post.id }}">
+                                    <input type="hidden" name="next" value="{{ post.slug }}">
                             {% endif -%}
                             <ul>
                                 {% for choice in poll_choices -%}
@@ -299,7 +299,7 @@
                                     {% endif -%}
                                 {% endfor -%}
                             </ul>
-                            {{ form.csrf_token() }}
+                            <input type="hidden" name="csrf_token" value="{{ cs }}" />
                             <input type="submit" class="btn btn-primary" value="{{ _('Vote') }}"> <a href="#" id="viewPollResults" class="small">{{ _('View results') }}</a>
                             </form>
                         </div>
@@ -337,7 +337,7 @@
                         <form action='/poll/{{ post.id }}/vote' method="post">
                     {% else -%}
                         <form action='/auth/login' method="get">
-                            <input type="hidden" name="next" value="/post/{{ post.id }}">
+                            <input type="hidden" name="next" value="{{ post.slug }}">
                     {% endif -%}
                     <ul>
                         {% for choice in poll_choices -%}
@@ -467,7 +467,7 @@
                 {% include 'post/_post_notification_toggle.html' -%}
             {% endif -%}
         </div>
-        {% if can_translate and current_user.is_authenticated and current_user.language_id and post.language_id and current_user.language_id != post.language_id -%}
+        {% if can_translate and current_user.is_authenticated and current_user.language_id and post.language_id and (current_user.language_id != post.language_id or post.community.always_translate) -%}
             <div class="post_translate_icon">
                 <a rel="nofollow noindex" title="{{ _('Translate') }}" href="#"
                         hx-post="{{ url_for('post.post_translate', post_id=post.id) }}"

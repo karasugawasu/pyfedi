@@ -140,6 +140,7 @@ def post_to_page(post: Post):
         "name": post.title,
         "cc": [],
         "content": post.body_html if post.body_html else '',
+        "summary": post.body_html if post.body_html else '',
         "mediaType": "text/html",
         "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
         "attachment": [],
@@ -155,6 +156,8 @@ def post_to_page(post: Post):
             "name": post.language_name()
         },
     }
+    if post.language_id:
+        activity_data['contentMap'] = {post.language_code(): activity_data['content']}
     if post.edited_at is not None:
         activity_data["updated"] = ap_datetime(post.edited_at)
     if (post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO or post.type == POST_TYPE_EVENT) and post.url is not None:
@@ -261,6 +264,8 @@ def banned_user_agents():
 
 def find_actor_or_create(actor: str, create_if_not_found=True, community_only=False, feed_only=False) -> Union[User, Community, Feed, None]:
     """Find an actor by URL or webfinger, optionally creating it if not found.
+
+    Consider using find_actor_or_create_cached() for better performance
     """
     from app.activitypub.actor import find_actor_by_url, validate_remote_actor
     if isinstance(actor, dict):
@@ -287,6 +292,72 @@ def find_actor_or_create(actor: str, create_if_not_found=True, community_only=Fa
         return create_actor_from_remote(actor_url, community_only, feed_only)
     else:
         return None
+
+
+@cache.memoize(timeout=300)  # 5 minutes
+def _find_actor_id_cached(actor_url: str, community_only: bool, feed_only: bool) -> Union[Tuple[int, str], None]:
+    """Cache only the actor ID and type, not the full SQLAlchemy model (cache.memoize cannot do DB models).
+    Returns a tuple of (id, class_name) or None if not found, to avoid Redis serialization issues with SQLAlchemy models.
+    """
+    actor_obj = find_actor_or_create(actor_url, create_if_not_found=False, community_only=community_only, feed_only=feed_only)
+    if actor_obj:
+        return (actor_obj.id, actor_obj.__class__.__name__)
+    return None
+
+
+def find_actor_or_create_cached(actor: str, create_if_not_found=True, community_only=False, feed_only=False) -> Union[User, Community, Feed, None]:
+    """Cached wrapper for find_actor_or_create().
+
+    This function provides significantly better performance (~24x faster) by caching
+    the actor ID in Redis and then fetching the model from the database using model.get().
+
+    Args:
+        actor: Actor URL or dict with 'id' key
+        create_if_not_found: If True, create the actor if not found (default: True)
+        community_only: Only return Community actors
+        feed_only: Only return Feed actors
+
+    Returns:
+        The actor model (User, Community, or Feed) or None if not found
+    """
+    from app.activitypub.actor import validate_remote_actor, schedule_actor_refresh
+
+    if isinstance(actor, dict):
+        actor = actor['id']
+
+    actor_url = actor.strip()
+    if not validate_remote_actor(actor_url):
+        return None
+
+    # Try to get cached ID and type
+    result = _find_actor_id_cached(actor_url, community_only, feed_only)
+
+    if result:
+        actor_id, actor_type = result
+        # Fetch fresh model from database using primary key lookup (very fast)
+        actor_obj = None
+        if actor_type == 'User':
+            actor_obj = db.session.get(User, actor_id)
+        elif actor_type == 'Community':
+            actor_obj = db.session.get(Community, actor_id)
+        elif actor_type == 'Feed':
+            actor_obj = db.session.get(Feed, actor_id)
+
+        if actor_obj:
+            # Schedule a refresh if needed
+            schedule_actor_refresh(actor_obj)
+            return actor_obj
+
+    # Not in cache - fall back to the original function
+    if create_if_not_found:
+        actor_obj = find_actor_or_create(actor_url, create_if_not_found=True, community_only=community_only, feed_only=feed_only)
+        # Cache the newly created actor for next time
+        if actor_obj:
+            cache.set(f"_find_actor_id_cached({actor_url},{community_only},{feed_only})",
+                     (actor_obj.id, actor_obj.__class__.__name__), timeout=300)
+        return actor_obj
+
+    return None
 
 
 def find_language(code: str) -> Language | None:
@@ -386,6 +457,7 @@ def find_flair_or_create(flair: dict, community_id: int, session=None) -> Commun
 
         return existing_flair
     else:
+        flair_text = text_color = background_color = blur_images = ''
         if "text_color" in flair:
             text_color = flair['text_color']
         elif "textColor" in flair:
@@ -408,12 +480,15 @@ def find_flair_or_create(flair: dict, community_id: int, session=None) -> Commun
         
         new_ap_id = flair["id"] if "id" in flair else None
 
-        new_flair = CommunityFlair(flair=flair_text.strip(), community_id=community_id,
-                                   text_color=text_color, background_color=background_color,
-                                   blur_images=blur_images,
-                                   ap_id=new_ap_id)
-        session.add(new_flair)
-        return new_flair
+        if flair_text:
+            new_flair = CommunityFlair(flair=flair_text.strip(), community_id=community_id,
+                                       text_color=text_color, background_color=background_color,
+                                       blur_images=blur_images,
+                                       ap_id=new_ap_id)
+            session.add(new_flair)
+            return new_flair
+        else:
+            return None
 
 
 def update_community_flair_from_tags(community: Community, flair_tags: list, session=None):
@@ -735,7 +810,9 @@ def refresh_community_profile_task(community_id, activity_json):
                                     flair_dict['background_color'] = flair['background_color']
                                 if 'blur_images' in flair:
                                     flair_dict['blur_images'] = flair['blur_images']
-                                community.flair.append(find_flair_or_create(flair_dict, community.id, session))
+                                new_flair = find_flair_or_create(flair_dict, community.id, session)
+                                if new_flair:
+                                    community.flair.append(new_flair)
                             session.commit()
                     
                     if "tag" in activity_json and isinstance(activity_json["tag"], list):
@@ -758,30 +835,30 @@ def refresh_community_profile_task(community_id, activity_json):
                                     time.sleep(0.5)
                                     user = find_actor_or_create(actor)
                                     if user:
-                                        existing_membership = CommunityMember.query.filter_by(community_id=community.id,
-                                                                                              user_id=user.id).first()
+                                        existing_membership = session.query(CommunityMember).\
+                                            filter_by(community_id=community.id, user_id=user.id).first()
                                         if existing_membership:
                                             existing_membership.is_moderator = True
-                                            db.session.commit()
+                                            session.commit()
                                         else:
                                             new_membership = CommunityMember(community_id=community.id, user_id=user.id,
                                                                              is_moderator=True)
-                                            db.session.add(new_membership)
-                                            db.session.commit()
+                                            session.add(new_membership)
+                                            session.commit()
 
                                 # Remove people who are no longer mods
-                                for member in CommunityMember.query.filter_by(community_id=community.id, is_moderator=True).all():
-                                    member_user = User.query.get(member.user_id)
+                                for member in session.query(CommunityMember).filter_by(community_id=community.id, is_moderator=True).all():
+                                    member_user = session.query(User).get(member.user_id)
                                     is_mod = False
                                     for actor in mods_data['orderedItems']:
                                         if actor.lower() == member_user.profile_id().lower():
                                             is_mod = True
                                             break
                                     if not is_mod:
-                                        db.session.query(CommunityMember).filter_by(community_id=community.id,
-                                                                                    user_id=member_user.id,
-                                                                                    is_moderator=True).delete()
-                                        db.session.commit()
+                                        session.query(CommunityMember).filter_by(community_id=community.id,
+                                                                                 user_id=member_user.id,
+                                                                                 is_moderator=True).delete()
+                                        session.commit()
 
                     if community.ap_followers_url:
                         followers_request = get_request(community.ap_followers_url, headers={'Accept': 'application/activity+json'})
@@ -922,33 +999,33 @@ def refresh_feed_profile_task(feed_id):
                                     time.sleep(0.5)
                                     user = find_actor_or_create(actor)
                                     if user:
-                                        existing_membership = FeedMember.query.filter_by(feed_id=feed.id,
+                                        existing_membership = session.query(FeedMember).filter_by(feed_id=feed.id,
                                                                                          user_id=user.id).first()
                                         if existing_membership:
                                             existing_membership.is_owner = True
-                                            db.session.commit()
+                                            session.commit()
                                         else:
                                             new_membership = FeedMember(feed_id=feed.id, user_id=user.id,
                                                                         is_owner=True)
-                                            db.session.add(new_membership)
-                                            db.session.commit()
+                                            session.add(new_membership)
+                                            session.commit()
 
                                 # Remove people who are no longer mods
                                 # this should not get triggered as feeds just have the one owner
                                 # right now, but that may change later so this is here for 
                                 # future proofing
-                                for member in FeedMember.query.filter_by(feed_id=feed.id, is_owner=True).all():
-                                    member_user = User.query.get(member.user_id)
+                                for member in session.query(FeedMember).filter_by(feed_id=feed.id, is_owner=True).all():
+                                    member_user = session.query(User).get(member.user_id)
                                     is_owner = False
                                     for actor in owners_data['orderedItems']:
                                         if actor.lower() == member_user.profile_id().lower():
                                             is_owner = True
                                             break
                                     if not is_owner:
-                                        db.session.query(FeedMember).filter_by(feed_id=feed.id,
-                                                                               user_id=member_user.id,
-                                                                               is_owner=True).delete()
-                                        db.session.commit()
+                                        session.query(FeedMember).filter_by(feed_id=feed.id,
+                                                                            user_id=member_user.id,
+                                                                            is_owner=True).delete()
+                                        session.commit()
 
                     # also make sure we have all the feeditems from the /following collection
                     res = get_request(feed.ap_following_url)
@@ -960,8 +1037,8 @@ def refresh_feed_profile_task(feed_id):
                         community = find_actor_or_create(community_ap_id, community_only=True)
                         if community and isinstance(community, Community):
                             feed_item = FeedItem(feed_id=feed.id, community_id=community.id)
-                            db.session.add(feed_item)
-                            db.session.commit()
+                            session.add(feed_item)
+                            session.commit()
 
     except Exception:
         session.rollback()
@@ -1341,7 +1418,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                     except:
                         pass
                     else:
-                        if source_image_response.status_code == 404 and '/api/v3/image_proxy' in file.source_url:
+                        if (source_image_response.status_code == 404 or source_image_response.status_code == 500) and '/api/v3/image_proxy' in file.source_url:
                             source_image_response.close()
                             # Lemmy failed to retrieve the image but we might have better luck. Example source_url: https://slrpnk.net/api/v3/image_proxy?url=https%3A%2F%2Fi.guim.co.uk%2Fimg%2Fmedia%2F24e87cb4d730141848c339b3b862691ca536fb26%2F0_164_3385_2031%2Fmaster%2F3385.jpg%3Fwidth%3D1200%26height%3D630%26quality%3D85%26auto%3Dformat%26fit%3Dcrop%26overlay-align%3Dbottom%252Cleft%26overlay-width%3D100p%26overlay-base64%3DL2ltZy9zdGF0aWMvb3ZlcmxheXMvdGctZGVmYXVsdC5wbmc%26enable%3Dupscale%26s%3D0ec9d25a8cb5db9420471054e26cfa63
                             # The un-proxied image url is the query parameter called 'url'
@@ -1527,7 +1604,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                         s3.close()
                                     session.commit()
 
-                                    site = Site.query.get(1)
+                                    site = session.query(Site).get(1)
                                     if site is None:
                                         site = Site()
 
@@ -1541,7 +1618,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                                 image_text = ''
                                             if 'Anonymous' in image_text and (
                                                     'No.' in image_text or ' N0' in image_text):  # chan posts usually contain the text 'Anonymous' and ' No.12345'
-                                                post = Post.query.filter_by(image_id=file.id).first()
+                                                post = session.query(Post).filter_by(image_id=file.id).first()
                                                 targets_data = {'gen': '0',
                                                                 'post_id': post.id,
                                                                 'orig_post_title': post.title,
@@ -1550,8 +1627,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                                 notification = Notification(title='Review this',
                                                                             user_id=1,
                                                                             author_id=post.user_id,
-                                                                            url=url_for('activitypub.post_ap',
-                                                                                        post_id=post.id),
+                                                                            url=post.slug,
                                                                             notif_type=NOTIF_REPORT,
                                                                             subtype='post_with_suspicious_image',
                                                                             targets=targets_data)
@@ -1597,16 +1673,47 @@ def find_reply_parent(in_reply_to: str) -> Tuple[int, int, int]:
     return post_id, parent_comment_id, root_id
 
 
-def find_liked_object(ap_id) -> Union[Post, PostReply, None]:
+@cache.memoize(timeout=300)  # 5 minutes
+def _find_liked_object_id(ap_id: str) -> Union[Tuple[int, str], None]:
+    """Cache only the object ID and type, not the full SQLAlchemy model.
+
+    Returns a tuple of (id, class_name) or None if not found.
+    This avoids Redis serialization issues with SQLAlchemy models.
+    """
     post = Post.get_by_ap_id(ap_id)
     if post:
         if post.archived:
             return None
-        return post
+        return (post.id, 'Post')
     else:
         post_reply = PostReply.get_by_ap_id(ap_id)
         if post_reply:
-            return post_reply
+            return (post_reply.id, 'PostReply')
+    return None
+
+
+def find_liked_object(ap_id) -> Union[Post, PostReply, None]:
+    """Find a post or comment by ActivityPub ID (cached).
+
+    This function caches the object ID in Redis and then fetches the fresh
+    model from the database using primary key lookup for better performance.
+    """
+    # Try to get cached ID and type
+    result = _find_liked_object_id(ap_id)
+
+    if result:
+        obj_id, obj_type = result
+        # Fetch fresh model from database using primary key lookup (very fast)
+        if obj_type == 'Post':
+            post = db.session.get(Post, obj_id)
+            if post and post.archived:
+                return None
+            return post
+        elif obj_type == 'PostReply':
+            return db.session.get(PostReply, obj_id)
+    else:
+        cache.delete_memoized(_find_liked_object_id, ap_id)
+
     return None
 
 
@@ -1705,7 +1812,7 @@ def new_instance_profile_task(instance_id: int):
                                     session.add(new_instance_role)
                                     session.commit()
                             # remove any InstanceRoles that are no longer part of instance-data['admins']
-                            for instance_admin in InstanceRole.query.filter_by(instance_id=instance.id):
+                            for instance_admin in session.query(InstanceRole).filter_by(instance_id=instance.id):
                                 if instance_admin.user.profile_id() not in admin_profile_ids:
                                     session.query(InstanceRole).filter(
                                         InstanceRole.user_id == instance_admin.user.id,
@@ -2231,13 +2338,13 @@ def notify_about_post_task(post_id):
     try:
         with patch_db_session(session):
             # get the post by id
-            post = Post.query.get(post_id)
+            post = session.query(Post).get(post_id)
 
             # get the author
-            author = User.query.get(post.user_id)
+            author = session.query(User).get(post.user_id)
 
             # get the community
-            community = Community.query.get(post.community_id)
+            community = session.query(Community).get(post.community_id)
 
             # Send notifications based on subscriptions
             notifications_sent_to = set()
@@ -2257,10 +2364,10 @@ def notify_about_post_task(post_id):
                                                     notif_type=NOTIF_USER,
                                                     subtype='new_post_from_followed_user',
                                                     targets=targets_data)
-                    db.session.add(new_notification)
-                    user = User.query.get(notify_id)
+                    session.add(new_notification)
+                    user = session.query(User).get(notify_id)
                     user.unread_notifications += 1
-                    db.session.commit()
+                    session.commit()
                     notifications_sent_to.add(notify_id)
 
             # NOTIF_COMMUNITY
@@ -2277,16 +2384,16 @@ def notify_about_post_task(post_id):
                                                     notif_type=NOTIF_COMMUNITY,
                                                     subtype='new_post_in_followed_community',
                                                     targets=targets_data)
-                    db.session.add(new_notification)
-                    user = User.query.get(notify_id)
+                    session.add(new_notification)
+                    user = session.query(User).get(notify_id)
                     user.unread_notifications += 1
-                    db.session.commit()
+                    session.commit()
                     notifications_sent_to.add(notify_id)
 
             # NOTIF_TOPIC    
             topic_send_notifs_to = notification_subscribers(post.community.topic_id, NOTIF_TOPIC)
             if post.community.topic_id:
-                topic = Topic.query.get(post.community.topic_id)
+                topic = session.query(Topic).get(post.community.topic_id)
             for notify_id in topic_send_notifs_to:
                 if notify_id != post.user_id and notify_id not in notifications_sent_to:
                     targets_data = {'gen': '0',
@@ -2301,15 +2408,15 @@ def notify_about_post_task(post_id):
                                                     notif_type=NOTIF_TOPIC,
                                                     subtype='new_post_in_followed_topic',
                                                     targets=targets_data)
-                    db.session.add(new_notification)
-                    user = User.query.get(notify_id)
+                    session.add(new_notification)
+                    user = session.query(User).get(notify_id)
                     user.unread_notifications += 1
-                    db.session.commit()
+                    session.commit()
                     notifications_sent_to.add(notify_id)
 
             # NOTIF_FEED
             # Get all the feeds that the post's community is in
-            community_feeds = Feed.query.join(FeedItem, FeedItem.feed_id == Feed.id).filter(
+            community_feeds = session.query(Feed).join(FeedItem, FeedItem.feed_id == Feed.id).filter(
                 FeedItem.community_id == post.community_id).all()
 
             for feed in community_feeds:
@@ -2328,10 +2435,10 @@ def notify_about_post_task(post_id):
                                                         notif_type=NOTIF_FEED,
                                                         subtype='new_post_in_followed_feed',
                                                         targets=targets_data)
-                        db.session.add(new_notification)
-                        user = User.query.get(notify_id)
+                        session.add(new_notification)
+                        user = session.query(User).get(notify_id)
                         user.unread_notifications += 1
-                        db.session.commit()
+                        session.commit()
                     notifications_sent_to.add(notify_id)
     except Exception:
         session.rollback()
@@ -2739,6 +2846,8 @@ def update_post_from_activity(post: Post, request_json: dict):
         # no URLs in Polls to worry about, so return now
         return
 
+    old_db_entry_to_delete = None
+
     if request_json['object']['type'] == 'Event':
         event = Event.query.filter_by(post_id=post.id).first()
         if event:
@@ -2755,6 +2864,17 @@ def update_post_from_activity(post: Post, request_json: dict):
             event.buy_tickets_link = request_json['object']['buyTicketsLink']
             event.event_fee_currency = request_json['object']['feeCurrency']
             event.event_fee_amount = request_json['object']['feeAmount']
+            if post.image:
+                post.image.delete_from_disk()
+                old_db_entry_to_delete = post.image_id
+            if 'image' in request_json['object']:
+                image = File(source_url=request_json['object']['image']['url'])
+                db.session.add(image)
+                db.session.commit()
+                post.image = image
+                make_image_sizes(image.id, 170, 512, 'posts')
+            else:
+                post.image_id = None
             db.session.commit()
 
     # Links
@@ -2820,7 +2940,6 @@ def update_post_from_activity(post: Post, request_json: dict):
         if new_domain.banned:
             db.session.commit()
             return  # reject change to url if new domain is banned
-    old_db_entry_to_delete = None
     if old_url != new_url:
         if post.image:
             post.image.delete_from_disk()
@@ -2973,7 +3092,7 @@ def process_report(user, reported, request_json, session):
                         'reasons': reasons,
                         'description': description
                         }
-        report = Report(reasons=reasons, description=description,
+        report = Report(reasons=reasons[:255], description=description[:255],
                         type=type, reporter_id=user.id, suspect_user_id=reported.id,
                         source_instance_id=user.instance_id, targets=targets_data)
         session.add(report)
@@ -3007,7 +3126,7 @@ def process_report(user, reported, request_json, session):
                         'orig_post_title': reported.title,
                         'orig_post_body': reported.body
                         }
-        report = Report(reasons=reasons, description=description, type=type, reporter_id=user.id,
+        report = Report(reasons=reasons[:255], description=description[:255], type=type, reporter_id=user.id,
                         suspect_user_id=reported.author.id, suspect_post_id=reported.id,
                         suspect_community_id=reported.community.id, in_community_id=reported.community.id,
                         source_instance_id=user.instance_id, targets=targets_data)
@@ -3041,7 +3160,7 @@ def process_report(user, reported, request_json, session):
                         'source_instance_domain': source_instance.domain,
                         'orig_comment_body': reported.body
                         }
-        report = Report(reasons=reasons, description=description, type=type, reporter_id=user.id,
+        report = Report(reasons=reasons[:255], description=description[:255], type=type, reporter_id=user.id,
                         suspect_post_id=post.id,
                         suspect_community_id=post.community.id,
                         suspect_user_id=reported.author.id, suspect_post_reply_id=reported.id,
@@ -3224,20 +3343,6 @@ def ensure_domains_match(activity: dict) -> bool:
             return True
 
     return False
-
-
-def can_edit(user_ap_id, post):
-    user = find_actor_or_create(user_ap_id, create_if_not_found=False)
-    if user:
-        if post.user_id == user.id:
-            return True
-        if post.community.is_moderator(user) or post.community.is_owner(user) or post.community.is_instance_admin(user):
-            return True
-    return False
-
-
-def can_delete(user_ap_id, post):
-    return can_edit(user_ap_id, post)
 
 
 def remote_object_to_json(uri):
@@ -3679,3 +3784,17 @@ def process_banned_message(banned_json, instance_domain: str, session):
                 "banned_until": utcnow() + timedelta(days=1)
             })
             session.commit()
+
+
+def is_vote(activity: dict) -> bool:
+    try:
+        if 'type' in activity:
+            if activity['type'] == 'Announce':
+                if 'object' in activity and isinstance(activity['object'], dict) and (activity['object']['type'] == 'Like' or activity['object']['type'] == 'Dislike'):
+                    return True
+            elif activity['type'] == 'Like' or activity['type'] == 'Dislike':
+                return True
+    except Exception:
+        return False
+
+    return False

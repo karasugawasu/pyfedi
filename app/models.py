@@ -16,6 +16,7 @@ from flask_babel import _, lazy_gettext as _l
 from flask_babel import force_locale, gettext
 from flask_login import UserMixin, current_user
 from flask_sqlalchemy.query import Query
+from slugify import slugify
 from sqlalchemy import or_, text, desc, Index
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.dialects.postgresql import BIT
@@ -238,6 +239,7 @@ class Conversation(db.Model):
 conversation_member = db.Table('conversation_member',
                                db.Column('user_id', db.Integer, db.ForeignKey('user.id')),
                                db.Column('conversation_id', db.Integer, db.ForeignKey('conversation.id')),
+                               db.Column('joined', db.Boolean, default=True),
                                db.PrimaryKeyConstraint('user_id', 'conversation_id')
                                )
 
@@ -294,6 +296,13 @@ post_tag = db.Table('post_tag', db.Column('post_id', db.Integer, db.ForeignKey('
 post_flair = db.Table('post_flair', db.Column('post_id', db.Integer, db.ForeignKey('post.id')),
                       db.Column('flair_id', db.Integer, db.ForeignKey('community_flair.id')),
                       db.PrimaryKeyConstraint('post_id', 'flair_id')
+                      )
+
+
+post_file = db.Table('post_file', db.Column('post_id', db.Integer, db.ForeignKey('post.id')),
+                      db.Column('file_id', db.Integer, db.ForeignKey('file.id')),
+                      db.Column('weight', db.Integer),
+                      db.PrimaryKeyConstraint('post_id', 'file_id')
                       )
 
 
@@ -506,10 +515,13 @@ class Community(db.Model):
     content_retention = db.Column(db.Integer, default=-1)
     topic_id = db.Column(db.Integer, db.ForeignKey('topic.id'), index=True)
     default_layout = db.Column(db.String(15))
+    default_post_type = db.Column(db.String(15))
     posting_warning = db.Column(db.String(512))
     downvote_accept_mode = db.Column(db.Integer, default=0)  # 0 = All, 2 = Community members, 4 = This instance, 6 = Trusted instances
     rss_url = db.Column(db.String(2048))
     can_be_archived = db.Column(db.Boolean, default=True, index=True)
+    average_rating = db.Column(db.Float)
+    always_translate = db.Column(db.Boolean)
 
     ap_id = db.Column(db.String(255), index=True)
     ap_profile_id = db.Column(db.String(255), index=True, unique=True)
@@ -824,6 +836,14 @@ user_role = db.Table('user_role',
                      db.PrimaryKeyConstraint('user_id', 'role_id')
                      )
 
+
+user_file = db.Table('user_file',
+                     db.Column('user_id', db.Integer, db.ForeignKey('user.id')),
+                     db.Column('file_id', db.Integer, db.ForeignKey('file.id')),
+                     db.Column('size', db.Integer),
+                     db.PrimaryKeyConstraint('user_id', 'file_id')
+                     )
+
 # table to hold users' 'read' post ids
 read_posts = db.Table('read_posts',
                       db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True, nullable=False),
@@ -922,6 +942,7 @@ class User(UserMixin, db.Model):
     mastodon_oauth_id = db.Column(db.String(64), unique=True, index=True)
     discord_oauth_id = db.Column(db.String(64), unique=True, index=True)
     password_updated_at = db.Column(db.DateTime, default=utcnow)
+    code_style = db.Column(db.String(25), default='fruity')
 
     avatar = db.relationship('File', lazy='joined', foreign_keys=[avatar_id], single_parent=True, cascade="all, delete-orphan")
     cover = db.relationship('File', lazy='joined', foreign_keys=[cover_id], single_parent=True, cascade="all, delete-orphan")
@@ -946,7 +967,7 @@ class User(UserMixin, db.Model):
     posts = db.relationship('Post', lazy='dynamic', cascade="all, delete-orphan")
     post_replies = db.relationship('PostReply', lazy='dynamic', cascade="all, delete-orphan")
     extra_fields = db.relationship('UserExtraField', lazy='dynamic', cascade="all, delete-orphan")
-    roles = db.relationship('Role', secondary=user_role, lazy='dynamic', cascade="all, delete")
+    roles = db.relationship('Role', secondary=user_role, lazy='dynamic')
     passkeys = db.relationship('Passkey', lazy='dynamic', cascade="all, delete-orphan")
     modlog_target = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.target_user_id", back_populates='target_user')
     modlog_actor = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.user_id", back_populates='author')
@@ -1098,7 +1119,7 @@ class User(UserMixin, db.Model):
     def trustworthy(self):
         if self.is_admin():
             return True
-        if self.created_recently() or self.reputation < 100:
+        if self.created_recently() and self.reputation < 100:
             return False
         return True
 
@@ -1210,11 +1231,11 @@ class User(UserMixin, db.Model):
 
         # Update attitude
         db.session.execute(text("""
-            UPDATE "user" 
+            UPDATE "user"
             SET attitude = :attitude
             WHERE id = :user_id
         """), {"attitude": new_attitude, "user_id": self.id})
-        db.session.commit()
+        # Note: Caller is responsible for committing
 
     def get_num_upvotes(self):
         post_votes = db.session.execute(
@@ -1359,6 +1380,13 @@ class User(UserMixin, db.Model):
                 db.session.delete(reply)
             db.session.commit()
 
+        files = File.query.join(user_file).filter(user_file.c.user_id == self.id).all()
+        for file in files:
+            file.delete_from_disk(purge_cdn=flush)
+            db.session.execute(text('DELETE FROM "user_file" WHERE file_id = :file_id'), {'file_id': file.id})
+            db.session.delete(file)
+            db.session.commit()
+
     def mention_tag(self):
         if self.ap_domain is None:
             return '@' + self.user_name + '@' + current_app.config['SERVER_NAME']
@@ -1431,7 +1459,7 @@ class Post(db.Model):
     deleted_by = db.Column(db.Integer, index=True)
     mea_culpa = db.Column(db.Boolean, default=False)
     has_embed = db.Column(db.Boolean, default=False)
-    reply_count = db.Column(db.Integer, default=0)
+    reply_count = db.Column(db.Integer, default=0, index=True)
     score = db.Column(db.Integer, default=0, index=True)  # used for 'top' ranking
     nsfw = db.Column(db.Boolean, default=False, index=True)
     nsfl = db.Column(db.Boolean, default=False, index=True)
@@ -1467,15 +1495,19 @@ class Post(db.Model):
 
     search_vector = db.Column(TSVectorType('title', 'body', weights={"title": "A", "body": "B"}, auto_index=False))
 
-    image = db.relationship(File, lazy='joined', foreign_keys=[image_id])
+    image = db.relationship(File, lazy='joined', foreign_keys=[image_id], cascade='all, delete')
     domain = db.relationship('Domain', lazy='joined', foreign_keys=[domain_id])
     author = db.relationship('User', lazy='joined', overlaps='posts', foreign_keys=[user_id])
     community = db.relationship('Community', lazy='joined', overlaps='posts', foreign_keys=[community_id])
-    replies = db.relationship('PostReply', lazy='dynamic', backref='post')
+    replies = db.relationship('PostReply', lazy='dynamic', backref='post', cascade='all, delete-orphan')
     language = db.relationship('Language', foreign_keys=[language_id], lazy='joined')
     licence = db.relationship('Licence', foreign_keys=[licence_id])
     modlog = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.post_id", back_populates='post')
-    event = db.relationship('Event', uselist=False, backref='post')
+    event = db.relationship('Event', uselist=False, backref='post', cascade='all, delete-orphan')
+    gallery = db.relationship('File', secondary=post_file, lazy='dynamic')
+    votes = db.relationship('PostVote', lazy='dynamic', backref='post', cascade='all, delete-orphan', passive_deletes=True)
+    bookmarks = db.relationship('PostBookmark', backref='post', cascade='all, delete-orphan')
+    poll = db.relationship('Poll', uselist=False, backref='post', cascade='all, delete-orphan')
 
     # db relationship tracked by the "read_posts" table
     # this is the Post side, so its referencing the User side
@@ -1518,6 +1550,10 @@ class Post(db.Model):
         return db.session.query(cls).filter_by(ap_id=ap_id).first()
 
     @classmethod
+    def get_by_slug(cls, slug):
+        return db.session.query(cls).filter_by(slug=slug).first()
+
+    @classmethod
     def new(cls, user: User, community: Community, request_json: dict, announce_id=None):
         from app.activitypub.util import instance_weight, find_language_or_create, find_language, \
             find_hashtag_or_create, \
@@ -1554,6 +1590,8 @@ class Post(db.Model):
                     microblog=microblog,
                     posted_at=utcnow()
                     )
+        if 'type' in request_json and request_json['type'] == 'Update':
+            post.edited_at = utcnow()
         if community.nsfw:
             post.nsfw = True  # old Lemmy instances ( < 0.19.8 ) allow nsfw content in nsfw communities to be flagged as sfw which makes no sense
         if community.nsfl:
@@ -1853,6 +1891,10 @@ class Post(db.Model):
                             if 'href' in attachment_item:
                                 post.url = attachment_item['href']
                                 break
+                if 'image' in request_json['object'] and post.image is None:
+                    image = File(source_url=request_json['object']['image']['url'])
+                    db.session.add(image)
+                    post.image = image
 
                 db.session.commit()
 
@@ -1876,6 +1918,8 @@ class Post(db.Model):
             db.session.add(vote)
             if user.is_local():
                 cache.delete_memoized(recently_upvoted_posts, user.id)
+
+            post.generate_slug(community)
             db.session.commit()
 
         return post
@@ -1921,55 +1965,31 @@ class Post(db.Model):
         db.session.commit()
 
     def delete_dependencies(self):
-        db.session.query(PostBookmark).filter(PostBookmark.post_id == self.id).delete()
-        db.session.query(PollChoiceVote).filter(PollChoiceVote.post_id == self.id).delete()
-        db.session.query(PollChoice).filter(PollChoice.post_id == self.id).delete()
-        db.session.query(Poll).filter(Poll.post_id == self.id).delete()
-        db.session.execute(text('DELETE FROM "event_user" WHERE post_id = :post_id'), {'post_id': self.id})
-        db.session.query(Event).filter(Event.post_id == self.id).delete()
+        # Handle non-cascading deletes and special cleanup
+
+        # ModLog entries should be preserved with NULL post_id
         db.session.query(ModLog).filter(ModLog.post_id == self.id).update({ModLog.post_id: None})
+
+        # Reports should be deleted
         db.session.query(Report).filter(Report.suspect_post_id == self.id).delete()
+
+        # Reminders should be deleted
         db.session.query(Reminder).filter(Reminder.reminder_destination == self.id, Reminder.reminder_type == 1).delete()
-        db.session.execute(text('DELETE FROM "post_vote" WHERE post_id = :post_id'), {'post_id': self.id})
 
-        reply_ids = db.session.execute(text('SELECT id FROM "post_reply" WHERE post_id = :post_id'),
-                                       {'post_id': self.id}).scalars()
-        reply_ids = tuple(reply_ids)
-        if reply_ids:
-            # Handle file deletions for reply images first
-            reply_image_ids = db.session.execute(text('SELECT image_id FROM "post_reply" WHERE post_id = :post_id AND image_id IS NOT NULL'),
-                                                 {'post_id': self.id}).scalars()
-            for image_id in reply_image_ids:
-                file = db.session.query(File).get(image_id)
-                if file:
-                    file.delete_from_disk(purge_cdn=False)
-            
-            # Delete all reply-related data
-            db.session.execute(text('DELETE FROM "post_reply_vote" WHERE post_reply_id IN :reply_ids'),
-                               {'reply_ids': reply_ids})
-            db.session.execute(text('DELETE FROM "post_reply_bookmark" WHERE post_reply_id IN :reply_ids'),
-                               {'reply_ids': reply_ids})
-            db.session.execute(text('DELETE FROM "report" WHERE suspect_post_reply_id IN :reply_ids'),
-                               {'reply_ids': reply_ids})
+        # Delete event_user entries (association table, no cascade relationship)
+        db.session.execute(text('DELETE FROM "event_user" WHERE post_id = :post_id'), {'post_id': self.id})
+
+        # Handle file deletions from disk before cascade deletes the File records
+        if self.image_id and self.image:
+            self.image.delete_from_disk(purge_cdn=False)
+
+        for reply in self.replies:
+            if reply.image_id and reply.image:
+                reply.image.delete_from_disk(purge_cdn=False)
             # Update ModLog entries to remove references to deleted replies
-            db.session.execute(text('UPDATE "mod_log" SET reply_id = NULL WHERE reply_id IN :reply_ids'),
-                               {'reply_ids': reply_ids})
-            # Finally delete all the replies
-            db.session.execute(text('DELETE FROM "post_reply" WHERE post_id = :post_id'), {'post_id': self.id})
-
-        if self.image_id:
-            # Check if any other Posts reference this File
-            other_posts_count = db.session.execute(
-                text("SELECT COUNT(*) FROM post WHERE image_id = :image_id AND id != :post_id"),
-                {"image_id": self.image_id, "post_id": self.id}).scalar()
-            
-            # Only delete the File if no other Posts reference it
-            if other_posts_count == 0:
-                file = db.session.query(File).get(self.image_id)
-                if file:
-                    file.delete_from_disk(purge_cdn=False)
-                    db.session.delete(file)
-            self.image_id = None
+            db.session.query(ModLog).filter(ModLog.reply_id == reply.id).update({ModLog.reply_id: None})
+            # Delete reports for this reply
+            db.session.query(Report).filter(Report.suspect_post_reply_id == reply.id).delete()
 
         if self.archived:
             if self.archived.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}') and _store_files_in_s3():
@@ -2025,6 +2045,21 @@ class Post(db.Model):
                 return f'{video_id}'
 
         return ''
+
+    def generate_ap_id(self, community: Community):
+        # Make the ActivityPub ID of a post in the format of instance.tld/c/community@instance/p/post_id/post-title-as-slug
+        # Use this for posts this instance is creating only - remote posts will already have an AP ID.
+        if self.ap_id is None or self.ap_id == '' or len(self.ap_id) == 10:
+            slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
+            self.ap_id = f'{current_app.config["HTTP_PROTOCOL"]}://{current_app.config["SERVER_NAME"]}/c/{community.name}/p/{self.id}/{slug}'
+            self.slug = f'/c/{community.name}/p/{self.id}/{slug}'
+
+    def generate_slug(self, community: Community):
+        # Make the slug of a post in the format of /c/community@instance/p/post_id/post-title-as-slug
+        # This should only be used for incoming remote posts. Locally-made posts will have a slug from generate_ap_id()
+        if self.slug is None or self.slug == '':
+            slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
+            self.slug = f'/c/{community.name}/p/{self.id}/{slug}'
 
     def peertube_embed(self):
         if self.url:
@@ -2224,6 +2259,10 @@ class Post(db.Model):
             self.ranking_scaled = int(self.ranking + self.community.scale_by())
 
             db.session.commit()
+            if user.is_local():
+                from app.utils import recently_upvoted_posts, recently_downvoted_posts
+                cache.delete_memoized(recently_upvoted_posts, user.id)
+                cache.delete_memoized(recently_downvoted_posts, user.id)
         return undo
 
 
@@ -2273,7 +2312,10 @@ class PostReply(db.Model):
     author = db.relationship('User', lazy='joined', foreign_keys=[user_id], single_parent=True, overlaps="post_replies")
     community = db.relationship('Community', lazy='joined', overlaps='replies', foreign_keys=[community_id])
     language = db.relationship('Language', foreign_keys=[language_id], lazy='joined')
+    image = db.relationship('File', foreign_keys=[image_id], cascade='all, delete')
     modlog = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.reply_id", back_populates='reply')
+    votes = db.relationship('PostReplyVote', lazy='dynamic', backref='reply', cascade='all, delete-orphan', passive_deletes=True)
+    bookmarks = db.relationship('PostReplyBookmark', backref='reply', cascade='all, delete-orphan')
 
     __table_args__ = (
         db.Index(
@@ -2332,6 +2374,8 @@ class PostReply(db.Model):
                           ap_id=request_json['object']['id'] if request_json else None,
                           ap_create_id=request_json['id'] if request_json else None,
                           ap_announce_id=announce_id)
+        if request_json and request_json['type'] == 'Update':
+            reply.edited_at = utcnow()
         if reply.body:
             for blocked_phrase in blocked_phrases():
                 if blocked_phrase in reply.body:
@@ -2458,27 +2502,22 @@ class PostReply(db.Model):
 
     def delete_dependencies(self):
         """
-        The first loop doesn't seem to ever be invoked with the current behaviour.
-        For replies with their own replies: functions which deal with removal don't set reply.deleted and don't call this, and
-        because reply.deleted isn't set, the cli task 7 days later doesn't call this either.
-
-        The plan is to set reply.deleted whether there's child replies or not (as happens with the API call), so I've commented
-        it out so the current behaviour isn't changed.
-
-        for child_reply in self.child_replies():
-            child_reply.delete_dependencies()
-            db.session.delete(child_reply)
+        Handle non-cascading deletes and special cleanup.
+        Note: PostReplyBookmark and PostReplyVote are now handled by cascade='all, delete-orphan'
         """
 
-        db.session.query(PostReplyBookmark).filter(PostReplyBookmark.post_reply_id == self.id).delete()
+        # Reminders should be deleted (no relationship defined, small table)
         db.session.query(Reminder).filter(Reminder.reminder_destination == self.id, Reminder.reminder_type == 2).delete()
+
+        # ModLog entries should be preserved with NULL reply_id
         db.session.query(ModLog).filter(ModLog.reply_id == self.id).update({ModLog.reply_id: None})
+
+        # Reports should be deleted (small table, not worth adding cascade)
         db.session.query(Report).filter(Report.suspect_post_reply_id == self.id).delete()
-        db.session.execute(text('DELETE FROM post_reply_vote WHERE post_reply_id = :post_reply_id'),
-                           {'post_reply_id': self.id})
-        if self.image_id:
-            file = db.session.query(File).get(self.image_id)
-            file.delete_from_disk(purge_cdn=False)
+
+        # Handle file deletion from disk before cascade deletes the File record
+        if self.image_id and self.image:
+            self.image.delete_from_disk(purge_cdn=False)
 
     def child_replies(self):
         return db.session(PostReply).filter_by(parent_id=self.id).all()
@@ -2572,6 +2611,10 @@ class PostReply(db.Model):
             # Calculate the new ranking value
             self.ranking = wilson_confidence_lower_bound(self.up_votes, self.down_votes)
             db.session.commit()
+            if user.is_local():
+                from app.utils import recently_upvoted_post_replies, recently_downvoted_post_replies
+                cache.delete_memoized(recently_upvoted_post_replies, user.id)
+                cache.delete_memoized(recently_downvoted_post_replies, user.id)
         return undo
 
 
@@ -2785,7 +2828,6 @@ class PostVote(db.Model):
     post_id = db.Column(db.Integer, db.ForeignKey('post.id'), index=True)
     effect = db.Column(db.Float, index=True)
     created_at = db.Column(db.DateTime, default=utcnow)
-    post = db.relationship('Post', foreign_keys=[post_id])
 
     __table_args__ = (
         Index('ix_post_vote_user_id_id_desc', 'user_id', desc('id')),
@@ -2916,6 +2958,8 @@ class Poll(db.Model):
     local_only = db.Column(db.Boolean)
     latest_vote = db.Column(db.DateTime)
 
+    choices = db.relationship('PollChoice', backref='poll', cascade='all, delete-orphan', foreign_keys='PollChoice.post_id', primaryjoin='Poll.post_id==PollChoice.post_id')
+
     def has_voted(self, user_id):
         existing_vote = PollChoiceVote.query.filter(PollChoiceVote.user_id == user_id,
                                                     PollChoiceVote.post_id == self.post_id).first()
@@ -2943,6 +2987,8 @@ class PollChoice(db.Model):
     choice_text = db.Column(db.String(200))
     sort_order = db.Column(db.Integer)
     num_votes = db.Column(db.Integer, default=0)
+
+    votes = db.relationship('PollChoiceVote', backref='choice', cascade='all, delete-orphan')
 
     def percentage(self, poll_total_votes):
         return math.floor(self.num_votes / poll_total_votes * 100)
@@ -3105,6 +3151,7 @@ class Site(db.Model):
     additional_js = db.Column(db.Text)
     private_instance = db.Column(db.Boolean, default=False)
     language_id = db.Column(db.Integer)
+     
 
     @staticmethod
     def admins() -> List[User]:
@@ -3445,6 +3492,14 @@ class Reminder(db.Model):
     remind_at = db.Column(db.DateTime)
     reminder_type = db.Column(db.Integer)
     reminder_destination = db.Column(db.Integer)
+
+
+class Rating(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), index=True)
+    created_at = db.Column(db.DateTime, index=True, default=utcnow)
+    rating = db.Column(db.Float)
 
 
 def _large_community_subscribers() -> float:
