@@ -10,10 +10,10 @@ from sqlalchemy import or_
 
 from app import cache, db
 from app.activitypub.util import get_request, signed_get_request, actor_json_to_model, refresh_user_profile, \
-    refresh_community_profile, refresh_feed_profile, extract_domain_and_actor, instance_allowed, normalise_actor_string
+    refresh_community_profile, refresh_feed_profile, extract_domain_and_actor, normalise_actor_string
 from app.models import User, Community, Feed, Site
 from app.utils import utcnow, get_setting, actor_contains_blocked_words, actor_profile_contains_blocked_words, \
-    instance_banned, low_value_reposters
+    instance_banned, low_value_reposters, instance_allowed
 
 
 def find_local_community(actor_url: str) -> Community:
@@ -107,9 +107,10 @@ def find_remote_actor(actor_url):
     return actor
 
 
-def schedule_actor_refresh(actor):
+def schedule_actor_refresh(actor, override=False):
     """Schedule an async refresh of actor data if needed."""
-    if not actor.is_local() and (actor.ap_fetched_at is None or actor.ap_fetched_at < utcnow() - timedelta(days=1)):
+    if not actor.is_local() and (
+        actor.ap_fetched_at is None or actor.ap_fetched_at < utcnow() - timedelta(days=1) or override):
         refresh_in_progress = cache.get(f'refreshing_{actor.id}')
         if not refresh_in_progress:
             cache.set(f'refreshing_{actor.id}', True, timeout=300)
@@ -125,38 +126,59 @@ def schedule_actor_refresh(actor):
 def fetch_remote_actor_data(url: str, retry_count=1):
     """Fetch actor data with retry logic."""
     for attempt in range(retry_count + 1):
+        response = None
         try:
             response = get_request(url, headers={'Accept': 'application/activity+json'})
             if response.status_code == 200:
                 try:
-                    data = response.json()
-                    response.close()
-                    return data
-                except Exception:
-                    response.close()
+                    return response.json()
+                except ValueError:
                     return None
+
             elif response.status_code == 401:
-                # Try with a signed request
+                signed_response = None
                 try:
                     site = db.session.query(Site).get(1)
-                    response = signed_get_request(url, site.private_key,
-                                                  f"https://{current_app.config['SERVER_NAME']}/actor#main-key")
+                    signed_response = signed_get_request(url, site.private_key, f"https://{current_app.config['SERVER_NAME']}/actor#main-key")
                     try:
-                        data = response.json()
-                        response.close()
-                        return data
-                    except Exception:
-                        response.close()
+                        return signed_response.json()
+                    except ValueError:
                         return None
                 except Exception:
                     return None
-            response.close()
-        except httpx.HTTPError:
+                finally:
+                    if signed_response is not None:
+                        signed_response.close()
+
+            elif response.status_code in (429, 502, 503, 504):
+                # Retryable server errors
+                if attempt < retry_count:
+                    time.sleep(randint(3, 10))
+                    continue
+                else:
+                    return None
+
+            # Any other status code → give up
+            return None
+
+        # These exceptions usually mean "server is overloaded", so retry
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.RemoteProtocolError):
             if attempt < retry_count:
                 time.sleep(randint(3, 10))
+                continue
             else:
                 return None
+
+        except httpx.HTTPError:
+            # Non-retryable network issues (DNS fail, unreachable, SSL error, etc.)
+            return None
+
+        finally:
+            if response is not None:
+                response.close()
+
     return None
+
 
 
 def fetch_actor_from_webfinger(address: str, server: str):
@@ -208,6 +230,8 @@ def create_actor_from_remote(actor_address: str, community_only=False,
     else:
         # Try webfinger
         address, server = normalise_actor_string(actor_address)
+        if not address:
+            return None
         actor_json = fetch_actor_from_webfinger(address, server)
 
     if actor_json:

@@ -1,16 +1,23 @@
 from datetime import timedelta
+import random
+import re
+import os
+import time
 
+import httpx
+import boto3
 from flask import current_app
 from sqlalchemy import text
 
-from app import celery, cache
+from app import celery, cache, httpx_client
 from app.activitypub.util import find_actor_or_create
 from app.constants import NOTIF_UNBAN
 from app.models import Notification, SendQueue, CommunityBan, CommunityMember, User, Community, Post, PostReply, \
-    DefederationSubscription, Instance, ActivityPubLog, InstanceRole, utcnow, read_posts
+    DefederationSubscription, Instance, ActivityPubLog, InstanceRole, utcnow, InstanceChooser, \
+    InstanceBan
 from app.post.routes import post_delete_post
 from app.utils import get_task_session, download_defeds, instance_banned, get_request_instance, get_request, \
-    shorten_string, patch_db_session, archive_post
+    shorten_string, patch_db_session, archive_post, get_setting, set_setting, communities_banned_from_all_users
 
 
 @celery.task
@@ -95,9 +102,15 @@ def process_expired_bans():
                 # Clear relevant caches
                 from app.utils import communities_banned_from, joined_communities, moderating_communities
                 cache.delete_memoized(communities_banned_from, blocked.id)
+                cache.delete_memoized(communities_banned_from_all_users)
                 cache.delete_memoized(joined_communities, blocked.id)
                 cache.delete_memoized(moderating_communities, blocked.id)
 
+            session.delete(expired_ban)
+            session.commit()
+
+        expired_instance_bans = session.query(InstanceBan).filter(InstanceBan.banned_until < utcnow()).all()
+        for expired_ban in expired_instance_bans:
             session.delete(expired_ban)
             session.commit()
 
@@ -557,6 +570,51 @@ def monitor_healthy_instances():
                         response.close()
                 session.commit()
 
+            # Handle admin roles for MBIN instances
+            """
+            (unlike Lemmy / PieFed, API response for this endpoint doesn't give enough info to create User,
+            only add instance role info to Users that the DB is already aware of)
+            """
+            if instance.online() and instance.software == 'mbin':
+                try:
+                    response = get_request(f'https://{instance.domain}/api/users/admins')
+                    if response and response.status_code == 200:
+                        instance_data = response.json()
+                        admin_user_ids = []
+
+                        for item in instance_data['items']:
+                            username = item['username'] if 'username' in item else None
+                            if 'isAdmin' in item and item['isAdmin'] == False:
+                                continue
+                            if username:
+                                user = session.query(User).filter_by(user_name=username, instance_id=instance.id).first()
+                                if user:
+                                    admin_user_ids.append(user.id)
+                                    if not instance.user_is_admin(user.id):
+                                        new_instance_role = InstanceRole(
+                                            instance_id=instance.id,
+                                            user_id=user.id,
+                                            role='admin'
+                                        )
+                                        session.add(new_instance_role)
+
+                        # Remove old admin roles
+                        for instance_admin in session.query(InstanceRole).filter_by(instance_id=instance.id):
+                            if instance_admin.user_id not in admin_user_ids:
+                                session.query(InstanceRole).filter(
+                                    InstanceRole.user_id == instance_admin.user_id,
+                                    InstanceRole.instance_id == instance.id,
+                                    InstanceRole.role == 'admin'
+                                ).delete()
+                except Exception:
+                    session.rollback()
+                    instance.failures += 1
+                finally:
+                    if response:
+                        response.close()
+                session.commit()
+
+
     except Exception:
         session.rollback()
         raise
@@ -700,3 +758,225 @@ def archive_old_posts():
             raise
         finally:
             session.close()
+
+
+@celery.task
+def archive_old_users():
+    """Remove images from old remote users to reduce image storage"""
+    if current_app.config['ARCHIVE_POSTS'] > 0:
+        session = get_task_session()
+        try:
+            cutoff = utcnow() - timedelta(days=current_app.config['ARCHIVE_POSTS'] * 28)
+            sql = '''
+                    SELECT u.id
+                    FROM "user" u
+                    WHERE u.avatar_id IS NOT NULL AND u.cover_id IS NOT NULL AND u.ap_id IS NOT NULL
+                      AND u.last_seen < :cutoff
+                      
+                '''
+            user_ids = session.execute(text(sql), {'cutoff': cutoff}).scalars()
+            for user_id in user_ids:
+                archive_user(user_id, session)
+
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+
+def archive_user(user_id, session):
+    user = session.query(User).get(user_id)
+    if user.avatar_id:
+        avatar_file = user.avatar
+        user.avatar_id = None
+        avatar_file.delete_from_disk(purge_cdn=False)
+        session.delete(avatar_file)
+    if user.cover_id:
+        cover_file = user.cover
+        user.cover_id = None
+        cover_file.delete_from_disk(purge_cdn=False)
+        session.delete(cover_file)
+
+    session.commit()
+
+
+@celery.task
+def refresh_instance_chooser():
+    session = get_task_session()
+    try:
+        # Make GraphQL request to fediverse.observer API
+        query = {
+            "query": '{ nodes(softwarename:"piefed" status: "UP") { domain uptime_alltime monthsmonitored } }'
+        }
+        
+        headers = {'Content-Type': 'application/json'}
+        response = httpx_client.post('https://api.fediverse.observer/', json=query, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            current_app.logger.error(f"fediverse.observer API returned {response.status_code}")
+            return
+            
+        response_data = response.json()
+        if not response_data or 'data' not in response_data or 'nodes' not in response_data['data']:
+            current_app.logger.error("Invalid response from fediverse.observer API")
+            return
+            
+        observer_domains = set()
+        
+        # Shuffle the nodes list so instances are processed in random order each time
+        nodes = response_data['data']['nodes']
+        random.shuffle(nodes)
+        
+        # Process each domain from fediverse.observer
+        for node in nodes:
+            domain = node['domain']
+            observer_domains.add(domain)
+            
+            try:
+                # Request instance_chooser API endpoint
+                try:
+                    chooser_response = get_request(f'https://{domain}/api/alpha/site/instance_chooser')
+                except Exception as e:
+                    current_app.logger.warning(f"Failed to connect to {domain}: {str(e)}")
+                    # Remove existing record if API call failed
+                    existing = session.query(InstanceChooser).filter_by(domain=domain).first()
+                    if existing:
+                        session.delete(existing)
+                    continue
+                
+                if chooser_response.status_code == 200:
+                    chooser_data = chooser_response.json()
+
+                    chooser_data['uptime'] = node['uptime_alltime']
+                    chooser_data['monthsmonitored'] = node['monthsmonitored']
+                    
+                    # Update or create InstanceChooser record
+                    instance_chooser = session.query(InstanceChooser).filter_by(domain=domain).first()
+                    if not instance_chooser:
+                        instance_chooser = InstanceChooser(domain=domain)
+                        session.add(instance_chooser)
+                    
+                    # Map API response to InstanceChooser fields
+                    if 'language' in chooser_data and 'id' in chooser_data['language']:
+                        instance_chooser.language_id = chooser_data['language']['id']
+                    
+                    instance_chooser.nsfw = chooser_data.get('nsfw', False)
+                    instance_chooser.newbie_friendly = chooser_data.get('newbie_friendly', True)
+                    
+                    # Store the full response in the data field
+                    instance_chooser.data = chooser_data
+                    
+                else:
+                    # 404 or other error - remove existing record if it exists
+                    existing = session.query(InstanceChooser).filter_by(domain=domain).first()
+                    if existing:
+                        session.delete(existing)
+                        
+            except Exception as e:
+                current_app.logger.warning(f"Error processing domain {domain}: {str(e)}")
+                # Remove existing record if API call failed
+                existing = session.query(InstanceChooser).filter_by(domain=domain).first()
+                if existing:
+                    session.delete(existing)
+            session.commit()
+        
+        # Remove InstanceChooser records for domains not in fediverse.observer
+        existing_records = session.query(InstanceChooser).all()
+        for record in existing_records:
+            if record.domain not in observer_domains:
+                session.delete(record)
+        
+        session.commit()
+        
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@celery.task
+def add_remote_communities():
+    try:
+        response = get_request('https://lemmy.world/api/v3/post/list', params={
+            'community_name': 'newcommunities@lemmy.world',
+            'sort': 'New',
+            'limit': '50'
+        })
+    except httpx.HTTPError:
+        return
+
+    if response.status_code == 200:
+        new_communities_data = response.json()
+        response.close()
+
+        # track the post IDs so we know when we hit old posts that we've already processed
+        last_successful_import = get_setting('last_successful_import', 0)
+
+        for post in reversed(new_communities_data['posts']):
+            post_data = post['post']
+            if post_data['featured_community']:  # skip sticky posts
+                continue
+
+            if post_data['id'] <= last_successful_import:
+                continue
+
+            add_remote_community_from_post(post_data)
+
+            last_successful_import = post_data['id']
+            set_setting('last_successful_import', last_successful_import)
+
+
+def add_remote_community_from_post(post_data):
+    if 'url' in post_data:
+        from app.activitypub.util import extract_domain_and_actor
+        server, community = extract_domain_and_actor(post_data['url'])
+        community_lookup = ['!' + community + '@' + server]
+    else:
+        pattern = r'![A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+        community_lookup = re.findall(pattern, post_data['body'])
+
+    if len(community_lookup):
+        from app.community.util import search_for_community
+        for cl in set(community_lookup):
+            if f"@{current_app.config['SERVER_NAME']}" not in cl:
+                search_for_community(cl)
+
+
+@celery.task
+def delete_from_s3(s3_files_to_delete):
+    delete_payload = {
+        'Objects': [{'Key': key} for key in s3_files_to_delete],
+        'Quiet': True  # Optional: if True, successful deletions are not returned
+    }
+    boto3_session = boto3.session.Session()
+    s3 = boto3_session.client(
+        service_name='s3',
+        region_name=current_app.config['S3_REGION'],
+        endpoint_url=current_app.config['S3_ENDPOINT'],
+        aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
+        aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
+    )
+    s3.delete_objects(Bucket=current_app.config['S3_BUCKET'], Delete=delete_payload)
+    s3.close()
+
+
+@celery.task
+def clean_up_tmp():
+    DELETABLE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".mp3", ".mp4"}
+    ONE_DAY = 24 * 60 * 60
+
+    now = time.time()
+    directory = 'app/static/tmp'
+    for filename in os.listdir(directory):
+        file_path = os.path.join(directory, filename)
+        if os.path.isfile(file_path):
+            _, ext = os.path.splitext(filename.lower())
+            if ext.lower() in DELETABLE_EXTENSIONS:
+                mtime = os.path.getmtime(file_path)
+                if now - mtime > ONE_DAY:
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
