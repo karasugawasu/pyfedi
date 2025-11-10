@@ -1,7 +1,6 @@
 from sqlalchemy import desc, or_, text
 
 from app import db
-from app.api.alpha.utils.validators import required, string_expected, integer_expected, boolean_expected
 from app.api.alpha.views import private_message_view
 from app.constants import NOTIF_MESSAGE, NOTIF_REPORT
 from app.chat.util import send_message, update_message
@@ -11,17 +10,27 @@ from app.shared.tasks import task_selector
 
 
 def get_private_message_list(auth, data):
-    page = int(data['page']) if data and 'page' in data else 1
-    limit = int(data['limit']) if data and 'limit' in data else 10
-    unread_only = data['unread_only'] if data and 'unread_only' in data else False
+    page = int(data['page']) if 'page' in data else 1
+    limit = int(data['limit']) if 'limit' in data else 10
+    unread_only = data['unread_only'] if 'unread_only' in data else False
 
     user_id = authorise_api_user(auth)
 
+    # Get the list of conversation ids that the user has still joined
+    joined_conversations = db.session.execute(text(
+        "SELECT conversation_id FROM conversation_member WHERE user_id = :user_id AND joined = :state"),
+        {"user_id": user_id, "state": True}).scalars()
+
     if unread_only:
-        private_messages = ChatMessage.query.filter_by(recipient_id=user_id, read=False).order_by(desc(ChatMessage.created_at))
+        private_messages = ChatMessage.query.filter_by(recipient_id=user_id, read=False). \
+            order_by(desc(ChatMessage.created_at))
     else:
         private_messages = ChatMessage.query.filter(or_(ChatMessage.recipient_id == user_id,
                     ChatMessage.sender_id == user_id)).order_by(desc(ChatMessage.created_at))
+    
+    # Only return conversations that the user hasn't left
+    private_messages = private_messages.filter(ChatMessage.conversation_id.in_(joined_conversations))
+
     private_messages = private_messages.paginate(page=page, per_page=limit, error_out=False)
 
     pm_list = []
@@ -36,26 +45,39 @@ def get_private_message_list(auth, data):
 
 
 def get_private_message_conversation(auth, data):
-    page = int(data['page']) if data and 'page' in data else 1
-    limit = int(data['limit']) if data and 'limit' in data else 10
-    if not data or 'person_id' not in data:
-        raise Exception('Missing person_id parameter')
+    page = int(data['page']) if 'page' in data else 1
+    limit = int(data['limit']) if 'limit' in data else 10
     person_id = int(data['person_id'])
-    person = User.query.filter_by(id=person_id).one()
-
-    if person is None:
-        raise Exception('person not found')
 
     user_id = authorise_api_user(auth)
 
-    conversation_ids = db.session.execute(text("SELECT conversation_id FROM conversation_member WHERE user_id = :person_id"),
-                                         {"person_id": person_id}).scalars()
+    conversation = None
+    conversation_ids = []
+
+    if 'person_id' in data:
+        conversation_ids = db.session.execute(text(
+            "SELECT conversation_id FROM conversation_member WHERE user_id = :person_id"),
+            {"person_id": person_id}).scalars()
+    
+    joined_conversations = db.session.execute(text(
+        "SELECT conversation_id FROM conversation_member WHERE user_id = :user_id AND joined = :state"),
+        {"user_id": user_id, "state": True}).scalars()
+    
+    if 'conversation_id' in data:
+        conversation = Conversation.query.get(data['conversation_id'])
+        conversation_ids = [conversation.id]
+        if conversation.id not in joined_conversations:
+            raise Exception("User is not a member of this conversation")
+    
     pm_list = []
     next_page = None
-    if conversation_ids:
+    if conversation_ids and joined_conversations:
         private_messages = ChatMessage.query.filter(ChatMessage.conversation_id.in_(conversation_ids),
-                              or_(ChatMessage.recipient_id == user_id,
-                                  ChatMessage.sender_id == user_id)).order_by(desc(ChatMessage.created_at))
+                                                    ChatMessage.conversation_id.in_(joined_conversations),
+                                                    or_(ChatMessage.recipient_id == user_id,
+                                                        ChatMessage.sender_id == user_id)).\
+                                            filter(ChatMessage.recipient_id != None).\
+                                            order_by(desc(ChatMessage.created_at))
         private_messages = private_messages.paginate(page=page, per_page=limit, error_out=False)
         for private_message in private_messages:
             pm_list.append(private_message_view(private_message, variant=1))
@@ -69,11 +91,23 @@ def get_private_message_conversation(auth, data):
     return pm_json
 
 
-def post_private_message(auth, data):
-    required(['content', 'recipient_id'], data)
-    string_expected(['content'], data)
-    integer_expected(['recipient_id'], data)
+def post_leave_conversation(auth, data):
+    user = authorise_api_user(auth, return_type="model")
+    conversation_id = data["conversation_id"]
+    conversation = Conversation.query.get(conversation_id)
 
+    if not conversation or not conversation.is_member(user):
+        raise Exception("You are not a part of this conversation")
+
+    if conversation.is_member(user):
+        db.session.execute(text("UPDATE conversation_member SET joined = :state WHERE user_id = :person_id AND conversation_id = :conversation_id"),
+                           {"state": False, "person_id": user.id, "conversation_id": conversation_id})
+        db.session.commit()
+    
+    return
+
+
+def post_private_message(auth, data):
     sender = authorise_api_user(auth, return_type='model')
     recipient = User.query.filter_by(id=data['recipient_id']).one()
 
@@ -92,10 +126,6 @@ def post_private_message(auth, data):
 
 
 def post_private_message_mark_as_read(auth, data):
-    required(['private_message_id', 'read'], data)
-    integer_expected(['private_message_id'], data)
-    boolean_expected(['read'], data)
-
     user = authorise_api_user(auth, return_type='model')
     message_id = data['private_message_id']
     read = data['read']
@@ -104,7 +134,8 @@ def post_private_message_mark_as_read(auth, data):
     private_message.read = read
 
     notif_read = not read
-    notifications = Notification.query.filter_by(user_id=user.id, notif_type=NOTIF_MESSAGE, subtype='chat_message', read=notif_read)
+    notifications = Notification.query.filter_by(user_id=user.id, notif_type=NOTIF_MESSAGE,
+                                                 subtype='chat_message', read=notif_read)
     for notification in notifications:
         if 'message_id' in notification.targets and notification.targets['message_id'] == message_id:
             notification.read = read
@@ -115,15 +146,10 @@ def post_private_message_mark_as_read(auth, data):
             break
     db.session.commit()
 
-
     return private_message_view(private_message, variant=2)
 
 
 def put_private_message(auth, data):
-    required(['private_message_id', 'content'], data)
-    string_expected(['content'], data)
-    integer_expected(['private_message_id'], data)
-
     chat_message_id = int(data['private_message_id'])
     content = data['content']
 
@@ -140,10 +166,6 @@ def put_private_message(auth, data):
 
 
 def post_private_message_delete(auth, data):
-    required(['private_message_id', 'deleted'], data)
-    boolean_expected(['deleted'], data)
-    integer_expected(['private_message_id'], data)
-
     chat_message_id = int(data['private_message_id'])
     deleted = data['deleted']
 
@@ -161,12 +183,8 @@ def post_private_message_delete(auth, data):
 
 
 def post_private_message_report(auth, data):
-    required(['private_message_id', 'reason'], data)
-    integer_expected(['private_message_id'], data)
-    string_expected(['reason'], data)
-
     chat_message_id = data['private_message_id']
-    reason = data['reason']
+    reason = data['reason'][:255]
 
     user_id = authorise_api_user(auth)
 

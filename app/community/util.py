@@ -21,7 +21,7 @@ from app.constants import SRC_WEB, POST_TYPE_LINK
 from app.models import Community, File, PostReply, Post, utcnow, CommunityMember, Site, \
     Instance, User, Tag, CommunityFlair
 from app.utils import get_request, gibberish, ensure_directory_exists, ap_datetime, instance_banned, get_task_session, \
-    store_files_in_s3, guess_mime_type, patch_db_session, instance_allowed, get_setting
+    store_files_in_s3, guess_mime_type, patch_db_session, instance_allowed, get_setting, scale_gif
 from sqlalchemy import func, desc, text
 import os
 
@@ -29,7 +29,7 @@ import os
 allowed_extensions = ['.gif', '.jpg', '.jpeg', '.png', '.webp', '.heic', '.mpo', '.avif', '.svg']
 
 
-def search_for_community(address: str) -> Community | None:
+def search_for_community(address: str, allow_fetch: bool = True) -> Community | None:
     if address.startswith('!'):
         name, server = address[1:].split('@')
 
@@ -46,6 +46,8 @@ def search_for_community(address: str) -> Community | None:
         already_exists = Community.query.filter_by(ap_id=address[1:]).first()
         if already_exists:
             return already_exists
+        elif not allow_fetch:
+            return None
 
         # Look up the profile address of the community using WebFinger
         try:
@@ -524,29 +526,37 @@ def save_icon_file(icon_file, directory='communities') -> File:
 
     # resize if necessary or if using MEDIA_IMAGE_FORMAT
     if file_ext.lower() in allowed_extensions:
+        # Process the image based on file type
         if file_ext.lower() == '.svg':  # svgs don't need to be resized
-            file = File(file_path=final_place, file_name=new_filename + file_ext, alt_text=f'{directory} icon',
-                        thumbnail_path=final_place)
-            # Move uploaded file to S3 if needed
-            if store_files_in_s3():
-                import boto3
-                session = boto3.session.Session()
-                s3 = session.client(
-                    service_name='s3',
-                    region_name=current_app.config['S3_REGION'],
-                    endpoint_url=current_app.config['S3_ENDPOINT'],
-                    aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
-                    aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
-                )
-                s3_path = f'{s3_directory}/{new_filename}{file_ext}'
-                s3.upload_file(final_place, current_app.config['S3_BUCKET'], s3_path, ExtraArgs={'ContentType': guess_mime_type(final_place)})
-                file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_path}"
-                file.thumbnail_path = file.file_path
-                s3.close()
-                os.unlink(final_place)
-            db.session.add(file)
-            return file
-        else:
+            img_width = None
+            img_height = None
+            thumbnail_width = None
+            thumbnail_height = None
+            final_ext = file_ext
+            thumbnail_ext = file_ext
+            final_place_thumbnail = final_place
+        elif file_ext.lower() == '.gif':  # handle animated gifs specially
+            Image.MAX_IMAGE_PIXELS = 89478485
+            img = Image.open(final_place)
+            img_width = img.width
+            img_height = img.height
+
+            # Use scale_gif for resizing animated GIFs
+            if img.width > 250 or img.height > 250:
+                scale_gif(final_place, (250, 250))
+                img = Image.open(final_place)
+                img_width = img.width
+                img_height = img.height
+
+            # Create thumbnail
+            final_ext = file_ext
+            thumbnail_ext = '.gif'
+            final_place_thumbnail = os.path.join(local_directory, new_filename + '_thumbnail.gif')
+            scale_gif(final_place, (40, 40), final_place_thumbnail)
+            img_thumb = Image.open(final_place_thumbnail)
+            thumbnail_width = img_thumb.width
+            thumbnail_height = img_thumb.height
+        else:  # handle regular images (jpg, png, webp, heic, etc.)
             Image.MAX_IMAGE_PIXELS = 89478485
             img = Image.open(final_place)
             img = ImageOps.exif_transpose(img)
@@ -595,37 +605,41 @@ def save_icon_file(icon_file, directory='communities') -> File:
             thumbnail_width = img.width
             thumbnail_height = img.height
 
-            file = File(file_path=final_place, file_name=new_filename + final_ext, alt_text=f'{directory} icon',
-                        width=img_width, height=img_height, thumbnail_width=thumbnail_width,
-                        thumbnail_height=thumbnail_height, thumbnail_path=final_place_thumbnail)
-            db.session.add(file)
-            
-            # Move uploaded files to S3 if needed
-            if store_files_in_s3():
-                import boto3
-                session = boto3.session.Session()
-                s3 = session.client(
-                    service_name='s3',
-                    region_name=current_app.config['S3_REGION'],
-                    endpoint_url=current_app.config['S3_ENDPOINT'],
-                    aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
-                    aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
-                )
-                # Upload main image
-                s3_path = f'{s3_directory}/{new_filename}{final_ext}'
-                s3.upload_file(final_place, current_app.config['S3_BUCKET'], s3_path, ExtraArgs={'ContentType': guess_mime_type(final_place)})
-                file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_path}"
-                
-                # Upload thumbnail
+        # Create the File object
+        file = File(file_path=final_place, file_name=new_filename + final_ext, alt_text=f'{directory} icon',
+                    width=img_width, height=img_height, thumbnail_width=thumbnail_width,
+                    thumbnail_height=thumbnail_height, thumbnail_path=final_place_thumbnail)
+        db.session.add(file)
+
+        # Move uploaded files to S3 if needed
+        if store_files_in_s3():
+            import boto3
+            session = boto3.session.Session()
+            s3 = session.client(
+                service_name='s3',
+                region_name=current_app.config['S3_REGION'],
+                endpoint_url=current_app.config['S3_ENDPOINT'],
+                aws_access_key_id=current_app.config['S3_ACCESS_KEY'],
+                aws_secret_access_key=current_app.config['S3_ACCESS_SECRET'],
+            )
+            # Upload main image
+            s3_path = f'{s3_directory}/{new_filename}{final_ext}'
+            s3.upload_file(final_place, current_app.config['S3_BUCKET'], s3_path, ExtraArgs={'ContentType': guess_mime_type(final_place)})
+            file.file_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_path}"
+
+            # Upload thumbnail (if different from main image)
+            if final_place_thumbnail != final_place:
                 s3_thumbnail_path = f'{s3_directory}/{new_filename}_thumbnail{thumbnail_ext}'
                 s3.upload_file(final_place_thumbnail, current_app.config['S3_BUCKET'], s3_thumbnail_path, ExtraArgs={'ContentType': guess_mime_type(final_place_thumbnail)})
                 file.thumbnail_path = f"https://{current_app.config['S3_PUBLIC_URL']}/{s3_thumbnail_path}"
-                
-                s3.close()
-                os.unlink(final_place)
                 os.unlink(final_place_thumbnail)
-                
-            return file
+            else:
+                file.thumbnail_path = file.file_path
+
+            s3.close()
+            os.unlink(final_place)
+
+        return file
     else:
         abort(400)
 
@@ -879,10 +893,22 @@ def publicize_community(community: Community):
     if community:
         make_post(form, community, POST_TYPE_LINK, SRC_WEB)
 
+        """
+        Have this removed for now, due to several problems:
+
+        1. 'community' has been over-ridden, and is now 'playground@piefed.social' or 'newcommunities@lemmy.world'
+
+        2. Lemmy's v3/resolve_object endpoint doesn't accept queries in '!community@domain' format,
+           it needs to be 'q={community.public_url()}'
+
+        3. None of those instances will add data to their DBs based on an anonymous query, so will just respond 400
+           to any communities they don't already know about
+
         if current_app.debug:
             publicize_community_task(community.id)
         else:
             publicize_community_task.delay(community.id)
+        """
 
 
 @celery.task

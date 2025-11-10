@@ -23,12 +23,14 @@ from app.ldap_utils import sync_user_to_ldap
 from app.models import Post, Community, CommunityMember, User, PostReply, PostVote, Notification, utcnow, File, Site, \
     Instance, Report, UserBlock, CommunityBan, CommunityJoinRequest, CommunityBlock, Filter, Domain, DomainBlock, \
     InstanceBlock, NotificationSubscription, PostBookmark, PostReplyBookmark, read_posts, Topic, UserNote, \
-    UserExtraField, Feed, FeedMember, IpBan
+    UserExtraField, Feed, FeedMember, IpBan, user_file
 from app.shared.site import block_remote_instance
+from app.shared.upload import process_file_delete, process_upload
 from app.shared.user import subscribe_user
 from app.user import bp
 from app.user.forms import ProfileForm, SettingsForm, DeleteAccountForm, ReportUserForm, \
-    FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm, UserNoteForm, BanUserForm
+    FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm, UserNoteForm, BanUserForm, DeleteFileForm, \
+    UploadFileForm, BlockUserForm, BlockCommunityForm, BlockDomainForm, BlockInstanceForm
 from app.user.utils import purge_user_then_delete, unsubscribe_from_community, search_for_user
 from app.utils import render_template, markdown_to_html, user_access, markdown_to_text, shorten_string, \
     gibberish, file_get_contents, community_membership, user_filters_home, \
@@ -39,7 +41,7 @@ from app.utils import render_template, markdown_to_html, user_access, markdown_t
     login_required_if_private_instance, recently_upvoted_posts, recently_downvoted_posts, recently_upvoted_post_replies, \
     recently_downvoted_post_replies, reported_posts, user_notes, login_required, get_setting, filtered_out_communities, \
     moderating_communities_ids, is_valid_xml_utf8, blocked_instances, blocked_domains, get_task_session, \
-    patch_db_session, user_in_restricted_country
+    patch_db_session, user_in_restricted_country, referrer
 
 
 @bp.route('/people', methods=['GET', 'POST'])
@@ -318,13 +320,16 @@ def edit_profile(actor):
 
         db.session.commit()
 
-        # Sync to LDAP if password was provided
-        if password_updated:
-            try:
-                sync_user_to_ldap(current_user.user_name, current_user.email, form.password.data.strip())
-            except Exception as e:
-                # Log error but don't fail the profile update
-                current_app.logger.error(f"LDAP sync failed for user {current_user.user_name}: {e}")
+        # Sync to LDAP
+        try:
+            sync_user_to_ldap(
+                current_user.user_name,
+                current_user.email,
+                form.password.data.strip() if password_updated else None
+            )
+        except Exception as e:
+            # Log error but don't fail the profile update
+            current_app.logger.error(f"LDAP sync failed for user {current_user.user_name}: {e}")
 
         flash(_('Your changes have been saved.'), 'success')
 
@@ -537,11 +542,13 @@ def user_settings():
     form.theme.choices = theme_list()
     form.interface_language.choices = [
         ('', _l('Auto-detect')),
+        ('eu', _l('Basque')),
         ('ca', _l('Catalan')),
         ('zh', _l('Chinese')),
         ('en', _l('English')),
         ('fr', _l('French')),
         ('de', _l('German')),
+        ('hi', _l('Hindi')),
         ('ja', _l('Japanese')),
         ('es', _l('Spanish')),
     ]
@@ -564,6 +571,7 @@ def user_settings():
         current_user.read_language_ids = form.read_languages.data
         current_user.accept_private_messages = form.accept_private_messages.data
         current_user.font = form.font.data
+        current_user.code_style = form.code_style.data
         current_user.additional_css = form.additional_css.data
         session['ui_language'] = form.interface_language.data
         current_user.vote_privately = not form.federate_votes.data
@@ -603,6 +611,7 @@ def user_settings():
         form.compaction.data = request.cookies.get('compact_level', '')
         form.accept_private_messages.data = current_user.accept_private_messages
         form.font.data = current_user.font
+        form.code_style.data = current_user.code_style or 'fruity'
         form.additional_css.data = current_user.additional_css
         form.show_subscribed_communities.data = current_user.show_subscribed_communities
 
@@ -1538,6 +1547,155 @@ def user_settings_filters_delete(filter_id):
     return redirect(url_for('user.user_settings_filters'))
 
 
+@bp.route('/user/settings/block/user', methods=['GET', 'POST'])
+@login_required
+def user_settings_block_user():
+    form = BlockUserForm()
+    if form.validate_on_submit():
+        username = form.username.data.strip()
+
+        # Try to find the user - handle both local usernames and ActivityPub IDs
+        user_to_block = None
+
+        # Check if it's an ActivityPub ID (contains @ or is a URL)
+        if '@' in username or username.startswith('http'):
+            # Try to find or create the remote user
+            user_to_block = find_actor_or_create(username)
+            if user_to_block and not isinstance(user_to_block, User):
+                user_to_block = None
+        else:
+            # Local username lookup
+            user_to_block = User.query.filter_by(user_name=username, deleted=False).first()
+
+        if not user_to_block:
+            flash(_('User not found: %(username)s', username=username), 'error')
+            return render_template('user/block_user.html', form=form, user=current_user)
+
+        if user_to_block.id == current_user.id:
+            flash(_('You cannot block yourself.'), 'error')
+            return render_template('user/block_user.html', form=form, user=current_user)
+
+        # Check if already blocked
+        existing = UserBlock.query.filter_by(blocker_id=current_user.id, blocked_id=user_to_block.id).first()
+        if existing:
+            flash(_('%(name)s is already blocked.', name=user_to_block.display_name()), 'warning')
+        else:
+            db.session.add(UserBlock(blocker_id=current_user.id, blocked_id=user_to_block.id))
+            db.session.commit()
+            cache.delete_memoized(blocked_users, current_user.id)
+            flash(_('%(name)s has been blocked.', name=user_to_block.display_name()), 'success')
+
+        return redirect(url_for('user.user_settings_filters'))
+
+    return render_template('user/block_user.html', form=form, user=current_user)
+
+
+@bp.route('/user/settings/block/community', methods=['GET', 'POST'])
+@login_required
+def user_settings_block_community():
+    form = BlockCommunityForm()
+    if form.validate_on_submit():
+        community_name = form.community_name.data.strip()
+
+        # Try to find the community
+        community_to_block = None
+
+        # Check if it's an ActivityPub ID (contains ! or @ or is a URL)
+        if '!' in community_name or '@' in community_name or community_name.startswith('http'):
+            # Remove leading ! if present
+            if community_name.startswith('!'):
+                community_name = community_name[1:]
+            # Try to find or create the remote community
+            community_to_block = find_actor_or_create(community_name, create_if_not_found=False, community_only=True)
+            if community_to_block and not isinstance(community_to_block, Community):
+                community_to_block = None
+        else:
+            # Local community lookup
+            community_to_block = Community.query.filter_by(name=community_name).first()
+
+        if not community_to_block:
+            flash(_('Community not found: %(name)s', name=community_name), 'error')
+            return render_template('user/block_community.html', form=form, user=current_user)
+
+        # Check if already blocked
+        existing = CommunityBlock.query.filter_by(user_id=current_user.id, community_id=community_to_block.id).first()
+        if existing:
+            flash(_('%(name)s is already blocked.', name=community_to_block.display_name()), 'warning')
+        else:
+            db.session.add(CommunityBlock(user_id=current_user.id, community_id=community_to_block.id))
+            db.session.commit()
+            cache.delete_memoized(blocked_communities, current_user.id)
+            flash(_('Posts in %(name)s will be hidden.', name=community_to_block.display_name()), 'success')
+
+        return redirect(url_for('user.user_settings_filters'))
+
+    return render_template('user/block_community.html', form=form, user=current_user)
+
+
+@bp.route('/user/settings/block/domain', methods=['GET', 'POST'])
+@login_required
+def user_settings_block_domain():
+    form = BlockDomainForm()
+    if form.validate_on_submit():
+        domain_name = form.domain_name.data.strip().lower()
+
+        # Remove protocol if present
+        domain_name = domain_name.replace('https://', '').replace('http://', '')
+        # Remove trailing slash if present
+        domain_name = domain_name.rstrip('/')
+
+        # Find or create the domain
+        domain = Domain.query.filter_by(name=domain_name).first()
+        if not domain:
+            domain = Domain(name=domain_name)
+            db.session.add(domain)
+            db.session.commit()
+
+        # Check if already blocked
+        existing = DomainBlock.query.filter_by(user_id=current_user.id, domain_id=domain.id).first()
+        if existing:
+            flash(_('%(name)s is already blocked.', name=domain_name), 'warning')
+        else:
+            db.session.add(DomainBlock(user_id=current_user.id, domain_id=domain.id))
+            db.session.commit()
+            cache.delete_memoized(blocked_domains, current_user.id)
+            flash(_('Posts linking to %(name)s will be hidden.', name=domain_name), 'success')
+
+        return redirect(url_for('user.user_settings_filters'))
+
+    return render_template('user/block_domain.html', form=form, user=current_user)
+
+
+@bp.route('/user/settings/block/instance', methods=['GET', 'POST'])
+@login_required
+def user_settings_block_instance():
+    form = BlockInstanceForm()
+    if form.validate_on_submit():
+        instance_domain = form.instance_domain.data.strip().lower()
+
+        # Remove protocol if present
+        instance_domain = instance_domain.replace('https://', '').replace('http://', '')
+        # Remove trailing slash if present
+        instance_domain = instance_domain.rstrip('/')
+
+        # Find the instance
+        instance = Instance.query.filter_by(domain=instance_domain).first()
+        if not instance:
+            flash(_('Instance not found: %(domain)s', domain=instance_domain), 'error')
+            return render_template('user/block_instance.html', form=form, user=current_user)
+
+        # Use the existing block_remote_instance function
+        try:
+            block_remote_instance(instance.id, SRC_WEB)
+            flash(_('Content from %(name)s will be hidden.', name=instance_domain), 'success')
+        except Exception as e:
+            flash(_('Error blocking instance: %(error)s', error=str(e)), 'error')
+
+        return redirect(url_for('user.user_settings_filters'))
+
+    return render_template('user/block_instance.html', form=form, user=current_user)
+
+
 @bp.route('/user/newsletter/<int:user_id>/<token>/unsubscribe', methods=['GET', 'POST'])
 def user_newsletter_unsubscribe(user_id, token):
     user = User.query.filter(User.id == user_id, User.verification_token == token).first()
@@ -1980,7 +2138,10 @@ def show_profile_rss(actor):
             
             fe = fg.add_entry()
             fe.title(post.title.strip())
-            fe.link(href=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}")
+            if post.slug:
+                fe.link(href=f"https://{current_app.config['SERVER_NAME']}{post.slug}")
+            else:
+                fe.link(href=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}")
             if post.url:
                 if post.url in already_added:
                     continue
@@ -2001,3 +2162,98 @@ def show_profile_rss(actor):
         return response
     else:
         abort(404)
+
+
+@bp.route('/user/files', methods=['GET', 'POST'])
+@login_required
+def user_files():
+    page = request.args.get('page', 1, type=int)
+    low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
+
+    total_size = 0
+    file_size_dict = defaultdict(int)
+    file_sizes = db.session.execute(text('SELECT file_id, size FROM "user_file" WHERE user_id = :user_id'),
+                                    {'user_id': current_user.id}).all()
+    for fs in file_sizes:
+        total_size += fs[1]
+        file_size_dict[fs[0]] = fs[1]
+
+    files = File.query.join(user_file).filter(user_file.c.file_id == File.id, user_file.c.user_id == current_user.id)
+
+    files = files.paginate(page=page, per_page=100, error_out=False)
+    next_url = url_for('user.user_files', page=files.next_num) if files.has_next else None
+    prev_url = url_for('user.user_files', page=files.prev_num) if files.has_prev and page != 1 else None
+
+    return render_template('user/files.html', title=_('Files'), files=files, file_sizes=file_size_dict,
+                           total_size=total_size, max_size=current_app.config['FILE_UPLOAD_QUOTA'],
+                           low_bandwidth=low_bandwidth, user=current_user,
+                           next_url=next_url, prev_url=prev_url)
+
+
+@bp.route('/user/files/delete/<int:file_id>', methods=['GET', 'POST'])
+@login_required
+def user_file_delete(file_id):
+    file = File.query.get_or_404(file_id)
+    form = DeleteFileForm()
+    if form.validate_on_submit():
+        process_file_delete(file.source_url, current_user.id)
+        return redirect(form.referrer.data)
+
+    form.referrer.data = referrer(url_for('user.user_files'))
+
+    return render_template('user/file_delete.html', form=form, file=file, user=current_user)
+
+
+@bp.route('/user/files/upload', methods=['GET', 'POST'])
+@login_required
+def user_file_upload():
+    form = UploadFileForm()
+    if form.validate_on_submit():
+        if form.urls.data.strip() != '':
+            urls = form.urls.data.strip().split('\n')
+            for url in urls:
+                if url and url.strip() != '':
+                    file = File(source_url=url)
+                    db.session.add(file)
+                    db.session.commit()
+                    db.session.execute(
+                        text('INSERT INTO "user_file" (file_id, user_id, size) VALUES (:file_id, :user_id, :size)'),
+                        {'file_id': file.id, 'user_id': current_user.id, 'size': 0})
+                    db.session.commit()
+
+        if form.file1.data:
+            process_upload(form.file1.data, user_id=current_user.id)
+        if form.file2.data:
+            process_upload(form.file2.data, user_id=current_user.id)
+        if form.file3.data:
+            process_upload(form.file3.data, user_id=current_user.id)
+        if form.file4.data:
+            process_upload(form.file4.data, user_id=current_user.id)
+        if form.file5.data:
+            process_upload(form.file5.data, user_id=current_user.id)
+        if form.file6.data:
+            process_upload(form.file6.data, user_id=current_user.id)
+        if form.file7.data:
+            process_upload(form.file7.data, user_id=current_user.id)
+        if form.file8.data:
+            process_upload(form.file8.data, user_id=current_user.id)
+        if form.file9.data:
+            process_upload(form.file9.data, user_id=current_user.id)
+        if form.file10.data:
+            process_upload(form.file10.data, user_id=current_user.id)
+
+        return redirect(form.referrer.data)
+
+    total_size = 0
+    file_sizes = db.session.execute(text('SELECT file_id, size FROM "user_file" WHERE user_id = :user_id'),
+                                    {'user_id': current_user.id}).all()
+    for fs in file_sizes:
+        total_size += fs[1]
+
+    if total_size > current_app.config['FILE_UPLOAD_QUOTA']:
+        flash(_('You have exceeded your storage quota.', 'error'))
+        return redirect(referrer())
+
+    form.referrer.data = referrer(url_for('user.user_files'))
+
+    return render_template('user/file_upload.html', form=form, user=current_user)

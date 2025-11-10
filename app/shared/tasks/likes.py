@@ -1,11 +1,9 @@
-from app import cache, celery
-from app.activitypub.signature import default_context, post_request, send_post_request
+from app import celery
+from app.activitypub.signature import default_context, send_post_request, HttpSignature
 from app.models import CommunityBan, Post, PostReply, User, ActivityBatch
-from app.utils import gibberish, instance_banned, recently_upvoted_posts, recently_downvoted_posts, \
-    recently_upvoted_post_replies, recently_downvoted_post_replies, get_task_session, patch_db_session
+from app.utils import gibberish, instance_banned, get_task_session, patch_db_session
 
-from flask import current_app
-
+from flask import current_app, json
 
 """ JSON format
 {
@@ -27,8 +25,6 @@ def vote_for_post(send_async, user_id, post_id, vote_to_undo, vote_direction, fe
         session = get_task_session()
         with patch_db_session(session):
             post = session.query(Post).filter_by(id=post_id).one()
-            cache.delete_memoized(recently_upvoted_posts, user_id)
-            cache.delete_memoized(recently_downvoted_posts, user_id)
             if federate:
                 send_vote(user_id, post, vote_to_undo, vote_direction)
 
@@ -39,8 +35,6 @@ def vote_for_reply(send_async, user_id, reply_id, vote_to_undo, vote_direction, 
         session = get_task_session()
         with patch_db_session(session):
             reply = session.query(PostReply).filter_by(id=reply_id).one()
-            cache.delete_memoized(recently_upvoted_post_replies, user_id)
-            cache.delete_memoized(recently_downvoted_post_replies, user_id)
             if federate:
                 send_vote(user_id, reply, vote_to_undo, vote_direction)
 
@@ -96,43 +90,58 @@ def send_vote(user_id, object, vote_to_undo, vote_direction):
             }
 
         if community.is_local():
-            # For local communities, we need to create announcements for each instance
+            # Select the appropriate payload
+            if vote_to_undo:
+                payload_copy = undo_public.copy()
+            else:
+                payload_copy = vote_public.copy()
+
+            # Remove context for inner object
+            del payload_copy['@context']
+
+            # Create announcement with the selected payload
+            announce_id = f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}"
+            actor = community.public_url()
+            to = ["https://www.w3.org/ns/activitystreams#Public"]
+            cc = [community.ap_followers_url]
+            announce = {
+                'id': announce_id,
+                'type': 'Announce',
+                'actor': actor,
+                'object': payload_copy,
+                '@context': default_context(),
+                'to': to,
+                'cc': cc
+            }
+
+            send_async = []
+
+            # For local communities, we need to sends announcements to each instance
             for instance in community.following_instances():
                 if not (instance.inbox and instance.online() and
                        not user.has_blocked_instance(instance.id) and
                        not instance_banned(instance.domain)):
                     continue
 
-                # Select the appropriate payload
-                if vote_to_undo:
-                    payload_copy = undo_public.copy()
-                else:
-                    payload_copy = vote_public.copy()
-
-                # Remove context for inner object
-                del payload_copy['@context']
-
                 if instance.software == 'piefed':  # Send in a batch later
                     session.add(ActivityBatch(instance_id=instance.id, community_id=community.id, payload=payload_copy))
                     session.commit()
                 else:
-                    # Create announcement with the selected payload
-                    announce_id = f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}"
-                    actor = community.public_url()
-                    to = ["https://www.w3.org/ns/activitystreams#Public"]
-                    cc = [community.ap_followers_url]
-                    announce = {
-                        'id': announce_id,
-                        'type': 'Announce',
-                        'actor': actor,
-                        'object': payload_copy,
-                        '@context': default_context(),
-                        'to': to,
-                        'cc': cc
-                    }
+                    if current_app.config['NOTIF_SERVER']:   # Votes make up a very high percentage of activities, so it is more efficient to send them via fastapi_server.py. However fastapi_server.py does not retry failed sends. For votes this is acceptable.
+                        send_async.append(HttpSignature.signed_request(instance.inbox, announce,
+                                                                       community.private_key,
+                                                                       community.public_url() + '#main-key',
+                                                                       send_via_async=True))
+                    else:
+                        # Send the announcement directly
+                        send_post_request(instance.inbox, announce, community.private_key, community.public_url() + '#main-key')
 
-                    # Send the announcement
-                    send_post_request(instance.inbox, announce, community.private_key, community.public_url() + '#main-key')
+            if len(send_async):
+                from app import redis_client
+                # send announce_activity via redis pub/sub to piefed_notifs service
+                redis_client.publish("http_posts:activity", json.dumps({'urls': [url[0] for url in send_async],
+                                                                        'headers': [url[1] for url in send_async],
+                                                                        'data': send_async[0][2].decode('utf-8')}))
         else:
             # For remote communities, select appropriate payload
             if vote_to_undo:

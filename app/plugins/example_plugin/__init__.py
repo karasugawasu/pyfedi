@@ -15,9 +15,25 @@ def example_before_post_creation(post_data):
 @hook("after_post_create")
 def example_after_post_creation(post_data):
     """Hook that runs after a post is created"""
-    if int(os.environ.get('FLASK_DEBUG', '0')):
+    if int(os.environ.get('FLASK_DEBUG', '0')) and post_data:
         print(f"[PLUGIN DEBUG] Post created successfully: {post_data.get('title', 'No title')}")
     return post_data
+
+
+@hook("new_user")
+def example_new_user(user):
+    """Hook that runs after a new user is registered/created and verified"""
+    if int(os.environ.get('FLASK_DEBUG', '0')):
+        print(f"[PLUGIN DEBUG] New user is verified: {user.user_name}")
+    return user
+
+
+@hook("new_registration_for_approval")
+def example_new_registration_for_approval(application):
+    """Hook that runs when a new user registration requires approval"""
+    if int(os.environ.get('FLASK_DEBUG', '0')):
+        print(f"[PLUGIN DEBUG] New user application for user {application.user.user_name}")
+    return application
 
 
 def plugin_info():

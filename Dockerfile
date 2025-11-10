@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-FROM --platform=$BUILDPLATFORM python:3-alpine AS builder
+FROM --platform=$BUILDPLATFORM python:3.13-alpine AS builder
 
 
 RUN adduser -D python
@@ -20,6 +20,7 @@ RUN pybabel compile -d app/translations || true
 
 RUN chmod u+x ./entrypoint.sh
 RUN chmod u+x ./entrypoint_celery.sh
+RUN chmod u+x ./entrypoint_async.sh
 
 USER python
 ENTRYPOINT ["./entrypoint.sh"]

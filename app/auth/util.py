@@ -13,7 +13,7 @@ from markupsafe import Markup
 from sqlalchemy import func, text
 from wtforms import Label
 
-from app import cache, db
+from app import cache, db, plugins
 from app.activitypub.util import users_total
 from app.auth.forms import LoginForm
 from app.constants import NOTIF_REGISTRATION
@@ -21,7 +21,7 @@ from app.email import send_verification_email
 from app.ldap_utils import sync_user_to_ldap, login_with_ldap
 from app.models import IpBan, Notification, Site, User, UserRegistration, utcnow, Role
 from app.utils import banned_ip_addresses, blocked_referrers, finalize_user_setup, get_request, get_setting, gibberish, \
-    ip_address, markdown_to_html, render_template, user_cookie_banned, user_ip_banned
+    ip_address, markdown_to_html, render_template, user_cookie_banned, user_ip_banned, role_access
 
 
 # Return a random string of 6 letter/digits.
@@ -101,6 +101,10 @@ def create_user_application(user: User, registration_answer: str):
 
 def notify_admins_of_registration(application):
     """Notify admins when a registration application is ready for review"""
+
+    # commit is needed here first so that db information available later to plugin
+    db.session.commit()
+
     targets_data = {'gen': '0', 'application_id': application.id, 'user_id': application.user_id}
     for admin in Site.admins():
         notify = Notification(title='New registration',
@@ -110,6 +114,17 @@ def notify_admins_of_registration(application):
                               targets=targets_data)
         admin.unread_notifications += 1
         db.session.add(notify)
+    if role_access('approve registrations', 3):
+        for admin in Site.staff():
+            notify = Notification(title='New registration',
+                                  url=f'/admin/approve_registrations?account={application.user_id}', user_id=admin.id,
+                                  author_id=application.user_id, notif_type=NOTIF_REGISTRATION,
+                                  subtype='new_registration_for_approval',
+                                  targets=targets_data)
+            admin.unread_notifications += 1
+            db.session.add(notify)
+    
+    plugins.fire_hook("new_registration_for_approval", application)
 
 
 def create_registration_application(user, answer):
@@ -362,7 +377,7 @@ def process_login(form: LoginForm):
     ip = ip_address()
     country = get_country(ip)
 
-    if current_app.config['LDAP_SERVER_LOGIN']:
+    if current_app.config['LDAP_READ_ENABLE']:
         user = validate_user_ldap_login(form.user_name.data.strip(), form.password.data.strip(), ip)
         if user is None:
             return redirect(url_for("auth.login"))
@@ -378,8 +393,11 @@ def process_login(form: LoginForm):
         if not validate_user_login(user, form.password.data.strip(), ip):
             return redirect(url_for("auth.login"))
 
-        if user.waiting_for_approval():
-            return redirect(url_for("auth.please_wait"))
+    if requires_email_verification(user):
+        return redirect(url_for("auth.check_email"))
+
+    if user.waiting_for_approval():
+        return redirect(url_for("auth.please_wait"))
 
     return log_user_in(user, form, ip, country, ldap_sync=ldap_sync)
 

@@ -10,22 +10,58 @@
     <link href="{{ url_for('static', filename='js/tomselect/tom-select.css') }}" type="text/css" rel="stylesheet" />
 {% endblock %}
 
+{% block end_scripts -%}
+    <script src="{{ url_for('static', filename='js/media_library.js', changed=getmtime('js/media_library.js')) }}"></script>
+{% endblock -%}
+
 {% block app_content %}
 <script src="/static/js/coolfieldset.js?v=3"></script>
 <script nonce="{{ nonce }}">
-    function checkAndCopyTitle() {
+    function checkAndCopyTitle(curr_url = "", swapped = {}) {
       const retrieved = document.getElementById('retrieved_title');
+      const retrieved_description = document.getElementById('retrieved_description');
       const title = document.getElementById('title');
+      const body = document.getElementById('body');
+      const link_url = document.getElementById('link_url');
+      let skip = false;
+      let swapped_title = false;
+      let swapped_body = false;
 
-      if (retrieved && title && retrieved.value && !title.value) {
-        title.value = retrieved.value;
+      if (link_url && (link_url.value != curr_url)) {
+        if (curr_url in swapped) {
+          delete swapped[curr_url];
+        }
+        curr_url = link_url.value;
+        swapped[curr_url] = false;
+        retrieved.value = "";
+        retrieved_description.value = "";
+      } else {
+        skip = true;
       }
 
-      setTimeout(checkAndCopyTitle, 1000); // Check every second
+      if (!skip || !swapped[curr_url]) {
+        if (retrieved && title && retrieved.value && !title.value) {
+            title.value = retrieved.value;
+            swapped_title = true;
+        }
+
+        if (retrieved_description && body && retrieved_description.value && !body.value) {
+            body.value = retrieved_description.value;
+            swapped_body = true;
+        }
+
+        swapped[curr_url] = swapped_title || swapped_body;
+      }
+
+      setTimeout(checkAndCopyTitle, 1000, curr_url, swapped); // Check every second
     }
 
+    let curr_url = "";
+    let swapped = {};
+
     // Start the checking loop
-    checkAndCopyTitle();
+    console.log("Starting loop...");
+    checkAndCopyTitle(curr_url, swapped);
 
     function showHideLocationDivs(element) {
         const onlineLocation = document.getElementById('online_location');
@@ -42,12 +78,46 @@
 
     document.addEventListener("DOMContentLoaded", function () {
         const online = document.getElementById("online");
+        if(online) {
+            online.addEventListener('change', function () {
+                showHideLocationDivs(online);
+            });
 
-        online.addEventListener('change', function () {
             showHideLocationDivs(online);
+        }
+
+        // Initialize Media Library
+        const mediaLibrary = new MediaLibrary({
+            dialogId: 'insertImageDialog',
+            dialogCloseId: 'insert_image_dialog_close',
+            triggerLinkId: 'insertImage',
+            loadContainerId: 'loadImagesHere',
+            targetTextareaId: 'body',
+            uploadInputId: 'imageUploadInput',
+            uploadButtonId: 'imageUploadButton',
+            uploadStatusId: 'uploadStatus',
+            translations: {
+                loading: '{{ _("Loading...") }}',
+                noImages: '{{ _("No images found.") }}',
+                errorLoading: '{{ _("Error loading images.") }}',
+                insert: '{{ _("Insert") }}',
+                more: '{{ _("More") }}',
+                delete: '{{ _("Delete") }}',
+                confirmDelete: '{{ _("Are you sure you want to delete this image?") }}',
+                deleteError: '{{ _("Failed to delete image. Please try again.") }}',
+                selectFile: '{{ _("Please select a file.") }}',
+                selectImage: '{{ _("Please select an image file.") }}',
+                uploading: '{{ _("Uploading...") }}',
+                uploadSuccess: '{{ _("Upload successful!") }}',
+                uploadError: '{{ _("Upload failed. Please try again.") }}',
+                pasteUploadError: '{{ _("Failed to upload pasted image. Please try again.") }}'
+            }
         });
 
-        showHideLocationDivs(online);
+        {% if markdown_editor %}
+        // Override DownArea image button to use media library
+        mediaLibrary.overrideDownAreaImageButton('#body', 1500);
+        {% endif %}
     });
 </script>
 <div class="row">
@@ -58,8 +128,10 @@
             {% block post_type %}{% endblock %}
             {% if post_type == POST_TYPE_LINK %}
                 {{ render_field(form.link_url) }}
+                {{ render_field(form.image_alt_text) }}
                 <div id="urlUsed"></div>
                 <input type="hidden" id="retrieved_title" value="">
+                <input type="hidden" id="retrieved_description" value="">
             {% endif -%}
             {{ render_field(form.title) }}
             {% if post_type == POST_TYPE_EVENT %}
@@ -97,9 +169,10 @@
             {{ render_field(form.body) }}
 
             {% if not low_bandwidth -%}
-                <div class="row">
+                <div class="row mb-3">
                     <div class="col-6">
-                        <a href="#" hx-post="{{ url_for('post.preview') }}" hx-target="#preview">{{ _('Preview') }}</a>
+                        <a href="#" class="btn btn-outline-secondary" hx-post="{{ url_for('post.preview') }}" hx-target="#preview">{{ _('Preview') }}</a>
+                        <a href="#" class="btn btn-outline-secondary {{ 'd-none' if markdown_editor }}" id="insertImage">{{ _('Insert image') }}</a>
                     </div>
                     <div class="col-6 text-right">
                         {% if markdown_editor %}
@@ -138,25 +211,25 @@
                     <div class="form-group" style="{{ 'display: none;' if form.choice_3.data == none }}">
                         {{ form.choice_3(class_="form-control") }}
                     </div>
-                    <div class="form-group" style="display: none;">
+                    <div class="form-group" style="{{ 'display: none;' if form.choice_4.data == none }}">
                         {{ form.choice_4(class_="form-control") }}
                     </div>
-                    <div class="form-group" style="display: none;">
+                    <div class="form-group" style="{{ 'display: none;' if form.choice_5.data == none }}">
                         {{ form.choice_5(class_="form-control") }}
                     </div>
-                    <div class="form-group" style="display: none;">
+                    <div class="form-group" style="{{ 'display: none;' if form.choice_6.data == none }}">
                         {{ form.choice_6(class_="form-control") }}
                     </div>
-                    <div class="form-group" style="display: none;">
+                    <div class="form-group" style="{{ 'display: none;' if form.choice_7.data == none }}">
                         {{ form.choice_7(class_="form-control") }}
                     </div>
-                    <div class="form-group" style="display: none;">
+                    <div class="form-group" style="{{ 'display: none;' if form.choice_8.data == none }}">
                         {{ form.choice_8(class_="form-control") }}
                     </div>
-                    <div class="form-group" style="display: none;">
+                    <div class="form-group" style="{{ 'display: none;' if form.choice_9.data == none }}">
                         {{ form.choice_9(class_="form-control") }}
                     </div>
-                    <div class="form-group" style="display: none;">
+                    <div class="form-group" style="{{ 'display: none;' if form.choice_10.data == none }}">
                         {{ form.choice_10(class_="form-control") }}
                     </div>
                     <button id="addPollChoice" type="button" class="btn btn-primary">{{ _('Add choice') }}</button>
@@ -244,4 +317,5 @@
     {% include "_side_pane.html" %}
 
 </div>
+{% include "_insert_image_dialog.html" %}
 {% endblock %}

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from flask import current_app, g
 from sqlalchemy import text, func, or_
+from sqlalchemy.orm.exc import NoResultFound
 
 from app import cache, db
 from app.activitypub.util import active_month
 from app.constants import *
-from app.models import ChatMessage, Community, CommunityMember, Language, Instance, Post, PostReply, User, \
+from app.models import ChatMessage, Community, Language, Instance, Post, PostReply, User, \
     AllowedInstances, BannedInstances, utcnow, Site, Feed, FeedItem, Topic, CommunityFlair
 from app.utils import blocked_communities, blocked_instances, blocked_users, communities_banned_from, get_setting, \
-    num_topics, moderating_communities_ids, moderating_communities, joined_communities
+    num_topics, moderating_communities_ids, moderating_communities, joined_communities, \
+    moderating_communities_ids_all_users
 from app.shared.community import get_comm_flair_list
 from app.shared.post import get_post_flair_list
 
@@ -18,27 +20,22 @@ from app.shared.post import get_post_flair_list
 
 
 def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, communities_moderating=None, banned_from=None,
-              bookmarked_posts=None, post_subscriptions=None, communities_joined=None, read_posts=None, content_filters=None) -> dict | None:
+              bookmarked_posts=None, post_subscriptions=None, communities_joined=None, read_posts=None, content_filters=None) -> dict:
     if isinstance(post, int):
-        post = Post.query.filter_by(id=post, deleted=False).first()
-        if post is None:
-            return None
+        post = Post.query.filter_by(id=post, deleted=False).one()
 
     # Variant 1 - models/post/post.dart
     if variant == 1:
-        include = ['id', 'title', 'user_id', 'community_id', 'deleted', 'nsfw', 'sticky']
+        include = ['id', 'title', 'user_id', 'community_id', 'deleted', 'sticky']
         v1 = {column.name: getattr(post, column.name) for column in post.__table__.columns if column.name in include}
-        
-        if not v1['nsfw']:
-            # For whatever reason, nsfw can sometimes be null
-            v1['nsfw'] = False
-        
+
         v1.update({'published': post.posted_at.isoformat(timespec="microseconds") + 'Z',
                    'ap_id': post.profile_id(),
                    'local': post.is_local(),
                    'language_id': post.language_id if post.language_id else 0,
                    'removed': False,
-                   'locked': not post.comments_enabled})
+                   'locked': not post.comments_enabled,
+                   'nsfw': post.nsfw if post.nsfw is not None else False})
         if post.body:
             v1['body'] = post.body
         if post.edited_at:
@@ -47,6 +44,7 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
             if post.deleted_by and post.user_id != post.deleted_by:
                 v1['removed'] = True
                 v1['deleted'] = False
+        v1['post_type'] = POST_TYPE_NAMES.get(post.type, "Discussion")
         if post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO:
             if post.url:
                 v1['url'] = post.url
@@ -156,6 +154,8 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
         creator_is_moderator = True if moderator else False
         creator_is_admin = True if admin else False
         subscribe_type = 'Subscribed' if followed else 'NotSubscribed'
+        can_auth_user_moderate = True if user_id and communities_moderating and user_id in communities_moderating and \
+                                         post.community_id in communities_moderating[user_id] else False
         v2 = {'post': post_view(post=post, variant=1, stub=stub), 'counts': counts, 'banned_from_community': False,
               'subscribed': subscribe_type,
               'saved': saved, 'read': read, 'hidden': False, 'unread_comments': post.reply_count, 'my_vote': my_vote,
@@ -163,7 +163,8 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
               'blurred': post.blurred(g.user if hasattr(g, 'user') else None),
               'activity_alert': activity_alert,
               'creator_banned_from_community': creator_banned_from_community,
-              'creator_is_moderator': creator_is_moderator, 'creator_is_admin': creator_is_admin}
+              'creator_is_moderator': creator_is_moderator, 'creator_is_admin': creator_is_admin,
+              'can_auth_user_moderate': can_auth_user_moderate}
         
         post_flair =[]
         
@@ -190,15 +191,20 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
     # Variant 3 - models/post/get_post_response.dart - /post api endpoint
     if variant == 3:
         modlist = cached_modlist_for_community(post.community_id)
+        if communities_moderating is None:
+            communities_moderating = moderating_communities_ids_all_users() if user_id else []
 
         xplist = []
         if post.cross_posts:
             for xp_id in post.cross_posts:
-                if entry := post_view(post=xp_id, variant=2, stub=True):
+                try:
+                    entry = post_view(post=xp_id, variant=2, stub=True, communities_moderating=communities_moderating)
                     xplist.append(entry)
+                except NoResultFound:
+                    continue
 
-        v3 = {'post_view': post_view(post=post, variant=2, user_id=user_id),
-              'community_view': community_view(community=post.community, variant=2),
+        v3 = {'post_view': post_view(post=post, variant=2, user_id=user_id, communities_moderating=communities_moderating),
+              'community_view': community_view(community=post.community, variant=2, user_id=user_id),
               'moderators': modlist,
               'cross_posts': xplist}
 
@@ -206,13 +212,17 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
 
     # Variant 4 - models/post/post_response.dart - api endpoint for /post/like and post/save
     if variant == 4:
-        v4 = {'post_view': post_view(post=post, variant=2, user_id=user_id)}
+        if communities_moderating is None:
+            communities_moderating = moderating_communities_ids_all_users() if user_id else []
+        v4 = {'post_view': post_view(post=post, variant=2, user_id=user_id, communities_moderating=communities_moderating)}
 
         return v4
 
     # Variant 5 - from resolve_object
     if variant == 5:
-        v5 = {'post': post_view(post=post, variant=2, user_id=user_id)}
+        if communities_moderating is None:
+            communities_moderating = moderating_communities_ids_all_users() if user_id else []
+        v5 = {'post': post_view(post=post, variant=2, user_id=user_id, communities_moderating=communities_moderating)}
 
         return v5
 
@@ -248,6 +258,14 @@ def user_view(user: User | int, variant, stub=False, user_id=None, flair_communi
             flair = user.community_flair(flair_community_id)
             if flair:
                 v1['flair'] = flair
+        if user.extra_fields:
+            v1['extra_fields'] = []
+            for field in user.extra_fields.limit(4):
+                user_field = {}
+                user_field['id'] = field.id
+                user_field['label'] = field.label
+                user_field['text'] = field.text
+                v1['extra_fields'].append(user_field)
 
         return v1
 
@@ -292,6 +310,15 @@ def user_view(user: User | int, variant, stub=False, user_id=None, flair_communi
 
     # Variant 6 - User Settings - api/user.dart saveUserSettings
     if variant == 6:
+        extra_fields = []
+        if user.extra_fields:
+            for field in user.extra_fields.limit(4):
+                user_field = {}
+                user_field['id'] = field.id
+                user_field['label'] = field.label
+                user_field['text'] = field.text
+                extra_fields.append(user_field)
+
         v6 = {
             "local_user_view": {
                 "local_user": {
@@ -319,6 +346,7 @@ def user_view(user: User | int, variant, stub=False, user_id=None, flair_communi
                     "banner": user.cover.medium_url() if user.cover_id else None,
                     "about": user.about,
                     "about_html": user.about_html,
+                    "extra_fields": extra_fields,
                 },
                 "counts": {
                     "person_id": user.id,
@@ -339,6 +367,8 @@ def user_view(user: User | int, variant, stub=False, user_id=None, flair_communi
             del v6["local_user_view"]["person"]["about"]
         if not v6["local_user_view"]["person"]["about_html"]:
             del v6["local_user_view"]["person"]["about_html"]
+        if not v6["local_user_view"]["person"]["extra_fields"]:
+            del v6["local_user_view"]["person"]["extra_fields"]
 
         return v6
 
@@ -874,7 +904,8 @@ def private_message_view(cm: ChatMessage, variant, report=None) -> dict:
             'local': is_local
         },
         'creator': creator,
-        'recipient': recipient
+        'recipient': recipient,
+        'conversation_id': cm.conversation_id
     }
 
     if variant == 1:

@@ -28,6 +28,7 @@ import redis
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 import orjson
 
+from app.markdown_extras import apply_enhanced_image_attributes
 from app.translation import LibreTranslateAPI
 
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
@@ -44,7 +45,7 @@ from wtforms.widgets import ListWidget, CheckboxInput, TextInput
 from wtforms.validators import ValidationError
 from markupsafe import Markup
 import boto3
-from app import db, cache, httpx_client, celery
+from app import db, cache, httpx_client, celery, plugins
 from app.constants import *
 import re
 from PIL import Image, ImageOps, ImageCms
@@ -65,6 +66,16 @@ def render_template(template_name: str, **context) -> Response:
         content = flask.render_template(f'themes/{theme}/{template_name}', **context)
     else:
         content = flask.render_template(template_name, **context)
+
+    # Add nonces to all script tags that don't have them (for CSP with strict-dynamic)
+    if hasattr(g, 'nonce') and g.nonce:
+        import re
+        # Find all <script tags with src= that don't have nonce=
+        content = re.sub(
+            r'<script\s+([^>]*?)src=(["\'][^"\']*["\'])(?![^>]*nonce=)',
+            rf'<script \1src=\2 nonce="{g.nonce}"',
+            content
+        )
 
     # Browser caching using ETags and Cache-Control
     resp = make_response(content)
@@ -286,19 +297,10 @@ def mime_type_using_head(url):
         return ''
 
 
-def protect_code_blocks(html: str):
-    code_snippets = []
-
-    def store(match):
-        code_snippets.append(match.group(0))
-        return f"__CODE_BLOCK_{len(code_snippets)-1}__"
-
-    html = re.sub(r'<pre[\s\S]*?</pre>', store, html)
-    html = re.sub(r'<code[\s\S]*?</code>', store, html)
-    return html, code_snippets
-
-allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre',
-                'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small', 'sub', 'sup',
+allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5',
+                'h6', 'pre', 'div',
+                'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small',
+                'sub', 'sup',
                 's', 'tg-spoiler', 'ruby', 'rt', 'rp']
 
 
@@ -315,6 +317,10 @@ LINK_PATTERN = re.compile(
     """,
     re.X
 )
+
+PERSON_PATTERN = re.compile(r"(?<![\/])@([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b")
+COMMUNITY_PATTERN = re.compile(r"(?<![\/])!([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b")
+FEED_PATTERN = re.compile(r"(?<![\/])~([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b")
 
 
 # sanitise HTML using an allow list
@@ -381,8 +387,13 @@ def allowlist_html(html: str, a_target='_blank') -> str:
             tag.extract()
         else:
             # Filter and sanitize attributes
+            allowed_attrs = ['href', 'src', 'alt', 'class', 'id', 'title', 'type', 'disabled', 'checked']
+            # Add image-specific attributes for enhanced-images markdown extra
+            if tag.name == 'img':
+                allowed_attrs.extend(['width', 'height', 'align', 'title', 'data-enhanced-img'])
+
             for attr in list(tag.attrs):
-                if attr not in ['href', 'src', 'alt', 'class', 'id', 'title', 'type', 'disabled', 'checked']:
+                if attr not in allowed_attrs:
                     del tag[attr]
             # Remove some mastodon guff - spans with class "invisible"
             if tag.name == 'span' and 'class' in tag.attrs and 'invisible' in tag.attrs['class']:
@@ -471,7 +482,12 @@ def escape_non_html_angle_brackets(text: str) -> str:
             tag_name = tag_content[1:].split()[0]
         else:
             tag_name = tag_content.split()[0]
-        if tag_name in allowed_tags or re.match(LINK_PATTERN, tag_content):
+        emoticons = ['3', # heart
+                     '\\3', # broken heart
+                     '|:‑)', # santa claus *<|:‑)
+                     ':‑|' # dumb, dunce-like
+                     ]
+        if tag_name in allowed_tags or re.match(LINK_PATTERN, tag_content) or tag_content in emoticons:
             return match.group(0)
         else:
             return f"&lt;{match.group(1)}&gt;"
@@ -512,9 +528,46 @@ def escape_img(raw_html: str) -> str:
     return raw_html
 
 
+def handle_lemmy_autocomplete(text: str) -> str:
+    """
+    Handles markdown formatted links that are in the format that lemmy autocompletes users/communities to and replaces
+    them with instance-agnostic links.
+    
+    Lemmy autocomplete format:
+        [!news@lemmy.world](https://lemmy.world/c/news)
+    Convert this to:
+        !news@lemmy.world
+    
+    ...which will be later converted to an instance-local link
+    """
+
+    # Step 1: Extract inline and block code, replacing with placeholders
+    code_snippets, text = stash_code_md(text)
+
+    # Step 2: ID all the markdown-formatted links and check the part in [] if it matches comm/person/feed formats
+    def sub_non_formatted_actor(match):
+        bracket_part = match.group(1)
+        if re.match(COMMUNITY_PATTERN, bracket_part):
+            return bracket_part
+        elif re.match(PERSON_PATTERN, bracket_part):
+            return bracket_part
+        elif re.match(FEED_PATTERN, bracket_part):
+            return bracket_part
+        return match.group(0)
+
+    re_link = re.compile(r"\[((!|@|~).*?)\]\(.*?\)")
+
+    text = re.sub(re_link, sub_non_formatted_actor, text)
+
+    # Step 3: Restore code blocks
+    text = pop_code(code_snippets=code_snippets, text=text)
+
+    return text
+
+
 # use this for Markdown irrespective of origin, as it can deal with both soft break newlines ('\n' used by PieFed) and hard break newlines ('  \n' or ' \\n')
 # ' \\n' will create <br /><br /> instead of just <br />, but hopefully that's acceptable.
-def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True) -> str:
+def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_target="_blank") -> str:
     if markdown_text:
         # Lemmyの改行の仕方と揃える
         # on_newlineをFalseにして、スペース2つを見つけたらバックスラッシュを入れてあげる
@@ -525,29 +578,38 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True) -> str
             markdown_text)  # To handle situations like https://ani.social/comment/9666667
         
         markdown_text = handle_double_bolds(markdown_text)  # To handle bold in two places in a sentence
+        markdown_text = handle_lemmy_autocomplete(markdown_text)
+
+        markdown_text = markdown_text.replace('þ', 'th')
 
         try:
-            raw_html = markdown2.markdown(markdown_text,
-                                          extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True,
-                                                  'tg-spoiler': True, 'link-patterns': [(LINK_PATTERN, r'\1')],
-                                                  'breaks': {'on_newline': False, 'on_backslash': True},
-                                                  'tag-friendly': True, 'task_list': True, 'footnotes': True, 'smarty-pants': True})
+            md = markdown2.Markdown(extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True,
+                                            'tg-spoiler': True, 'link-patterns': [(LINK_PATTERN, r'\1')],
+                                            'breaks': {'on_newline': False, 'on_backslash': True},
+                                            'tag-friendly': True, 'task_list': True, 'footnotes': True, 'smarty-pants': True,
+                                            'enhanced-images': True})
+            raw_html = md.convert(markdown_text)
+            # Apply enhanced image attributes after markdown processing
+            raw_html = apply_enhanced_image_attributes(raw_html, md)
         except TypeError:
             # weird markdown, like https://mander.xyz/u/tty1 and https://feddit.uk/comment/16076443,
             # causes "markdown2.Markdown._color_with_pygments() argument after ** must be a mapping, not bool" error, so try again without fenced-code-blocks extra
             try:
-                raw_html = markdown2.markdown(markdown_text,
-                                              extras={'middle-word-em': False, 'tables': True, 'strike': True,
-                                                      'tg-spoiler': True, 'link-patterns': [(LINK_PATTERN, r'\1')],
-                                                      'breaks': {'on_newline': False, 'on_backslash': True},
-                                                      'tag-friendly': True, 'task_list': True, 'footnotes': True, 'smarty-pants': True})
+                md = markdown2.Markdown(extras={'middle-word-em': False, 'tables': True, 'strike': True,
+                                                'tg-spoiler': True, 'link-patterns': [(LINK_PATTERN, r'\1')],
+                                                'breaks': {'on_newline': False, 'on_backslash': True},
+                                                'tag-friendly': True, 'task_list': True, 'footnotes': True, 'smarty-pants': True,
+                                                'enhanced-images': True})
+                raw_html = md.convert(markdown_text)
+                # Apply enhanced image attributes after markdown processing
+                raw_html = apply_enhanced_image_attributes(raw_html, md)
             except:
                 raw_html = ''
         
         if not allow_img:
             raw_html = escape_img(raw_html)
 
-        return allowlist_html(raw_html, a_target='_blank' if anchors_new_tab else '')
+        return allowlist_html(raw_html, a_target=a_target if anchors_new_tab else '')
     else:
         return ''
 
@@ -699,7 +761,7 @@ def community_link_to_href(link: str, server_name_override: str | None = None) -
     # Stash the existing links so they are not formatted
     link_snippets, link = stash_link_html(link)
 
-    pattern = r"(?<![\/])!([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b"
+    pattern = COMMUNITY_PATTERN
     server = r'<a href="https://' + server_name + r'/community/lookup/'
     link = re.sub(pattern, server + r'\g<1>/\g<2>">' + r'!\g<1>@\g<2></a>', link)
 
@@ -724,7 +786,7 @@ def feed_link_to_href(link: str, server_name_override: str | None = None) -> str
     # Stash the existing links so they are not formatted
     link_snippets, link = stash_link_html(link)
 
-    pattern = r"(?<![\/])~([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b"
+    pattern = FEED_PATTERN
     server = r'<a href="https://' + server_name + r'/feed/lookup/'
     link = re.sub(pattern, server + r'\g<1>/\g<2>">' + r'~\g<1>@\g<2></a>', link)
 
@@ -750,7 +812,7 @@ def person_link_to_href(link: str, server_name_override: str | None = None) -> s
     link_snippets, link = stash_link_html(link)
 
     # Substitute @user@instance.tld with <a> tags, but ignore if it has a preceding / or [ character
-    pattern = r"(?<![\/])@([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b"
+    pattern = PERSON_PATTERN
     server = f'https://{server_name}/user/lookup/'
     replacement = (r'<a href="' + server + r'\g<1>/\g<2>" rel="nofollow noindex">@\g<1>@\g<2></a>')
     link = re.sub(pattern, replacement, link)
@@ -1075,7 +1137,18 @@ def approval_required(func):
 def trustworthy_account_required(func):
     @wraps(func)
     def decorated_view(*args, **kwargs):
-        if current_user.trustworthy():
+        if current_user.trustworthy() or current_user.get_id() in g.admin_ids:
+            return func(*args, **kwargs)
+        else:
+            return redirect(url_for('auth.not_trustworthy'))
+
+    return decorated_view
+
+
+def aged_account_required(func):
+    @wraps(func)
+    def decorated_view(*args, **kwargs):
+        if current_user.get_id() in g.admin_ids or not current_user.created_very_recently():
             return func(*args, **kwargs)
         else:
             return redirect(url_for('auth.not_trustworthy'))
@@ -1735,6 +1808,9 @@ def finalize_user_setup(user):
 
     db.session.commit()
 
+    # fire hook for plugins to use upon a new user
+    plugins.fire_hook("new_user", user)
+
 
 def notification_subscribers(entity_id: int, entity_type: int) -> List[int]:
     return list(db.session.execute(
@@ -2220,8 +2296,18 @@ def site_language_id(site=None):
     if g and hasattr(g, 'site') and g.site.language_id:
         return g.site.language_id
     else:
-        english = Language.query.filter(Language.code == 'en').first()
+        english = db.session.query(Language).filter(Language.code == 'en').first()
         return english.id if english else None
+
+
+def site_language_code(site=None):
+    if site is not None and site.language_id:
+        return db.session.query(Language).get(site.language_id).code
+    if g and hasattr(g, 'site') and g.site.language_id:
+        return db.session.query(Language).get(g.site.language_id).code
+    else:
+        english = db.session.query(Language).filter(Language.code == 'en').first()
+        return english.code if english else ''
 
 
 def read_language_choices() -> List[tuple]:
@@ -2275,7 +2361,7 @@ def add_to_modlog(action: str, actor: User, target_user: User = None, reason: st
     db.session.commit()
 
 
-def authorise_api_user(auth, return_type=None, id_match=None) -> User | int:
+def authorise_api_user(auth, return_type=None, id_match=None) -> User | dict | int:
     if not auth:
         raise Exception('incorrect_login')
     token = auth[7:]  # remove 'Bearer '
@@ -2283,7 +2369,9 @@ def authorise_api_user(auth, return_type=None, id_match=None) -> User | int:
     decoded = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=["HS256"])
     if decoded:
         user_id = decoded['sub']
-        user = User.query.filter_by(id=user_id, ap_id=None, verified=True, banned=False, deleted=False).one()
+        user = User.query.filter_by(id=user_id, ap_id=None, verified=True, banned=False, deleted=False).first()
+        if user is None:
+            raise Exception('incorrect_login')
         if user.password_updated_at:
             issued_at_time = decoded['iat']
             password_updated_time = int(user.password_updated_at.timestamp())
@@ -2711,7 +2799,7 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str, ha
         post_id_sort = 'ORDER BY p.ranking DESC, p.posted_at DESC'
     elif sort == 'scaled':
         post_id_sort = 'ORDER BY p.ranking_scaled DESC, p.ranking DESC, p.posted_at DESC'
-        post_id_where.append('p.ranking_scaled is not null ')
+        post_id_where.append('p.ranking_scaled is not null AND p.from_bot is false ')
     elif sort.startswith('top'):
         if sort != 'top_all':
             post_id_where.append('p.posted_at > :top_cutoff ')
@@ -2737,6 +2825,7 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str, ha
     elif sort == 'old':
         post_id_sort = 'ORDER BY p.posted_at ASC'
     elif sort == 'active':
+        post_id_where.append('p.reply_count > 0 ')
         post_id_sort = 'ORDER BY p.last_active DESC'
     final_post_id_sql = f"{post_id_sql} WHERE {' AND '.join(post_id_where)}\n{post_id_sort}\nLIMIT 1000"
     post_ids = db.session.execute(text(final_post_id_sql), params).all()
@@ -3062,6 +3151,30 @@ def user_notes(user_id):
     return result
 
 
+class SqlKeysetPagination:
+    """Wrapper to make sqlakeyset pages more similar to existing Flask pagination interface"""
+
+    def __init__(self, page_obj):
+        self.items = page_obj
+        self._page_obj = page_obj
+
+    @property
+    def has_next(self):
+        return self._page_obj.paging.has_next
+
+    @property
+    def has_prev(self):
+        return self._page_obj.paging.has_previous
+
+    @property
+    def next_bookmark(self):
+        return self._page_obj.paging.bookmark_next if self.has_next else None
+
+    @property
+    def prev_bookmark(self):
+        return self._page_obj.paging.bookmark_previous if self.has_prev else None
+
+
 @event.listens_for(User.unread_notifications, 'set')
 def on_unread_notifications_set(target, value, oldvalue, initiator):
     if value != oldvalue and current_app.config['NOTIF_SERVER']:
@@ -3261,7 +3374,6 @@ def is_valid_xml_utf8(pystring):
     return True
 
 
-@celery.task
 def archive_post(post_id: int):
     from app import redis_client
     import os
@@ -3387,6 +3499,8 @@ def archive_post(post_id: int):
                                 'author_reputation': comment.author.reputation if comment.author else 0,
                                 'author_created': comment.author.created.isoformat() if comment.author else None,
                                 'author_ap_domain': comment.author.ap_domain if comment.author else '',
+                                'author_bot': comment.author.bot if comment.author else False,
+                                'author_banned': comment.author.banned if comment.author else False,
                                 'replies': serialize_tree(reply_dict['replies'])
                             }
                             result.append(serialized)
@@ -3493,13 +3607,26 @@ def to_srgb(im: Image.Image, assume="sRGB"):
             im, src, srgb_cms,
             outputMode="RGB",
             renderingIntent=0,
-            flags=ImageCms.FLAGS["BLACKPOINTCOMPENSATION"],
+            flags=ImageCms.Flags["BLACKPOINTCOMPENSATION"],
         )
         # keep an sRGB tag just in case
         im.info["icc_profile"] = srgb_wrap.tobytes()
     except ImageCms.PyCMSError:
         # Fallback: just convert without ICC
         im = im.convert("RGB")
+    except AttributeError:
+        # Fallback, older versions of PIL have a different attribute name
+        try:
+            im = ImageCms.profileToProfile(
+                im, src, srgb_cms,
+                outputMode="RGB",
+                renderingIntent=0,
+                flags=ImageCms.FLAGS["BLACKPOINTCOMPENSATION"],
+            )
+            # keep an sRGB tag just in case
+            im.info["icc_profile"] = srgb_wrap.tobytes()
+        except ImageCms.PyCMSError:
+            pass
 
     return im
 
@@ -3515,3 +3642,54 @@ def expand_hex_color(text: str) -> str:
                 text[2] * 2 +
                 text[3] * 2)
     return new_text
+
+
+def scale_gif(path, scale, new_path=None):
+    # from https://stackoverflow.com/a/69850807
+    gif = Image.open(path)
+    if not new_path:
+        new_path = path
+    old_gif_information = {
+        'loop': bool(gif.info.get('loop', 1)),
+        'duration': gif.info.get('duration', 40),
+        'background': gif.info.get('background', 223),
+        'extension': gif.info.get('extension', (b'NETSCAPE2.0')),
+        'transparency': gif.info.get('transparency', 223)
+    }
+    new_frames = get_new_frames(gif, scale)
+    save_new_gif(new_frames, old_gif_information, new_path)
+
+
+def get_new_frames(gif, scale):
+    new_frames = []
+    actual_frames = gif.n_frames
+    for frame in range(actual_frames):
+        gif.seek(frame)
+        new_frame = Image.new('RGBA', gif.size)
+        new_frame.paste(gif)
+        new_frame.thumbnail(scale)
+        new_frames.append(new_frame)
+    return new_frames
+
+
+def save_new_gif(new_frames, old_gif_information, new_path):
+    new_frames[0].save(new_path,
+                       save_all = True,
+                       append_images = new_frames[1:],
+                       duration = old_gif_information['duration'],
+                       loop = old_gif_information['loop'],
+                       background = old_gif_information['background'],
+                       extension = old_gif_information['extension'] ,
+                       transparency = old_gif_information['transparency'])
+
+
+def human_filesize(size_bytes):
+    """Convert bytes to human-readable string (e.g. 1.2 MB)."""
+    if size_bytes == 0:
+        return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
+    i = 0
+    while size_bytes >= 1024 and i < len(units) - 1:
+        size_bytes /= 1024.0
+        i += 1
+    return f"{size_bytes:.1f} {units[i]}"

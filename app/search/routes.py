@@ -1,5 +1,5 @@
 from flask import request, flash, url_for, redirect, abort
-from flask_babel import _
+from flask_babel import _, g
 from flask_login import current_user
 from sqlalchemy import or_, desc, text
 
@@ -11,7 +11,7 @@ from app.models import Post, Language, Community, Instance, PostReply
 from app.search import bp
 from app.utils import render_template, blocked_domains, blocked_instances, \
     communities_banned_from, recently_upvoted_posts, recently_downvoted_posts, blocked_users, blocked_communities, \
-    show_ban_message, login_required, login_required_if_private_instance, moderating_communities_ids
+    show_ban_message, login_required, login_required_if_private_instance, moderating_communities_ids, get_setting
 
 
 @bp.route('/search', methods=['GET', 'POST'])
@@ -31,11 +31,11 @@ def run_search():
     type = request.args.get('type', 0, type=int)
     software = request.args.get('software', '')
     low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
-    q = request.args.get('q')
+    q = (request.args.get('q') or '').strip()
     sort_by = request.args.get('sort_by', '')
     search_for = request.args.get('search_for', 'posts')
 
-    if q is not None or type != 0 or language_id != 0 or community_id != 0:
+    if q != '' or type != 0 or language_id != 0 or community_id != 0:
         posts = None
         db.session.execute(text("SET work_mem = '100MB';"))
         if search_for == 'posts':
@@ -176,7 +176,9 @@ def run_search():
 
         return render_template('search/start.html', title=_('Search'), communities=communities.all(),
                                languages=languages, instance_software=instance_software,
-
+                               is_admin=current_user.is_authenticated and current_user.is_admin(),
+                               is_staff=current_user.is_authenticated and current_user.is_staff(),
+                               default_user_add_remote=get_setting("allow_default_user_add_remote_community", True)
                                )
 
 

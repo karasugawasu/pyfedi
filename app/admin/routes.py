@@ -100,15 +100,21 @@ def admin_site():
 
         site.about = form.about.data
         if form.about.data:
-            site.about_html = markdown_to_html(form.about.data)
+            site.about_html = markdown_to_html(form.about.data, a_target="")
+        else:
+            site.about_html = ""
 
         site.sidebar = form.sidebar.data
         if form.sidebar.data:
-            site.sidebar_html = markdown_to_html(form.sidebar.data)
+            site.sidebar_html = markdown_to_html(form.sidebar.data, a_target="")
+        else:
+            site.sidebar_html = ""
 
         site.legal_information = form.legal_information.data
         if form.legal_information.data:
-            site.legal_information_html = markdown_to_html(form.legal_information.data)
+            site.legal_information_html = markdown_to_html(form.legal_information.data, a_target="")
+        else:
+            site.legal_information_html = ""
 
         site.tos_url = form.tos_url.data
         site.updated = utcnow()
@@ -208,7 +214,7 @@ def admin_site():
 
         db.session.commit()
         set_setting('announcement', form.announcement.data)
-        set_setting('announcement_html', markdown_to_html(form.announcement.data, anchors_new_tab=False))
+        set_setting('announcement_html', markdown_to_html(form.announcement.data, anchors_new_tab=False, a_target=""))
         flash(_('Settings saved.'))
     elif request.method == 'GET':
         form.name.data = site.name
@@ -239,7 +245,7 @@ def admin_misc():
         site.registration_mode = 'Closed'
         if close_form.announcement.data:
             set_setting('announcement', close_form.announcement.data)
-            set_setting('announcement_html', markdown_to_html(close_form.announcement.data, anchors_new_tab=False))
+            set_setting('announcement_html', markdown_to_html(close_form.announcement.data, anchors_new_tab=False, a_target=""))
         db.session.commit()
         flash(_('Settings saved.'))
     elif form.validate_on_submit():
@@ -268,6 +274,7 @@ def admin_misc():
             db.session.add(site)
         db.session.commit()
         cache.delete_memoized(blocked_referrers)
+        set_setting("allow_default_user_add_remote_community", form.allow_default_user_add_remote_community.data)
         set_setting('meme_comms_low_quality', form.meme_comms_low_quality.data)
         set_setting('public_modlog', form.public_modlog.data)
         set_setting('email_verification', form.email_verification.data)
@@ -290,6 +297,7 @@ def admin_misc():
         form.enable_nsfl.data = site.enable_nsfl
         form.nsfw_country_restriction.data = get_setting('nsfw_country_restriction', '').upper()
         form.community_creation_admin_only.data = site.community_creation_admin_only
+        form.allow_default_user_add_remote_community.data = get_setting("allow_default_user_add_remote_community", True) 
         form.reports_email_admins.data = site.reports_email_admins
         form.registration_mode.data = site.registration_mode
         form.application_question.data = site.application_question
@@ -324,7 +332,7 @@ def admin_instance_chooser():
         set_setting('number_of_admins', form.number_of_admins.data)
         set_setting('financial_stability', form.financial_stability.data)
         set_setting('daily_backups', form.daily_backups.data)
-        flash(_('Settings saved.'))
+        flash(_('Settings saved. It might take up to 24 hours before other instances show your changes.'))
     elif request.method == 'GET':
         form.enable_instance_chooser.data = get_setting('enable_instance_chooser', False)
         form.elevator_pitch.data = get_setting('elevator_pitch', '')
@@ -1205,10 +1213,11 @@ def admin_community_edit(community_id):
         community.show_all = form.show_all.data
         community.low_quality = form.low_quality.data
         community.content_retention = form.content_retention.data
-        community.topic_id = form.topic.data if form.topic.data != 0 else None
+        community.topic_id = form.topic.data if form.topic.data > 0 else None
         community.default_layout = form.default_layout.data
         community.posting_warning = form.posting_warning.data
         community.ignore_remote_language = form.ignore_remote_language.data
+        community.always_translate = form.always_translate.data
         community.can_be_archived = form.can_be_archived.data
 
         icon_file = request.files['icon_file']
@@ -1267,6 +1276,7 @@ def admin_community_edit(community_id):
         form.posting_warning.data = community.posting_warning
         form.languages.data = community.language_ids()
         form.ignore_remote_language.data = community.ignore_remote_language
+        form.always_translate.data = community.always_translate
         form.can_be_archived.data = community.can_be_archived
     return render_template('admin/edit_community.html', title=_('Edit community'), form=form, community=community)
 
@@ -1338,7 +1348,7 @@ def admin_topic_add():
     if form.validate_on_submit():
         topic = Topic(name=form.name.data, machine_name=slugify(form.machine_name.data.strip()), num_communities=0,
                       show_posts_in_children=form.show_posts_in_children.data)
-        if form.parent_id.data:
+        if form.parent_id.data and form.parent_id.data != -1:
             topic.parent_id = form.parent_id.data
         else:
             topic.parent_id = None
@@ -1364,7 +1374,7 @@ def admin_topic_edit(topic_id):
         topic.num_communities = topic.communities.count()
         topic.machine_name = slugify(form.machine_name.data.strip())
         topic.show_posts_in_children = form.show_posts_in_children.data
-        if form.parent_id.data:
+        if form.parent_id.data > 0:
             topic.parent_id = form.parent_id.data
         else:
             topic.parent_id = None
@@ -2103,7 +2113,7 @@ def admin_cms_page_edit(page_id):
         page.url = form.url.data
         page.title = form.title.data
         page.body = form.body.data
-        page.body_html = markdown_to_html(form.body.data)
+        page.body_html = markdown_to_html(form.body.data, a_target="")
         page.last_edited_by = current_user.display_name()
         page.edited_at = utcnow()
         db.session.commit()

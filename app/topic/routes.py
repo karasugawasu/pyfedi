@@ -30,6 +30,8 @@ from app.utils import render_template, user_filters_posts, validation_required, 
 def show_topic(topic_path):
     page = request.args.get('page', 0, type=int)
     sort = request.args.get('sort', '' if current_user.is_anonymous else current_user.default_sort)
+    if sort == 'scaled':
+        sort = ''
     result_id = request.args.get('result_id', gibberish(15)) if current_user.is_authenticated else None
     low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
     post_layout = request.args.get('layout', 'list' if not low_bandwidth else None)
@@ -149,6 +151,8 @@ def show_topic(topic_path):
             prev_url = url_for('topic.show_topic', topic_path=topic_path,
                                page=comments.prev_num, sort=sort, layout=post_layout,
                                content_type=content_type) if comments.has_prev and page != 1 else None
+        else:
+            abort(400)
 
         sub_topics = Topic.query.filter_by(parent_id=current_topic.id).order_by(Topic.name).all()
 
@@ -221,7 +225,10 @@ def show_topic_rss(topic_path):
         for post in posts:
             fe = fg.add_entry()
             fe.title(post.title)
-            fe.link(href=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}")
+            if post.slug:
+                fe.link(href=f"https://{current_app.config['SERVER_NAME']}{post.slug}")
+            else:
+                fe.link(href=f"https://{current_app.config['SERVER_NAME']}/post/{post.id}")
             if post.url:
                 type = mimetype_from_url(post.url)
                 if type and not type.startswith('text/'):
