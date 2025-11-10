@@ -296,6 +296,16 @@ def mime_type_using_head(url):
     except httpx.HTTPError:
         return ''
 
+def protect_code_blocks(html: str):
+    code_snippets = []
+
+    def store(match):
+        code_snippets.append(match.group(0))
+        return f"__CODE_BLOCK_{len(code_snippets)-1}__"
+
+    html = re.sub(r'<pre[\s\S]*?</pre>', store, html)
+    html = re.sub(r'<code[\s\S]*?</code>', store, html)
+    return html, code_snippets
 
 allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5',
                 'h6', 'pre', 'div',
