@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 from flask import current_app, flash, render_template
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 from slugify import slugify
-from sqlalchemy import text
+from sqlalchemy import text, func
 from sqlalchemy.exc import IntegrityError
 
 from app import db, cache
@@ -12,14 +14,14 @@ from app.chat.util import send_message
 from app.constants import *
 from app.email import send_email
 from app.models import CommunityBlock, CommunityMember, Notification, NotificationSubscription, User, Conversation, \
-    Community, Language, File
+    Community, Language, File, CommunityFlair
 from app.shared.tasks import task_selector
 from app.shared.upload import process_upload
 from app.user.utils import search_for_user
 from app.utils import authorise_api_user, blocked_communities, shorten_string, markdown_to_html, \
     instance_banned, community_membership, joined_communities, moderating_communities, is_image_url, \
     communities_banned_from, piefed_markdown_to_lemmy_markdown, community_moderators, add_to_modlog, \
-    get_recipient_language, moderating_communities_ids
+    get_recipient_language, moderating_communities_ids, moderating_communities_ids_all_users
 
 
 # function can be shared between WEB and API (only API calls it for now)
@@ -394,7 +396,7 @@ def delete_community(community_id: int, src, auth=None):
         user = current_user.id
 
     community = Community.query.filter_by(id=community_id).one()
-    if not (community.is_owner(user) or community.is_moderator(user) or community.is_instance_admin(user)):
+    if not (community.is_owner(user) or community.is_moderator(user) or user.is_admin_or_staff()):
         raise Exception('incorrect_login')
     if not community.is_local():
         raise Exception('Only local communities can be deleted')
@@ -423,7 +425,7 @@ def restore_community(community_id: int, src, auth=None):
         user = current_user
 
     community = Community.query.filter_by(id=community_id).one()
-    if not (community.is_owner(user) or community.is_moderator(user) or community.is_instance_admin(user)):
+    if not (community.is_owner(user) or community.is_moderator(user) or user.is_admin_or_staff()):
         raise Exception('incorrect_login')
     if not community.is_local():
         raise Exception('Only local communities can be restored')
@@ -449,7 +451,7 @@ def add_mod_to_community(community_id: int, person_id: int, src, auth=None):
     community = Community.query.filter_by(id=community_id).one()
     new_moderator = User.query.filter_by(id=person_id, banned=False).one()
     if not community.is_owner(user) and not user.is_admin_or_staff():
-        raise Exception('incorrect_login')
+        raise Exception('no_permission')
 
     existing_member = CommunityMember.query.filter(CommunityMember.user_id == new_moderator.id,
                                                    CommunityMember.community_id == community_id).first()
@@ -496,6 +498,7 @@ def add_mod_to_community(community_id: int, person_id: int, src, auth=None):
     cache.delete_memoized(joined_communities, new_moderator.id)
     cache.delete_memoized(community_moderators, community_id)
     cache.delete_memoized(moderating_communities_ids, new_moderator.id)
+    cache.delete_memoized(moderating_communities_ids_all_users)
     cache.delete_memoized(Community.moderators, community)
 
     task_selector('add_mod', user_id=user.id, mod_id=person_id, community_id=community_id)
@@ -532,9 +535,53 @@ def remove_mod_from_community(community_id: int, person_id: int, src, auth=None)
     cache.delete_memoized(joined_communities, old_moderator.id)
     cache.delete_memoized(community_moderators, community_id)
     cache.delete_memoized(moderating_communities_ids, old_moderator.id)
+    cache.delete_memoized(moderating_communities_ids_all_users)
     cache.delete_memoized(Community.moderators, community)
 
     task_selector('remove_mod', user_id=user.id, mod_id=person_id, community_id=community_id)
 
     if src == SRC_API:
         return user.id
+
+
+def get_comm_flair_list(community: Community | int | str) -> list:
+    if isinstance(community, int):
+        community_id = community
+        community = Community.query.filter_by(id=community).one()
+    elif isinstance(community, Community):
+        community_id = community.id
+    elif isinstance(community, str):
+        name, ap_domain = community.strip().split('@')
+        community = Community.query.filter_by(name=name, ap_domain=ap_domain).first()
+        if community is None:
+            community = Community.query.filter(func.lower(Community.name) == name.lower(),
+                                               func.lower(Community.ap_domain) == ap_domain.lower()).one()
+        community_id = community.id
+
+    return CommunityFlair.query.filter_by(community_id=community_id).order_by(CommunityFlair.flair).all()
+
+
+def comm_flair_ap_format(flair: CommunityFlair | int | str) -> dict:
+    if isinstance(flair, int):
+        flair = CommunityFlair.query.get(flair)
+    elif isinstance(flair, str):
+        flair = CommunityFlair.query.filter_by(ap_id=flair).first()
+    
+    if not flair:
+        return
+    
+    flair_dict = {}
+    flair_dict["type"] = "CommunityPostTag"
+    
+    if not flair.ap_id:
+        ap_id = flair.get_ap_id()
+        if not ap_id:
+            return
+    
+    flair_dict["id"] = flair.ap_id
+    flair_dict["preferredUsername"] = flair.flair
+    flair_dict["textColor"] = flair.text_color
+    flair_dict["backgroundColor"] = flair.background_color
+    flair_dict["blurImages"] = flair.blur_images
+
+    return flair_dict

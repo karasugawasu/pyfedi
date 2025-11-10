@@ -114,13 +114,13 @@ class Config(object):
     MEDIA_IMAGE_FORMAT = os.environ.get('MEDIA_IMAGE_FORMAT') or ''
     MEDIA_IMAGE_QUALITY = int(os.environ.get('MEDIA_IMAGE_QUALITY') or 90)
 
-    MEDIA_IMAGE_MEDIUM_FORMAT = os.environ.get('MEDIA_IMAGE_MEDIUM_FORMAT') or 'JPEG'
-    MEDIA_IMAGE_MEDIUM_QUALITY = int(os.environ.get('MEDIA_IMAGE_MEDIUM_QUALITY') or 90)
+    MEDIA_IMAGE_MEDIUM_FORMAT = os.environ.get('MEDIA_IMAGE_MEDIUM_FORMAT') or 'WEBP'
+    MEDIA_IMAGE_MEDIUM_QUALITY = int(os.environ.get('MEDIA_IMAGE_MEDIUM_QUALITY') or 93)
 
     MEDIA_IMAGE_THUMBNAIL_FORMAT = os.environ.get('MEDIA_IMAGE_THUMBNAIL_FORMAT') or 'WEBP'
     MEDIA_IMAGE_THUMBNAIL_QUALITY = int(os.environ.get('MEDIA_IMAGE_THUMBNAIL_QUALITY') or 93)
 
-    # LDAP configuration
+    # LDAP configuration - used to write to, so other services can use their instance credentials to log in
     LDAP_SERVER = os.environ.get('LDAP_SERVER') or ''
     LDAP_PORT = int(os.environ.get('LDAP_PORT') or 389)
     LDAP_USE_SSL = os.environ.get('LDAP_USE_SSL', '0') in ('1', 'true', 'True')
@@ -133,6 +133,19 @@ class Config(object):
     LDAP_ATTR_EMAIL = os.environ.get('LDAP_ATTR_EMAIL') or 'mail'
     LDAP_ATTR_PASSWORD = os.environ.get('LDAP_ATTR_PASSWORD') or 'userPassword'
 
+    # LDAP configuration - used to log in to this instance
+    LDAP_SERVER_LOGIN = os.environ.get('LDAP_SERVER_LOGIN') or ''
+    LDAP_PORT_LOGIN = int(os.environ.get('LDAP_PORT_LOGIN') or 389)
+    LDAP_USE_SSL_LOGIN = os.environ.get('LDAP_USE_SSL_LOGIN', '0') in ('1', 'true', 'True')
+    LDAP_USE_TLS_LOGIN = os.environ.get('LDAP_USE_TLS_LOGIN', '0') in ('1', 'true', 'True')
+    LDAP_BIND_DN_LOGIN = os.environ.get('LDAP_BIND_DN_LOGIN') or ''
+    LDAP_BIND_PASSWORD_LOGIN = os.environ.get('LDAP_BIND_PASSWORD_LOGIN') or ''
+    LDAP_BASE_DN_LOGIN = os.environ.get('LDAP_BASE_DN_LOGIN') or ''
+    LDAP_USER_FILTER_LOGIN = os.environ.get('LDAP_USER_FILTER_LOGIN') or '(uid={username})'
+    LDAP_ATTR_USERNAME_LOGIN = os.environ.get('LDAP_ATTR_USERNAME_LOGIN') or 'uid'
+    LDAP_ATTR_EMAIL_LOGIN = os.environ.get('LDAP_ATTR_EMAIL_LOGIN') or 'mail'
+    LDAP_ATTR_PASSWORD_LOGIN = os.environ.get('LDAP_ATTR_PASSWORD_LOGIN') or 'userPassword'
+
     VERSION = app.constants.VERSION
 
     # How long to keep post voting data ( months )
@@ -142,7 +155,15 @@ class Config(object):
     # Country Header sourcing
     COUNTRY_SOURCE_HEADER = os.environ.get('COUNTRY_SOURCE_HEADER') or ''
 
-    FEP_AWESOME = os.environ.get('FEP_AWESOME') or False
-
     # render a post+replies to json and delete from DB after this many months
     ARCHIVE_POSTS = int(os.environ.get('ARCHIVE_POSTS') or 0)
+
+    # How long to keep content in remote communities before automatically deleting posts. See 'class EditCommunityForm()' for allowed values
+    DEFAULT_CONTENT_RETENTION = int(os.environ.get('DEFAULT_CONTENT_RETENTION') or -1)  # -1 = forever, no deletion
+
+    CONTENT_WARNING = int(os.environ.get('CONTENT_WARNING') or 0)
+
+    TRANSLATE_ENDPOINT = os.environ.get('TRANSLATE_ENDPOINT') or ''
+    TRANSLATE_KEY = os.environ.get('TRANSLATE_KEY') or ''
+
+    ALLOW_AI_CRAWLERS = os.environ.get('ALLOW_AI_CRAWLERS') or False
