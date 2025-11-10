@@ -296,17 +296,6 @@ def mime_type_using_head(url):
     except httpx.HTTPError:
         return ''
 
-def protect_code_blocks(html: str):
-    code_snippets = []
-
-    def store(match):
-        code_snippets.append(match.group(0))
-        return f"__CODE_BLOCK_{len(code_snippets)-1}__"
-
-    html = re.sub(r'<pre[\s\S]*?</pre>', store, html)
-    html = re.sub(r'<code[\s\S]*?</code>', store, html)
-    return html, code_snippets
-
 allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite', 'br', 'h1', 'h2', 'h3', 'h4', 'h5',
                 'h6', 'pre', 'div',
                 'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small',
@@ -624,32 +613,39 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
         return ''
 
 def convert_soft_breaks(text: str) -> str:
-    # スペース2個＋改行を見つける
-    pattern = re.compile(r'(\S)  (\r?\n)')
     lines = text.splitlines(keepends=True)
+    out = []
 
-    def replacer(match):
-        start = match.start()
-        line_idx = 0
-        total_len = 0
-        for i, line in enumerate(lines):
-            total_len += len(line)
-            if total_len > start:
-                line_idx = i
-                break
+    in_fence = False
+    fence_delim = None  # "```" or "~~~"
 
-        # テーブルっぽい行は無視
-        if lines[line_idx].lstrip().startswith('|'):
-            return match.group(0)
+    for line in lines:
+        # フェンス開始/終了の検出
+        if not in_fence and (line.startswith("```") or line.startswith("~~~")):
+            in_fence = True
+            fence_delim = line[:3]
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            # 同じデリミタで閉じる
+            if line.startswith(fence_delim):
+                in_fence = False
+                fence_delim = None
+            continue
 
-        # 次の行が空白行または空なら改行を入れない
-        if line_idx + 1 < len(lines):
-            next_line = lines[line_idx + 1]
-            if next_line.strip() == '':
-                return match.group(1) + match.group(2)  # 改行のみ
-        return match.group(1) + '<br>' + match.group(2)
+        # フェンス外だけ処理
+        # テーブル行は触らない
+        if line.lstrip().startswith("|"):
+            out.append(line)
+            continue
 
-    return pattern.sub(replacer, text)
+        # 行末「ちょうど2スペース + 改行」を <br> に
+        # 文中は触らないように $ で行末に限定
+        line = re.sub(r'(\S)  (\r?\n)$', r'\1<br>\2', line)
+        out.append(line)
+
+    return "".join(out)
 
 # this function lets local users use the more intuitive soft-breaks for newlines, but actually stores the Markdown in Lemmy-compatible format
 # Reasons for this:
