@@ -612,37 +612,64 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
     else:
         return ''
 
+# 先頭0-3空白 + ``` または ~~~ を3つ以上 + 任意のinfo-string（言語名など）
+_FENCE_OPEN_RE = re.compile(r'^[ \t]{0,3}(`{3,}|~{3,})([^\r\n`]*)?\r?\n?$')
+
+def _is_fence_close(line: str, fence_char: str, fence_len: int) -> bool:
+    # 行末改行を落として、先頭0-3空白を許容
+    s = line.rstrip("\r\n")
+    i = 0
+    while i < len(s) and i < 3 and s[i] in (" ", "\t"):
+        i += 1
+    rest = s[i:]
+    # フェンス記号が開き以上の長さ連続し、その後は空白のみ
+    j = 0
+    while j < len(rest) and rest[j] == fence_char:
+        j += 1
+    return j >= fence_len and set(rest[j:]).issubset({" ", "\t"})
+
 def convert_soft_breaks(text: str) -> str:
     lines = text.splitlines(keepends=True)
     out = []
 
     in_fence = False
-    fence_delim = None  # "```" or "~~~"
+    fence_char = None
+    fence_len = 0
 
     for line in lines:
-        # フェンス開始/終了の検出
-        if not in_fence and (line.startswith("```") or line.startswith("~~~")):
-            in_fence = True
-            fence_delim = line[:3]
+        if not in_fence:
+            m = _FENCE_OPEN_RE.match(line)
+            if m:
+                # フェンス開始（``` や ~~~ の長さと種類を保持）
+                in_fence = True
+                fence_sym = m.group(1)
+                fence_char = fence_sym[0]
+                fence_len = len(fence_sym)
+                out.append(line)
+                continue
+        else:
+            # フェンス内は無変更でそのまま出力
             out.append(line)
-            continue
-        if in_fence:
-            out.append(line)
-            # 同じデリミタで閉じる
-            if line.startswith(fence_delim):
+            if _is_fence_close(line, fence_char, fence_len):
                 in_fence = False
-                fence_delim = None
+                fence_char = None
+                fence_len = 0
             continue
 
         # フェンス外だけ処理
-        # テーブル行は触らない
+        # テーブル行は無視
         if line.lstrip().startswith("|"):
             out.append(line)
             continue
 
-        # 行末「ちょうど2スペース + 改行」を <br> に
-        # 文中は触らないように $ で行末に限定
-        line = re.sub(r'(\S)  (\r?\n)$', r'\1<br>\2', line)
+        # インデントコード（先頭4スペース or タブ）は無視
+        if line.startswith("    ") or line.startswith("\t"):
+            out.append(line)
+            continue
+
+        # 行末「2個以上の空白 + 改行」→ <br>
+        # （Markdown仕様は“2個以上”なので {2,} に）
+        line = re.sub(r'(\S)[ \t]{2,}(\r?\n)$', r'\1<br>\2', line)
         out.append(line)
 
     return "".join(out)
