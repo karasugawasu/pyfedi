@@ -582,7 +582,7 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
         markdown_text = markdown_text.replace('þ', 'th')
 
         try:
-            md = markdown2.Markdown(extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': True, 'strike': True,
+            md = markdown2.Markdown(extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': None, 'strike': True,
                                             'tg-spoiler': True, 'link-patterns': [(LINK_PATTERN, r'\1')],
                                             'breaks': {'on_newline': False, 'on_backslash': True},
                                             'tag-friendly': True, 'task_list': True, 'footnotes': True, 'smarty-pants': True,
