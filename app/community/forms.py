@@ -10,7 +10,7 @@ from flask_login import current_user
 from flask_wtf import FlaskForm
 from sqlalchemy import func
 from wtforms import StringField, SubmitField, TextAreaField, BooleanField, HiddenField, SelectField, FileField, \
-    DateField, IntegerField, DateTimeLocalField
+    DateField, IntegerField, DateTimeLocalField, RadioField
 
 from wtforms.validators import ValidationError, DataRequired, Length, Regexp, Optional
 
@@ -465,7 +465,7 @@ class ReportCommunityForm(FlaskForm):
                       ('7', _l('Other')),
                       ]
     reasons = MultiCheckboxField(_l('Reason'), choices=reason_choices)
-    description = StringField(_l('More info'))
+    description = StringField(_l('More info'), validators=[Length(max=256)])
     report_remote = BooleanField('Also send report to originating instance')
     submit = SubmitField(_l('Report'))
 
@@ -520,3 +520,19 @@ class EditCommunityFlairForm(FlaskForm):
     background_color = StringField(_l('Background color'), render_kw={"type": "color"})
     blur_images = BooleanField(_l('Blur images and thumbnails for posts with this flair'))
     submit = SubmitField(_l('Save'))
+
+
+class RateCommunityModsForm(FlaskForm):
+    rating = RadioField(
+        'Rate this community:',
+        choices=[
+            ('5', '★'),
+            ('4', '★'),
+            ('3', '★'),
+            ('2', '★'),
+            ('1', '★')
+        ],
+        validators=[DataRequired()],
+        coerce=int  # ensures it becomes an int (optional)
+    )
+    submit = SubmitField(_l('Rate'))
