@@ -2094,16 +2094,6 @@ class Post(db.Model):
             if self.slug is None or self.slug == '':
                 self.slug = f'/post/{self.id}'
 
-    def generate_slug(self, community: Community):
-        # Make the slug of a post in the format of /c/community@instance/p/post_id/post-title-as-slug
-        # This should only be used for incoming remote posts. Locally-made posts will have a slug from generate_ap_id()
-        if self.slug is None or self.slug == '':
-            slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
-            if slug:
-                self.slug = f'/c/{community.name}/p/{self.id}/{slug}'
-            else:
-                self.slug = f'/post/{self.id}'
-
     def peertube_embed(self):
         if self.url:
             return self.url.replace('watch', 'embed')
