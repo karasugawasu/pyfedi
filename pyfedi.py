@@ -3,6 +3,7 @@
 from datetime import datetime
 import os
 
+import flask
 from flask_babel import get_locale
 from flask_login import current_user
 from flask_wtf.csrf import generate_csrf
@@ -120,8 +121,9 @@ def after_request(response):
     # Don't set cookies for static resources or ActivityPub responses to make them cachable
     if request.path.startswith('/static/') or request.path.startswith('/bootstrap/static/') or response.content_type == 'application/activity+json':
         # Remove session cookies that mess up caching
-        if 'Set-Cookie' in response.headers:
-            del response.headers['Set-Cookie']
+        if 'session' in dir(flask):
+            from flask import session
+            session.modified = False
         # Cache headers for static resources
         if request.path.startswith('/static/') or request.path.startswith('/bootstrap/static/'):
             response.headers['Cache-Control'] = 'public, max-age=31536000'  # 1 year
@@ -134,11 +136,29 @@ def after_request(response):
                 is_htmx = request.headers.get('HX-Request') == 'true'
                 if not is_htmx:
                     # strict-dynamic allows scripts dynamically added by nonce-validated scripts (needed for htmx)
-                    response.headers['Content-Security-Policy'] = f"script-src 'self' 'nonce-{g.nonce}' 'strict-dynamic'; object-src 'none'; base-uri 'none';"
+                    if current_user.is_authenticated:
+                        response.headers['Content-Security-Policy'] = f"script-src 'self' 'nonce-{g.nonce}' 'strict-dynamic'; object-src 'none'; base-uri 'none';"
             response.headers['Strict-Transport-Security'] = 'max-age=63072000; includeSubDomains; preload'
             response.headers['X-Content-Type-Options'] = 'nosniff'
             if '/embed' not in request.path:
                 response.headers['X-Frame-Options'] = 'DENY'
+
+    # Caching headers for html pages - pages are automatically translated and should not be cached while logged in.
+    if response.content_type.startswith('text/html'):
+        if current_user.is_authenticated or request.path.startswith('/auth/'):
+            response.headers.setdefault(
+                'Cache-Control',
+                'no-store, no-cache, must-revalidate, private'
+            )
+            response.headers.setdefault('Vary', 'Accept-Language, Cookie')
+        else:
+            response.headers.setdefault('Vary', 'Accept-Language, Cookie')
+            # Prevent Flask from setting session cookie for anonymous users
+            # This must be done by marking session as not modified, since Flask sets
+            # the cookie after after_request handlers run
+            if 'session' in dir(flask):
+                from flask import session
+                session.modified = False
     return response
 
 

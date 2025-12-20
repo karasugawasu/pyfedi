@@ -598,7 +598,7 @@ def show_community(community: Community):
     else:
         is_dead = False
 
-    return render_template('community/community.html', community=community, title=community.title,
+    resp = make_response(render_template('community/community.html', community=community, title=community.title,
                            breadcrumbs=breadcrumbs, is_dead=is_dead,
                            is_moderator=is_moderator, is_owner=is_owner, is_admin=is_admin, mods=mod_list, posts=posts,
                            comments=comments, upcoming_events=upcoming_events, has_events=has_events,
@@ -626,12 +626,18 @@ def show_community(community: Community):
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            post_layout=post_layout, content_type=content_type, current_app=current_app,
                            user_has_feeds=user_has_feeds, current_feed_id=current_feed_id,
-                           current_feed_title=current_feed_title, user_flair=user_flair, sticky_posts=sticky_posts)
+                           current_feed_title=current_feed_title, user_flair=user_flair, sticky_posts=sticky_posts))
+    if current_user.is_anonymous:
+        resp.headers.set('Cache-Control', 'public, max-age=30')
+    else:
+        resp.headers.set('Cache-Control', 'private, max-age=15, must-revalidate')
+
+    return resp
 
 
 # RSS feed of the community
 @bp.route('/<actor>/feed', methods=['GET'])
-@cache.cached(timeout=600)
+@cache.cached(timeout=600, query_string=True)
 def show_community_rss(actor):
     actor = actor.strip()
     if '@' in actor:
@@ -644,8 +650,15 @@ def show_community_rss(actor):
         if request_etag_matches(current_etag):
             return return_304(current_etag, 'application/rss+xml')
 
+        score = request.args.get('score', 0, int)
+
         posts = Post.query.filter(Post.community_id == community.id).filter(Post.from_bot == False, Post.deleted == False,
-                                  Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.created_at)).limit(20).all()
+                                  Post.status > POST_STATUS_REVIEWING)
+        if score:
+            posts = posts.filter(Post.score >= score)
+
+        posts = posts.order_by(desc(Post.created_at)).limit(20).all()
+
         description = shorten_string(community.description, 150) if community.description else None
         og_image = community.image.source_url if community.image_id else None
         fg = FeedGenerator()
@@ -1032,6 +1045,8 @@ def add_post(actor, type=None):
             form.event_timezone.data = current_user.timezone
         if community.posting_warning:
             flash(community.posting_warning)
+        if community.instance.posting_warning:
+            flash(community.instance.posting_warning)
 
         form.timezone.data = current_user.timezone
         form.language_id.data = current_user.language_id or g.site.language_id

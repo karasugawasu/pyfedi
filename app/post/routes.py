@@ -329,6 +329,11 @@ def show_post(post_id: int):
                              f'<https://{current_app.config["SERVER_NAME"]}/post/{post.id}>; rel="alternate"; type="application/activity+json"')
         oembed_url = url_for('post.post_oembed', post_id=post.id, _external=True)
         response.headers.set('Link', f'<{oembed_url}>; rel="alternate"; type="application/json+oembed"')
+        if current_user.is_anonymous:
+            response.headers.set('Cache-Control', 'public, max-age=30')
+        else:
+            response.headers.set('Cache-Control', 'private, max-age=15, must-revalidate')
+
         return response
 
 
@@ -645,7 +650,12 @@ def continue_discussion(post_id, comment_id):
                                community=post.community, parent_id=parent_id,
                                SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                                inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
-    response.headers.set('Vary', 'Accept, Cookie, Accept-Language')
+
+    if current_user.is_anonymous:
+        response.headers.set('Cache-Control', 'public, max-age=30')
+    else:
+        response.headers.set('Cache-Control', 'private, max-age=15, must-revalidate')
+
     return response
 
 
@@ -1071,7 +1081,7 @@ def post_restore(post_id: int):
         if post.deleted_by == post.user_id:
             restore_post(post.id, SRC_WEB, None)
         else:
-            mod_restore_post(post.id, SRC_WEB, None)
+            mod_restore_post(post.id, '', SRC_WEB, None)
 
         flash(_('Post has been restored.'))
     return redirect(post.slug if post.slug else url_for('activitypub.post_ap', post_id=post.id))
@@ -1588,7 +1598,7 @@ def post_reply_block_instance(post_id: int, comment_id: int):
             resp.headers["HX-Redirect"] = curr_url
 
         return resp
-
+    post = Post.query.get(post_id)
     return redirect(post.slug if post.slug else url_for('activitypub.post_ap', post_id=post_id))
 
 

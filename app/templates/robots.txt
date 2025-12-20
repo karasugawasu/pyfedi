@@ -13,6 +13,9 @@ User-Agent: *
   Disallow: /static/media/users/
   Disallow: /post/*/options
 
+User-agent: Applebot
+Disallow: /
+
 User-agent: GPTBot
 Disallow: /
 
@@ -71,9 +74,6 @@ User-agent: Sogou web spider
 Disallow: /
 
 User-agent: Sogou inst spider
-Disallow: /
-
-User-agent: SERankingBacklinksBot
 Disallow: /
 
 User-Agent: PerplexityBot

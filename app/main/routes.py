@@ -25,6 +25,7 @@ from flask_babel import _, get_locale
 from sqlalchemy import desc, text
 
 from app.main.forms import ShareLinkForm, ContentWarningForm
+from app.shared.tasks.maintenance import refresh_instance_chooser
 from app.translation import LibreTranslateAPI
 from app.utils import render_template, get_setting, request_etag_matches, return_304, blocked_domains, \
     ap_datetime, shorten_string, user_filters_home, \
@@ -166,7 +167,7 @@ def home_page(sort, view_filter):
         recently_downvoted = []
         communities_banned_from_list = []
 
-    return render_template('index.html', posts=posts, active_communities=active_communities,
+    resp = make_response(render_template('index.html', posts=posts, active_communities=active_communities,
                            new_communities=new_communities, upcoming_events=upcoming_events,
                            show_post_community=True, low_bandwidth=low_bandwidth, recently_upvoted=recently_upvoted,
                            recently_downvoted=recently_downvoted,
@@ -185,7 +186,14 @@ def home_page(sort, view_filter):
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            enable_mod_filter=enable_mod_filter,
                            has_topics=num_topics() > 0
-                           )
+                           ))
+
+    if current_user.is_anonymous:
+        resp.headers.set('Cache-Control', 'public, max-age=60')
+    else:
+        resp.headers.set('Cache-Control', 'private, max-age=15, must-revalidate')
+
+    return resp
 
 
 @bp.route('/topics', methods=['GET'])
@@ -557,6 +565,7 @@ def replay_inbox():
 @bp.route('/test')
 @debug_mode_only
 def test():
+    refresh_instance_chooser()
     #p = Post.query.get(42)
     #p.delete_dependencies()
     #db.session.delete(p)
@@ -928,6 +937,8 @@ def activitypub_application():
     }
     resp = jsonify(application_data)
     resp.content_type = 'application/activity+json'
+    resp.headers.set('Cache-Control', 'public, max-age=30')
+    resp.headers.set('Vary', 'Accept')
     return resp
 
 

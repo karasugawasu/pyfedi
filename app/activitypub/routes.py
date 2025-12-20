@@ -83,6 +83,7 @@ def webfinger():
             }
             resp = jsonify(webfinger_data)
             resp.content_type = 'application/jrd+json'
+            resp.headers.set('Cache-Control', 'public, max-age=15')
             resp.headers.add_header('Access-Control-Allow-Origin', '*')
             return resp
 
@@ -134,6 +135,7 @@ def webfinger():
             })
         resp = jsonify(webfinger_data)
         resp.headers.add_header('Access-Control-Allow-Origin', '*')
+        resp.headers.set('Cache-Control', 'public, max-age=15')
         resp.content_type = 'application/jrd+json'
         return resp
     else:
@@ -143,9 +145,7 @@ def webfinger():
 @bp.route('/.well-known/nodeinfo')
 @cache.cached(timeout=600)
 def nodeinfo():
-    nodeinfo_data = {"links": [{"rel": "https://www.w3.org/ns/activitystreams#Application",
-                                "href": f"https://{current_app.config['SERVER_NAME']}"},
-                               {"rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+    nodeinfo_data = {"links": [{"rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
                                 "href": f"https://{current_app.config['SERVER_NAME']}/nodeinfo/2.0"},
                                {"rel": "http://nodeinfo.diaspora.software/ns/schema/2.1",
                                 "href": f"https://{current_app.config['SERVER_NAME']}/nodeinfo/2.1"},
@@ -415,6 +415,8 @@ def user_profile(actor):
                                                      'value': field.text})
             resp = jsonify(actor_data)
             resp.content_type = 'application/activity+json'
+            resp.headers.set('Cache-Control', 'public, max-age=15')
+            resp.headers.set('Vary', 'Accept')
             resp.headers.set('Link',
                              f'<https://{current_app.config["SERVER_NAME"]}/u/{actor}>; rel="alternate"; type="text/html"')
             return resp
@@ -435,6 +437,8 @@ def user_outbox(actor):
     }
     resp = jsonify(outbox)
     resp.content_type = 'application/activity+json'
+    resp.headers.set('Cache-Control', 'public, max-age=1500')
+    resp.headers.set('Vary', 'Accept')
     return resp
 
 
@@ -513,6 +517,8 @@ def community_profile(actor):
                     }
             resp = jsonify(actor_data)
             resp.content_type = 'application/activity+json'
+            resp.headers.set('Cache-Control', 'public, max-age=30')
+            resp.headers.set('Vary', 'Accept')
             resp.headers.set('Link',
                              f'<https://{current_app.config["SERVER_NAME"]}/c/{actor}>; rel="alternate"; type="text/html"')
             return resp
@@ -810,11 +816,10 @@ def process_inbox_request(request_json, store_ap_json):
                         return
 
                     if not feed:
-                        user_ap_id = request_json['object']['actor']
-                        user = find_actor_or_create_cached(user_ap_id)
+                        user = find_actor_or_create_cached(request_json['object']['actor'])
                         if user and isinstance(user, User):
                             if user.banned:
-                                log_incoming_ap(id, APLOG_ANNOUNCE, APLOG_FAILURE, saved_json, f'{user_ap_id} is banned')
+                                log_incoming_ap(id, APLOG_ANNOUNCE, APLOG_FAILURE, saved_json, f'{user.ap_id} is banned')
                                 return
 
                             with redis_client.lock(f"lock:user:{user.id}", timeout=10, blocking_timeout=6):
@@ -825,7 +830,7 @@ def process_inbox_request(request_json, store_ap_json):
                                 user.instance.failures = 0
                                 session.commit()
                         else:
-                            log_incoming_ap(id, APLOG_ANNOUNCE, APLOG_FAILURE, saved_json, 'Blocked or unfound user for Announce object actor ' + user_ap_id)
+                            log_incoming_ap(id, APLOG_ANNOUNCE, APLOG_FAILURE, saved_json, 'Blocked or unfound user for Announce object actor ' + str(request_json['object']['actor']))
                             return
                     else:
                         user = None
@@ -962,10 +967,9 @@ def process_inbox_request(request_json, store_ap_json):
                         if join_request:
                             user = session.query(User).get(join_request.user_id)
                     elif core_activity['object']['type'] == 'Follow':
-                        user_ap_id = core_activity['object']['actor']
-                        user = find_actor_or_create_cached(user_ap_id)
+                        user = find_actor_or_create_cached(core_activity['object']['actor'])
                         if user and user.banned:
-                            log_incoming_ap(id, APLOG_ACCEPT, APLOG_FAILURE, saved_json, f'{user_ap_id} is banned')
+                            log_incoming_ap(id, APLOG_ACCEPT, APLOG_FAILURE, saved_json, f'{user.ap_id} is banned')
                             return
                     if not user:
                         log_incoming_ap(id, APLOG_ACCEPT, APLOG_FAILURE, saved_json, 'Could not find recipient of Accept')
@@ -1010,8 +1014,7 @@ def process_inbox_request(request_json, store_ap_json):
                 # Reject: remote server is rejecting our previous follow request
                 if core_activity['type'] == 'Reject':
                     if core_activity['object']['type'] == 'Follow':
-                        user_ap_id = core_activity['object']['actor']
-                        user = find_actor_or_create_cached(user_ap_id)
+                        user = find_actor_or_create_cached(core_activity['object']['actor'])
                         if not user:
                             log_incoming_ap(id, APLOG_ACCEPT, APLOG_FAILURE, saved_json, 'Could not find recipient of Reject')
                             return
@@ -1692,7 +1695,7 @@ def process_delete_request(request_json, store_ap_json):
                 user_ap_id = request_json['actor']
                 user = session.query(User).filter_by(ap_profile_id=user_ap_id.lower()).first()
                 if user:
-                    if 'removeData' in request_json and request_json['removeData'] is True:
+                    if ('removeData' in request_json and request_json['removeData'] is True) or user.created_very_recently():
                         user.purge_content()
                     user.deleted = True
                     user.deleted_by = user.id
@@ -1847,6 +1850,7 @@ def community_moderators_route(actor):
 
         resp = jsonify(community_data)
         resp.content_type = 'application/activity+json'
+        resp.headers.set('Cache-Control', 'public, max-age=120')
         return resp
     else:
         abort(404)
@@ -1866,6 +1870,7 @@ def community_followers(actor):
         }
         resp = jsonify(result)
         resp.content_type = 'application/activity+json'
+        resp.headers.set('Cache-Control', 'public, max-age=120')
         return resp
     else:
         abort(404)
@@ -1895,6 +1900,8 @@ def user_followers(actor):
         }
         resp = jsonify(result)
         resp.content_type = 'application/activity+json'
+        resp.headers.set('Cache-Control', 'public, max-age=15')
+        resp.headers.set('Vary', 'Accept')
         return resp
     else:
         abort(404)
@@ -1908,6 +1915,7 @@ def comment_ap(comment_id):
         resp = jsonify(reply_data)
         resp.content_type = 'application/activity+json'
         resp.headers.set('Vary', 'Accept')
+        resp.headers.set('Cache-Control', 'public, max-age=120')
         resp.headers.set('Link',
                          f'<https://{current_app.config["SERVER_NAME"]}/comment/{reply.id}>; rel="alternate"; type="text/html"')
         return resp
@@ -1932,6 +1940,7 @@ def post_ap(post_id):
                 post_data = []
             resp = jsonify(post_data)
             resp.content_type = 'application/activity+json'
+            resp.headers.set('Cache-Control', 'public, max-age=120')
             resp.headers.set('Vary', 'Accept')
             if post.slug:
                 resp.headers.set('Link',
@@ -1965,6 +1974,7 @@ def post_replies_ap(post_id):
         resp = jsonify(replies_collection)
         resp.content_type = 'application/activity+json'
         resp.headers.set('Vary', 'Accept')
+        resp.headers.set('Cache-Control', 'public, max-age=15')
         return resp
 
 
@@ -1990,6 +2000,7 @@ def post_ap_context(post_id):
         resp = jsonify(replies_collection)
         resp.content_type = 'application/activity+json'
         resp.headers.set('Vary', 'Accept')
+        resp.headers.set('Cache-Control', 'public, max-age=15')
         return resp
     else:
         abort(400)
@@ -2007,6 +2018,7 @@ def activities_json(type, id):
             activity_json = {}
         resp = jsonify(activity_json)
         resp.content_type = 'application/activity+json'
+        resp.headers['Cache-Control'] = 'public, max-age=1200'
         return resp
     else:
         abort(404)
@@ -2331,6 +2343,7 @@ def feed_profile(actor, feed_owner=None):
                 actor_data['childFeeds'].append(child_feed.ap_profile_id)
             resp = jsonify(actor_data)
             resp.content_type = 'application/activity+json'
+            resp.headers.set('Cache-Control', 'public, max-age=5')
             resp.headers.set('Link',
                              f'<https://{current_app.config["SERVER_NAME"]}/f/{actor}>; rel="alternate"; type="text/html"')
             return resp
@@ -2378,6 +2391,7 @@ def feed_outbox(actor):
     }
     resp = jsonify(result)
     resp.content_type = 'application/activity+json'
+    resp.headers.set('Cache-Control', 'public, max-age=5')
     return resp
 
 
@@ -2411,6 +2425,7 @@ def feed_following(actor):
     }
     resp = jsonify(result)
     resp.content_type = 'application/activity+json'
+    resp.headers.set('Cache-Control', 'public, max-age=10')
     return resp
 
 
@@ -2458,6 +2473,7 @@ def feed_followers(actor):
             }
             resp = jsonify(result)
             resp.content_type = 'application/activity+json'
+            resp.headers.set('Cache-Control', 'public, max-age=15')
             return resp
         else:
             abort(404)

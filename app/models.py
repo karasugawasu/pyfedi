@@ -687,6 +687,9 @@ class Community(db.Model):
             return instance_role is not None
         else:
             return False
+    
+    def is_admin_or_staff(self, user):
+        return user.is_admin_or_staff()
 
     def user_is_banned(self, user):
         # use communities_banned_from() instead of this method, where possible. Redis caches the result of communities_banned_from()
@@ -1643,25 +1646,27 @@ class Post(db.Model):
                 isinstance(request_json['object']['attachment'], list) and
                 len(request_json['object']['attachment']) > 0 and
                 'type' in request_json['object']['attachment'][0]):
-            alt_text = None
-            if request_json['object']['attachment'][0]['type'] == 'Link':
-                if 'href' in request_json['object']['attachment'][0]:
-                    post.url = request_json['object']['attachment'][0]['href']  # Lemmy < 0.19.4
-                elif 'url' in request_json['object']['attachment'][0]:
-                    post.url = request_json['object']['attachment'][0]['url']  # NodeBB
-            if request_json['object']['attachment'][0]['type'] == 'Document':
-                post.url = request_json['object']['attachment'][0]['url']  # Mastodon
-                if 'name' in request_json['object']['attachment'][0]:
-                    alt_text = request_json['object']['attachment'][0]['name']
-            if request_json['object']['attachment'][0]['type'] == 'Image':
-                attachment = request_json['object']['attachment'][0]
-                post.url = attachment['url']  # PixelFed, PieFed, Lemmy >= 0.19.4
-                alt_text = attachment.get("name")
-                file_path = attachment.get("file_path")
-            if request_json['object']['attachment'][0]['type'] == 'Audio':  # WordPress podcast
-                post.url = request_json['object']['attachment'][0]['url']
-                if 'name' in request_json['object']['attachment'][0]:
-                    post.title = request_json['object']['attachment'][0]['name']
+            for attachment in request_json['object']['attachment']:
+                alt_text = None
+                if attachment['type'] == 'Link':
+                    if 'href' in attachment:
+                        post.url = attachment['href']  # Lemmy < 0.19.4
+                    elif 'url' in attachment:
+                        post.url = attachment['url']  # NodeBB
+                    if post.url:
+                        break
+                elif attachment['type'] == 'Document':
+                    post.url = attachment['url']  # Mastodon
+                    if 'name' in attachment:
+                        alt_text = attachment['name']
+                    if post.url:
+                        break
+                elif attachment['type'] == 'Audio':  # WordPress podcast
+                    post.url = attachment['url']
+                    if 'name' in attachment:
+                        post.title = attachment['name']
+                    if post.url:
+                        break
             # tagにlinkが含まれてたら上書き
             if post.microblog:
                 tags = request_json.get('object', {}).get('tag', [])
@@ -1680,6 +1685,13 @@ class Post(db.Model):
                     ![{alt_text}]({post.url})
                     '''
                     post.url = None
+            # Lastly, check for image posts. Mbin sends link posts with both image and link and we want to ignore the image in that case.
+            if not post.url:
+                for attachment in request_json['object']['attachment']:
+                    if attachment['type'] == 'Image':
+                        post.url = attachment['url']  # PixelFed, PieFed, Lemmy >= 0.19.4
+                        alt_text = attachment.get("name")
+                        file_path = attachment.get("file_path")
 
         if 'attachment' in request_json['object'] and isinstance(request_json['object']['attachment'],
                                                                  dict):  # a.gup.pe (Mastodon)
@@ -2049,29 +2061,26 @@ class Post(db.Model):
         return ''
 
     def generate_ap_id(self, community: Community):
-        if not community.post_url_type or community.post_url_type == 'friendly':
-            # Make the ActivityPub ID of a post in the format of instance.tld/c/community@instance/p/post_id/post-title-as-slug
-            # Use this for posts this instance is creating only - remote posts will already have an AP ID.
-            if self.ap_id is None or self.ap_id == '' or len(self.ap_id) == 10:
-                slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
+        # Make the ActivityPub ID of a post in the format of instance.tld/c/community@instance/p/post_id/post-title-as-slug
+        # Use this for posts this instance is creating only - remote posts will already have an AP ID.
+        if self.ap_id is None or self.ap_id == '' or len(self.ap_id) == 10:
+            slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
+            if slug:
                 self.ap_id = f'{current_app.config["HTTP_PROTOCOL"]}://{current_app.config["SERVER_NAME"]}/c/{community.name}/p/{self.id}/{slug}'
                 self.slug = f'/c/{community.name}/p/{self.id}/{slug}'
-        else:
-            # Make the ActivityPub ID of a post in the format of instance.tld/post/post_id
-            if self.ap_id is None or self.ap_id == '' or len(self.ap_id) == 10:
+            else:
+                # Post title can't be slugified, fall back to old url structure
                 self.ap_id = f'{current_app.config["HTTP_PROTOCOL"]}://{current_app.config["SERVER_NAME"]}/post/{self.id}'
                 self.slug = f'/post/{self.id}'
 
     def generate_slug(self, community: Community):
-        if not community.post_url_type or community.post_url_type == 'friendly':
-            # Make the slug of a post in the format of /c/community@instance/p/post_id/post-title-as-slug
-            # This should only be used for incoming remote posts. Locally-made posts will have a slug from generate_ap_id()
-            if self.slug is None or self.slug == '':
-                slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
+        # Make the slug of a post in the format of /c/community@instance/p/post_id/post-title-as-slug
+        # This should only be used for incoming remote posts. Locally-made posts will have a slug from generate_ap_id()
+        if self.slug is None or self.slug == '':
+            slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
+            if slug:
                 self.slug = f'/c/{community.name}/p/{self.id}/{slug}'
-        else:
-            # Make the slug use the old format of /post/post_id
-            if self.slug is None or self.slug == '':
+            else:
                 self.slug = f'/post/{self.id}'
 
     def peertube_embed(self):

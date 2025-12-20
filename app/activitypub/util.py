@@ -34,7 +34,7 @@ from app.utils import get_request, allowlist_html, get_setting, ap_datetime, mar
     notification_subscribers, communities_banned_from, html_to_text, add_to_modlog, joined_communities, \
     moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse, mastodon_extra_field_link, \
     blocked_users, piefed_markdown_to_lemmy_markdown, store_files_in_s3, guess_mime_type, get_recipient_language, \
-    patch_db_session, to_srgb, communities_banned_from_all_users
+    patch_db_session, to_srgb, communities_banned_from_all_users, blocked_communities, blocked_instances
 
 from bs4 import BeautifulSoup
 
@@ -262,7 +262,8 @@ def banned_user_agents():
     return []  # todo: finish this function
 
 
-def find_actor_or_create(actor: str, create_if_not_found=True, community_only=False, feed_only=False) -> Union[User, Community, Feed, None]:
+def find_actor_or_create(actor: str, create_if_not_found=True, community_only=False, feed_only=False,
+                         allow_banned=False) -> Union[User, Community, Feed, None]:
     """Find an actor by URL or webfinger, optionally creating it if not found.
 
     Consider using find_actor_or_create_cached() for better performance
@@ -272,11 +273,11 @@ def find_actor_or_create(actor: str, create_if_not_found=True, community_only=Fa
         actor = actor['id']
 
     actor_url = actor.strip()
-    if not validate_remote_actor(actor_url):
+    if not validate_remote_actor(actor_url, allow_banned=allow_banned):
         return None
 
     # Find the actor
-    actor_obj = find_actor_by_url(actor_url, community_only, feed_only)
+    actor_obj = find_actor_by_url(actor_url, community_only, feed_only, allow_banned=allow_banned)
 
     if actor_obj is False:  # banned or deleted actor was found
         return None
@@ -1673,22 +1674,27 @@ def find_reply_parent(in_reply_to: str) -> Tuple[int, int, int]:
     return post_id, parent_comment_id, root_id
 
 
-@cache.memoize(timeout=300)  # 5 minutes
+@cache.memoize(timeout=1200)  # 20 minutes
 def _find_liked_object_id(ap_id: str) -> Union[Tuple[int, str], None]:
     """Cache only the object ID and type, not the full SQLAlchemy model.
 
     Returns a tuple of (id, class_name) or None if not found.
     This avoids Redis serialization issues with SQLAlchemy models.
     """
-    post = Post.get_by_ap_id(ap_id)
-    if post:
-        if post.archived:
-            return None
-        return (post.id, 'Post')
+    if '/comment/' in ap_id:
+        post_reply = db.session.query(PostReply.id).filter(PostReply.ap_id == ap_id).first()
+        if post_reply and post_reply[0]:
+            return (post_reply[0], 'PostReply')
     else:
-        post_reply = PostReply.get_by_ap_id(ap_id)
-        if post_reply:
-            return (post_reply.id, 'PostReply')
+        post = db.session.query(Post.id, Post.archived).filter(Post.ap_id == ap_id).first()
+        if post and post[0]:
+            if post[1]:
+                return None
+            return (post[0], 'Post')
+        else:
+            post_reply = db.session.query(PostReply.id).filter(PostReply.ap_id == ap_id).first()
+            if post_reply and post_reply[0]:
+                return (post_reply[0], 'PostReply')
     return None
 
 
@@ -2352,7 +2358,11 @@ def notify_about_post_task(post_id):
             # NOTIF_USER 
             user_send_notifs_to = notification_subscribers(post.user_id, NOTIF_USER)
             for notify_id in user_send_notifs_to:
-                if notify_id != post.user_id and notify_id not in notifications_sent_to:
+                blocked_comms = blocked_communities(notify_id)
+                blocked_ints = blocked_instances(notify_id)
+                if notify_id != post.user_id and notify_id not in notifications_sent_to and \
+                        post.community_id not in blocked_comms and \
+                        post.instance_id not in blocked_ints:
                     targets_data = {'gen': '0',
                                     'post_id': post.id,
                                     'post_title': post.title,
@@ -2373,7 +2383,10 @@ def notify_about_post_task(post_id):
             # NOTIF_COMMUNITY
             community_send_notifs_to = notification_subscribers(post.community_id, NOTIF_COMMUNITY)
             for notify_id in community_send_notifs_to:
-                if notify_id != post.user_id and notify_id not in notifications_sent_to:
+                blocked_senders = blocked_users(notify_id)
+                blocked_ints = blocked_instances(notify_id)
+                if notify_id != post.user_id and notify_id not in notifications_sent_to and \
+                        post.user_id not in blocked_senders and post.instance_id not in blocked_ints:
                     targets_data = {'gen': '0',
                                     'post_id': post.id,
                                     'post_title': post.title,
@@ -2395,7 +2408,14 @@ def notify_about_post_task(post_id):
             if post.community.topic_id:
                 topic = session.query(Topic).get(post.community.topic_id)
             for notify_id in topic_send_notifs_to:
-                if notify_id != post.user_id and notify_id not in notifications_sent_to:
+                blocked_senders = blocked_users(notify_id)
+                blocked_comms = blocked_communities(notify_id)
+                blocked_ints = blocked_instances(notify_id)
+                if notify_id != post.user_id and \
+                        notify_id not in notifications_sent_to and \
+                        post.user_id not in blocked_senders and \
+                        post.community_id not in blocked_comms and \
+                        post.instance_id not in blocked_ints:
                     targets_data = {'gen': '0',
                                     'post_id': post.id,
                                     'post_title': post.title,
@@ -2422,7 +2442,14 @@ def notify_about_post_task(post_id):
             for feed in community_feeds:
                 feed_send_notifs_to = notification_subscribers(feed.id, NOTIF_FEED)
                 for notify_id in feed_send_notifs_to:
-                    if notify_id != post.user_id and notify_id not in notifications_sent_to:
+                    blocked_senders = blocked_users(notify_id)
+                    blocked_comms = blocked_communities(notify_id)
+                    blocked_ints = blocked_instances(notify_id)
+                    if notify_id != post.user_id and \
+                            notify_id not in notifications_sent_to and \
+                            post.user_id not in blocked_senders and \
+                            post.community_id not in blocked_comms and \
+                            post.instance_id not in blocked_ints:
                         targets_data = {'gen': '0',
                                         'post_id': post.id,
                                         'post_title': post.title,
@@ -3705,7 +3732,7 @@ def log_incoming_ap(id, aplog_type, aplog_result, saved_json, message=None, sess
 def find_community(request_json):
     # Create/Update from platform that included Community in 'audience', 'cc', or 'to' in outer or inner object
     # Also works for manually retrieved posts
-    locations = ['audience', 'cc', 'to']
+    locations = ['audience', 'cc', 'to', 'target']
     if 'object' in request_json and isinstance(request_json['object'], dict):
         rjs = [request_json, request_json['object']]
     else:
