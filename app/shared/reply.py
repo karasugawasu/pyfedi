@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from flask import current_app, flash
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
@@ -13,7 +15,7 @@ from app.utils import render_template, authorise_api_user, shorten_string, \
     can_upvote, can_downvote, get_recipient_language
 
 
-def vote_for_reply(reply_id: int, vote_direction, federate: bool, src, auth=None):
+def vote_for_reply(reply_id: int, vote_direction, federate: bool, emoji: str | None, src, auth=None):
     if src == SRC_API:
         reply = db.session.query(PostReply).filter_by(id=reply_id).one()
         user = authorise_api_user(auth, return_type='model')
@@ -25,10 +27,10 @@ def vote_for_reply(reply_id: int, vote_direction, federate: bool, src, auth=None
         reply = db.session.query(PostReply).get_or_404(reply_id)
         user = current_user
 
-    undo = reply.vote(user, vote_direction)
+    undo = reply.vote(user, vote_direction, emoji)
 
     task_selector('vote_for_reply', user_id=user.id, reply_id=reply_id, vote_to_undo=undo,
-                  vote_direction=vote_direction, federate=federate)
+                  vote_direction=vote_direction, federate=federate, emoji=emoji)
 
     if src == SRC_API:
         return user.id
@@ -47,8 +49,6 @@ def vote_for_reply(reply_id: int, vote_direction, federate: bool, src, auth=None
 
 
 def bookmark_reply(reply_id: int, src, auth=None):
-    PostReply.query.filter_by(id=reply_id, deleted=False).join(Post, Post.id == PostReply.post_id).filter_by(
-        deleted=False).one()
     user_id = authorise_api_user(auth) if src == SRC_API else current_user.id
 
     existing_bookmark = PostReplyBookmark.query.filter_by(post_reply_id=reply_id, user_id=user_id).first()
@@ -67,7 +67,6 @@ def bookmark_reply(reply_id: int, src, auth=None):
 
 
 def remove_bookmark_reply(reply_id: int, src, auth=None):
-    PostReply.query.filter_by(id=reply_id, deleted=False).join(Post, Post.id == PostReply.post_id).filter_by(deleted=False).one()
     user_id = authorise_api_user(auth) if src == SRC_API else current_user.id
 
     existing_bookmark = PostReplyBookmark.query.filter_by(post_reply_id=reply_id, user_id=user_id).first()
@@ -143,12 +142,14 @@ def make_reply(input, post, parent_id, src, auth=None):
         notify_author = input['notify_author']
         language_id = input['language_id']
         distinguished = input['distinguished'] if 'distinguished' in input else False
+        answer = False
     else:
         user = current_user
         content = input.body.data
         notify_author = input.notify_author.data
         language_id = input.language_id.data
         distinguished = input.distinguished.data
+        answer = False
 
     if parent_id:
         parent_reply = db.session.query(PostReply).filter_by(id=parent_id).one()
@@ -168,7 +169,7 @@ def make_reply(input, post, parent_id, src, auth=None):
     # WEBFORM would call 'make_reply' in a try block, so any exception from 'new' would bubble-up for it to handle
     reply = PostReply.new(user, post, in_reply_to=parent_reply, body=piefed_markdown_to_lemmy_markdown(content),
                           body_html=markdown_to_html(content), notify_author=notify_author,
-                          language_id=language_id, distinguished=distinguished)
+                          language_id=language_id, distinguished=distinguished, answer=answer)
 
     user.language_id = language_id
     user.post_reply_count += 1
@@ -479,6 +480,53 @@ def lock_post_reply(post_reply_id, locked, src, auth=None):
             if src == SRC_WEB:
                 flash(_('Comment has been unlocked.'))
             task_selector('unlock_post_reply', user_id=user.id, post_reply_id=post_reply_id)
+
+    if src == SRC_API:
+        return user.id, post_reply
+
+
+def choose_answer(post_reply_id, src, auth=None):
+    if src == SRC_API:
+        user = authorise_api_user(auth, return_type='model')
+    else:
+        user = current_user
+
+    post_reply = PostReply.query.get(post_reply_id)
+    post_reply.answer = True
+    with force_locale(get_recipient_language(post_reply.user_id)):
+        title = _('Your answer was chosen as an answer to %(post_title)s',
+                  post_title=shorten_string(post_reply.post.title, 100))
+    targets_data = {'gen': '0',
+                    'post_id': post_reply.post_id,
+                    'requestor_id': user.id,
+                    'author_user_name': post_reply.author.display_name(),
+                    'post_title': shorten_string(post_reply.post.title, 100)}
+    notify = Notification(title=title, url=post_reply.post.slug,
+                          user_id=post_reply.user_id,
+                          author_id=user.id, notif_type=NOTIF_ANSWER,
+                          subtype='answer_chosen',
+                          targets=targets_data)
+    post_reply.author.unread_notifications += 1
+    db.session.add(notify)
+    db.session.commit()
+
+    task_selector('choose_answer', user_id=user.id, post_reply_id=post_reply_id)
+
+    if src == SRC_API:
+        return user.id, post_reply
+
+
+def unchoose_answer(post_reply_id, src, auth=None):
+    if src == SRC_API:
+        user = authorise_api_user(auth, return_type='model')
+    else:
+        user = current_user
+
+    post_reply = PostReply.query.get(post_reply_id)
+    post_reply.answer = False
+    db.session.commit()
+
+    task_selector('unchoose_answer', user_id=user.id, post_reply_id=post_reply_id)
 
     if src == SRC_API:
         return user.id, post_reply

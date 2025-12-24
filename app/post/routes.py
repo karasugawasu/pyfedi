@@ -23,7 +23,7 @@ from app.community.forms import CreateLinkForm, CreateDiscussionForm, CreateVide
     CreateEventForm
 from app.community.util import send_to_remote_instance, flair_from_form, hashtags_used_in_community
 from app.constants import NOTIF_REPORT, NOTIF_REPORT_ESCALATION, POST_STATUS_SCHEDULED, POST_STATUS_PUBLISHED, \
-    POST_TYPE_EVENT
+    POST_TYPE_EVENT, NOTIF_MENTION, NOTIF_ANSWER, SRC_API
 from app.constants import SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, POST_TYPE_LINK, \
     POST_TYPE_IMAGE, \
     POST_TYPE_ARTICLE, POST_TYPE_VIDEO, POST_TYPE_POLL, SRC_WEB
@@ -32,24 +32,26 @@ from app.models import Post, PostReply, PostReplyValidationError, \
     PostReplyVote, PostVote, Notification, utcnow, UserBlock, DomainBlock, Report, Site, Community, \
     Topic, User, Instance, UserFollower, Poll, PollChoice, PollChoiceVote, PostBookmark, \
     PostReplyBookmark, CommunityBlock, File, CommunityFlair, UserFlair, BlockedImage, CommunityBan, Language, Event, \
-    Reminder
+    Reminder, Emoji
 from app.post import bp
 from app.post.forms import NewReplyForm, ReportPostForm, MeaCulpaForm, CrossPostForm, ConfirmationForm, \
-    ConfirmationMultiDeleteForm, EditReplyForm, FlairPostForm, DeleteConfirmationForm, NewReminderForm
+    ConfirmationMultiDeleteForm, EditReplyForm, FlairPostForm, DeleteConfirmationForm, NewReminderForm, \
+    ShareMastodonForm, ChooseEmojiForm
 from app.post.util import post_replies, get_comment_branch, tags_to_string, url_needs_archive, \
     generate_archive_link, body_has_no_archive_link, retrieve_archived_post
 from app.post.util import post_type_to_form_url_type
 from app.shared.post import edit_post, sticky_post, lock_post, bookmark_post, remove_bookmark_post, subscribe_post, \
-    vote_for_post, mark_post_read, report_post, delete_post, mod_remove_post, restore_post, mod_restore_post
+    vote_for_post, mark_post_read, report_post, delete_post, mod_remove_post, restore_post, mod_restore_post, \
+    vote_for_poll, hide_post
 from app.shared.reply import make_reply, edit_reply, bookmark_reply, remove_bookmark_reply, subscribe_reply, \
-    delete_reply, mod_remove_reply, vote_for_reply, lock_post_reply, report_reply
+    delete_reply, mod_remove_reply, vote_for_reply, lock_post_reply, report_reply, choose_answer, unchoose_answer
 from app.shared.site import block_remote_instance
 from app.shared.community import get_comm_flair_list
 from app.shared.tasks import task_selector
 from app.utils import render_template, markdown_to_html, validation_required, \
     shorten_string, markdown_to_text, gibberish, ap_datetime, return_304, \
     request_etag_matches, ip_address, instance_banned, \
-    blocked_instances, blocked_domains, community_moderators, show_ban_message, recently_upvoted_posts, \
+    blocked_or_banned_instances, blocked_domains, community_moderators, show_ban_message, recently_upvoted_posts, \
     recently_downvoted_posts, recently_upvoted_post_replies, recently_downvoted_post_replies, \
     languages_for_form, add_to_modlog, blocked_communities, piefed_markdown_to_lemmy_markdown, \
     permission_required, blocked_users, get_request, is_local_image_url, is_video_url, can_upvote, can_downvote, \
@@ -57,11 +59,12 @@ from app.utils import render_template, markdown_to_html, validation_required, \
     block_bots, flair_for_form, login_required_if_private_instance, retrieve_image_hash, posts_with_blocked_images, \
     possible_communities, user_notes, login_required, get_recipient_language, user_filters_posts, \
     total_comments_on_post_and_cross_posts, approval_required, libretranslate_string, user_in_restricted_country, \
-    instance_gone_forever, site_language_code
+    site_language_code, block_honey_pot
 
 
 @login_required_if_private_instance
 def show_post(post_id: int):
+    block_honey_pot()
     with limiter.limit('30/minute'):
         post = Post.query.get_or_404(post_id)
         community: Community = post.community
@@ -151,7 +154,7 @@ def show_post(post_id: int):
                 if post.cross_posts:
                     cbf = communities_banned_from(current_user.get_id())
                     bc = blocked_communities(current_user.get_id())
-                    bi = blocked_instances(current_user.get_id())
+                    bi = blocked_or_banned_instances(current_user.get_id())
                     for cross_posted_post in Post.query.filter(Post.id.in_(post.cross_posts)):
                         if cross_posted_post.community_id not in cbf \
                                 and cross_posted_post.community_id not in bc \
@@ -369,7 +372,7 @@ def post_lazy_replies(post_id, nonce):
     if post.cross_posts:
         cbf = communities_banned_from_list
         bc = blocked_communities(current_user.get_id())
-        bi = blocked_instances(current_user.get_id())
+        bi = blocked_or_banned_instances(current_user.get_id())
         for cross_posted_post in Post.query.filter(Post.id.in_(post.cross_posts)):
             if cross_posted_post.community_id not in cbf \
                     and cross_posted_post.community_id not in bc \
@@ -513,15 +516,16 @@ def post_oembed(post_id):
 
 
 @bp.route('/post/<int:post_id>/<vote_direction>/<federate>', methods=['GET', 'POST'])
+@bp.route('/post/<int:post_id>/<vote_direction>/<federate>/<emoji>', methods=['GET', 'POST'])
 @login_required
 @validation_required
 @approval_required
-def post_vote(post_id: int, vote_direction, federate):
+def post_vote(post_id: int, vote_direction, federate, emoji=None):
     if federate == 'default':
         federate = not current_user.vote_privately
     else:
         federate = federate == 'public'
-    return vote_for_post(post_id, vote_direction, federate, SRC_WEB)
+    return vote_for_post(post_id, vote_direction, federate, emoji, SRC_WEB)
 
 
 @bp.route('/comment/<int:comment_id>/<vote_direction>/<federate>', methods=['POST'])
@@ -533,7 +537,70 @@ def comment_vote(comment_id, vote_direction, federate):
         federate = not current_user.vote_privately
     else:
         federate = federate == 'public'
-    return vote_for_reply(comment_id, vote_direction, federate, SRC_WEB)
+    return vote_for_reply(comment_id, vote_direction, federate, None, SRC_WEB)
+
+
+@bp.route('/comment/<int:comment_id>/<vote_direction>/<federate>/emoji', methods=['GET', 'POST'])
+@login_required
+@validation_required
+@approval_required
+def comment_emoji_reaction(comment_id, vote_direction, federate):
+    form = ChooseEmojiForm()
+    if request.method == 'POST' and form.validate_on_submit():
+        if federate == 'default':
+            federate = not current_user.vote_privately
+        else:
+            federate = federate == 'public'
+        retval = vote_for_reply(comment_id, vote_direction, federate, request.form.get('emoji'), SRC_WEB)
+        if request.headers.get('HX-Request'):
+            return retval
+        else:
+            comment = PostReply.query.get(comment_id)
+            fallback = f'/post/{comment.post.id}'
+            return redirect(f'{comment.post.slug if comment.post.slug else fallback}#comment_{comment.id}')
+    else:
+        comment = PostReply.query.get(comment_id)
+        return render_template('post/choose_emoji.html', post=comment.post, title=_('Choose an emoji'), form=form,
+                               emojis=Emoji.query.order_by(Emoji.token).all())
+
+
+@bp.route('/post/<int:comment_id>/emoji_list', methods=['GET'])
+@bp.route('/comment/<int:comment_id>/emoji_list', methods=['GET'])
+@login_required
+@validation_required
+@approval_required
+def comment_emoji_list(comment_id):
+    emojis = Emoji.query.order_by(Emoji.token).all()
+    emoji_list = [{'id': e.id, 'url': e.url, 'token': e.token, 'category': e.category, 'aliases': e.aliases} for e in emojis]
+    return render_template('post/emoji_list.html', comment_id=comment_id, emojis=emoji_list, nonce=g.get('nonce', ''))
+
+
+@bp.route('/post/<int:post_id>/emoji_set', methods=['POST'])
+def post_emoji_set(post_id):
+    if current_user.is_authenticated:
+        federate = not current_user.vote_privately
+
+        vote_for_post(post_id, 'upvote', federate, request.form.get('emoji'), SRC_WEB)
+
+        post = Post.query.get(post_id)
+
+        return render_template('post/_post_reply_teaser_reactions.html', post_reply=post)
+    else:
+        abort(403)
+
+
+@bp.route('/comment/<int:comment_id>/emoji_set', methods=['POST'])
+def comment_emoji_set(comment_id):
+    if current_user.is_authenticated:
+        federate = not current_user.vote_privately
+
+        vote_for_reply(comment_id, 'upvote', federate, request.form.get('emoji'), SRC_WEB)
+
+        post_reply = PostReply.query.get(comment_id)
+
+        return render_template('post/_post_reply_teaser_reactions.html', post_reply=post_reply)
+    else:
+        abort(403)
 
 
 @bp.route('/poll/<int:post_id>/vote', methods=['POST'])
@@ -541,42 +608,11 @@ def comment_vote(comment_id, vote_direction, federate):
 @validation_required
 @approval_required
 def poll_vote(post_id):
+    post = Post.query.get_or_404(post_id)
     poll_data = Poll.query.get_or_404(post_id)
-    if poll_data.mode == 'single':
-        choice_id = int(request.form.get('poll_choice'))
-        poll_data.vote_for_choice(choice_id, current_user.id)
-    else:
-        for choice_id in request.form.getlist('poll_choice[]'):
-            poll_data.vote_for_choice(int(choice_id), current_user.id)
+    votes = int(request.form.get('poll_choice')) if poll_data.mode == 'single' else request.form.getlist('poll_choice[]')
+    vote_for_poll(post_id, votes, SRC_WEB)
     flash(_('Vote has been cast.'))
-
-    post = Post.query.get(post_id)
-    if post:
-        if post.author.is_local():
-            post.edited_at = utcnow()
-            db.session.commit()
-            task_selector('edit_post', post_id=post.id)
-        else:
-            poll_votes = PollChoice.query.join(PollChoiceVote, PollChoiceVote.choice_id == PollChoice.id).filter(
-                PollChoiceVote.post_id == post.id, PollChoiceVote.user_id == current_user.id).all()
-            for pv in poll_votes:
-                pollvote_json = {
-                    '@context': default_context(),
-                    'actor': current_user.public_url(),
-                    'id': f"https://{current_app.config['SERVER_NAME']}/activities/create/{gibberish(15)}",
-                    'object': {
-                        'attributedTo': current_user.public_url(),
-                        'id': f"https://{current_app.config['SERVER_NAME']}/activities/vote/{gibberish(15)}",
-                        'inReplyTo': post.profile_id(),
-                        'name': pv.choice_text,
-                        'to': post.author.public_url(),
-                        'type': 'Note'
-                    },
-                    'to': post.author.public_url(),
-                    'type': 'Create'
-                }
-                send_post_request(post.author.ap_inbox_url, pollvote_json, current_user.private_key,
-                                  current_user.public_url() + '#main-key')
 
     return redirect(post.slug if post.slug else url_for('activitypub.post_ap', post_id=post_id))
 
@@ -584,6 +620,8 @@ def poll_vote(post_id):
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>')
 @login_required_if_private_instance
 def continue_discussion(post_id, comment_id):
+    block_honey_pot()
+
     post = Post.query.get_or_404(post_id)
     comment = PostReply.query.get_or_404(comment_id)
 
@@ -825,7 +863,7 @@ def add_reply_inline(post_id: int, comment_id: int, nonce):
             reply = PostReply.new(current_user, post, in_reply_to=in_reply_to,
                                   body=piefed_markdown_to_lemmy_markdown(content),
                                   body_html=markdown_to_html(content), notify_author=True,
-                                  language_id=language_id, distinguished=False)
+                                  language_id=language_id, distinguished=False, answer=False)
         except PostReplyValidationError as e:
             return '<div id="reply_to_{comment_id}" class="hidable"><span class="red">' + str(e) + '</span></div>'
 
@@ -882,6 +920,35 @@ def post_reply_options(post_id: int, comment_id: int):
 
     return render_template('post/post_reply_options.html', post=post, post_reply=post_reply,
                            existing_bookmark=existing_bookmark)
+
+
+@bp.route('/post/<int:post_id>/source/<state>', methods=['GET'])
+def post_source(post_id: int, state: str):
+    # This should just be accessed by htmx
+    if not request.headers.get('HX-Request'):
+        abort(400)
+    
+    post = Post.query.get(post_id)
+
+    if not post or state not in ['show', 'hide'] or (post.deleted and not current_user.is_admin()):
+        post_body = markdown_to_html(_("Something went wrong and a post could not be found."))
+        
+        return render_template("post/_post_source_swap.html", post_body=post_body, state="hide", post_id=post_id)
+    
+    if state == "show":
+        if '````' in post.body:
+            post_body = '<pre><code>' + post.body + '</code></pre>'
+        elif '```' in post.body:
+            post_body = markdown_to_html("````md\n" + post.body + "\n````")
+        else:
+            post_body = markdown_to_html("```md\n" + post.body + "\n```")
+        
+        return render_template("post/_post_source_swap.html", post_body=post_body, state="show", post_id=post_id)
+    
+    elif state == "hide":
+        post_body = post.body_html
+
+        return render_template("post/_post_source_swap.html", post_body=post_body, state="hide", post_id=post_id)
 
 
 @bp.route('/post/<int:post_id>/edit', methods=['GET', 'POST'])
@@ -951,6 +1018,8 @@ def post_edit(post_id: int):
                 flash(_('Your changes have been saved.'), 'success')
             except Exception as ex:
                 flash(_('Your edit was not accepted because %(reason)s', reason=str(ex)), 'error')
+                if current_app.debug:
+                    raise ex
                 abort(401)
 
             return redirect(post.slug if post.slug else url_for('activitypub.post_ap', post_id=post.id))
@@ -961,6 +1030,7 @@ def post_edit(post_id: int):
             form.notify_author.data = post.notify_author
             form.nsfw.data = post.nsfw
             form.nsfl.data = post.nsfl
+            form.ai_generated.data = post.ai_generated
             form.sticky.data = post.sticky
             form.language_id.data = post.language_id
             form.tags.data = tags_to_string(post)
@@ -985,7 +1055,7 @@ def post_edit(post_id: int):
                     try:
                         with open(path, "rb") as file:
                             form.image_file.data = file.read()
-                    except FileNotFoundError as e:
+                    except FileNotFoundError:
                         pass
 
             elif post_type == POST_TYPE_VIDEO:
@@ -1404,6 +1474,18 @@ def post_sticky(post_id: int, mode):
     return redirect(referrer(post.slug if post.slug else url_for('activitypub.post_ap', post_id=post.id)))
 
 
+@bp.route('/post/<int:post_id>/hide/<mode>', methods=['POST'])
+@login_required
+def post_hide(post_id: int, mode):
+    post = Post.query.get_or_404(post_id)
+    hide_post(post.id, mode == 'yes', SRC_WEB)
+    if mode == 'yes':
+        flash(_('%(name)s has been hidden.', name=post.title))
+    else:
+        flash(_('%(name)s has been un-hidden.', name=post.title))
+    return redirect(referrer())
+
+
 @bp.route('/post/<int:post_id>/set_flair', methods=['GET', 'POST'])
 @login_required
 def post_set_flair(post_id):
@@ -1425,6 +1507,7 @@ def post_set_flair(post_id):
 
             post.nsfw = request.form.get('nsfw') == '1'
             post.nsfl = request.form.get('nsfl') == '1'
+            post.ai_generated = request.form.get('ai_generated') == '1'
 
             # Reset flair for the post
             post.flair = []
@@ -1463,6 +1546,7 @@ def post_set_flair(post_id):
             post.flair = flair_from_form(form.flair.data)
             post.nsfw = form.nsfw.data
             post.nsfl = form.nsfl.data
+            post.ai_generated = form.ai_generated.data
             db.session.commit()
             if post.status == POST_STATUS_PUBLISHED:
                 task_selector('edit_post', post_id=post.id)
@@ -1471,6 +1555,7 @@ def post_set_flair(post_id):
         form.flair.data = [flair.id for flair in post.flair]
         form.nsfw.data = post.nsfw
         form.nsfl.data = post.nsfl
+        form.ai_generated.data = post.ai_generated
         return render_template('generic_form.html', form=form,
                                title=_('Set flair for %(post_title)s', post_title=post.title))
     else:
@@ -1617,6 +1702,39 @@ def post_reply_distinguish(post_id: int, comment_id: int):
         return redirect(post.slug if post.slug else url_for('activitypub.post_ap', post_id=post.id))
     else:
         abort(401)
+
+
+@bp.route('/post/<int:post_id>/comment/<int:comment_id>/source/<state>', methods=['GET'])
+def post_reply_source(post_id: int, comment_id: int, state: str):
+    # This should just be accessed by htmx
+    if not request.headers.get('HX-Request'):
+        abort(400)
+    
+    post_reply = PostReply.query.get(comment_id)
+
+    if not post_reply or state not in ['show', 'hide'] or (post_reply.deleted and not current_user.is_admin()):
+        reply_body = markdown_to_html(_("Something went wrong and a comment could not be found."))
+        
+        return render_template("post/_post_reply_source_swap.html", reply_body=reply_body, state="hide",
+                               comment_id=comment_id, post_id=post_id)
+    
+    if state == "show":
+        if '````' in post_reply.body:
+            reply_body = '<pre><code>' + post_reply.body + '</code></pre>'
+        elif '```' in post_reply.body:
+            reply_body = markdown_to_html("````md\n" + post_reply.body + "\n````")
+        else:
+            reply_body = markdown_to_html("```md\n" + post_reply.body + "\n```")
+        
+        return render_template("post/_post_reply_source_swap.html", reply_body=reply_body, state="show",
+                               comment_id=comment_id, post_id=post_id)
+    
+    elif state == "hide":
+        reply_body = post_reply.body_html
+
+        return render_template("post/_post_reply_source_swap.html", reply_body=reply_body, state="hide",
+                               comment_id=comment_id, post_id=post_id)
+
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/edit', methods=['GET', 'POST'])
@@ -2039,3 +2157,84 @@ def show_post_ical(post_id: int):
         resp.headers['Cache-Control'] = 'public, max-age=3600'  # cache for 1 hour
         resp.mimetype = 'text/calendar'
         return resp
+
+
+@bp.route('/post/<int:post_id>/check_ai', methods=['POST'])
+def post_check_ai(post_id):
+    post = Post.query.get(post_id)
+    if current_app.config['DETECT_AI_ENDPOINT']:
+        if len(post.body) > 100:
+            is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={post.ap_id}")
+            if is_ai and is_ai.status_code == 200:
+                is_ai_result = is_ai.json()
+                if is_ai_result['detection_result'] == 'ai':
+                    result_type = 'alert-warning'
+                else:
+                    result_type = 'alert-success'
+                output = f'<div class="w-100 alert {result_type}">'
+                output += is_ai_result['detection_result'].upper()
+                output += '<br>'
+                output += f"{int(is_ai_result['confidence'] * 100)}% confident"
+                output += '</div>'
+                return output
+        else:
+            return _('Body text is too short to be sure.')
+    else:
+        return _('Not configured.')
+
+
+@bp.route('/post_reply/<int:post_reply_id>/check_ai', methods=['POST'])
+def post_reply_check_ai(post_reply_id):
+    post_reply = PostReply.query.get(post_reply_id)
+    if current_app.config['DETECT_AI_ENDPOINT']:
+        if len(post_reply.body) > 100:
+            is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={post_reply.ap_id}")
+            if is_ai and is_ai.status_code == 200:
+                is_ai_result = is_ai.json()
+                if is_ai_result['detection_result'] == 'ai':
+                    result_type = 'alert-warning'
+                else:
+                    result_type = 'alert-success'
+                output = f'<div class="w-100 mb-0 mt-2 alert {result_type}">'
+                output += is_ai_result['detection_result'].upper()
+                output += '<br>'
+                output += f"{int(is_ai_result['confidence'] * 100)}% confident"
+                output += '</div>'
+                return output
+        else:
+            return _('Body text is too short to be sure.')
+    else:
+        return _('Not configured.')
+
+
+@bp.route('/post_reply/<int:post_reply_id>/choose_answer', methods=['POST'])
+def post_reply_choose_answer(post_reply_id):
+    post_reply = PostReply.query.get(post_reply_id)
+    if current_user.is_authenticated and (current_user.is_admin_or_staff() or post_reply.user_id == current_user.id or post_reply.community.is_moderator()):
+        choose_answer(post_reply_id, src=SRC_WEB)
+        return _('Done')
+    else:
+        abort(403)
+
+
+@bp.route('/post_reply/<int:post_reply_id>/unchoose_answer', methods=['POST'])
+def post_reply_unchoose_answer(post_reply_id):
+    post_reply = PostReply.query.get(post_reply_id)
+    if current_user.is_authenticated and (current_user.is_admin_or_staff() or post_reply.user_id == current_user.id or post_reply.community.is_moderator()):
+        unchoose_answer(post_reply_id, src=SRC_WEB)
+        return _('Done')
+    else:
+        abort(403)
+
+
+@bp.route('/post/<int:post_id>/share_mastodon', methods=['GET', 'POST'])
+def post_share_mastodon(post_id):
+    post = Post.query.get_or_404(post_id)
+    form = ShareMastodonForm()
+    if form.validate_on_submit():
+        resp = make_response(redirect(f"https://{form.domain.data}/share?text={post.title}&url=https://{current_app.config['SERVER_NAME']}{post.slug}"))
+        resp.set_cookie('mastodon_share', form.domain.data, expires=datetime(year=2099, month=12, day=30))
+        return resp
+
+    form.domain.data = request.cookies.get('mastodon_share', 'mastodon.social')
+    return render_template('generic_form.html', form=form, title=_('Share on Mastodon'))

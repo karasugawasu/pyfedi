@@ -38,7 +38,7 @@ from flask import current_app, json, redirect, url_for, request, make_response, 
 from flask_babel import _, lazy_gettext as _l
 from flask_login import current_user, logout_user
 from flask_wtf.csrf import validate_csrf
-from sqlalchemy import text, or_, desc, asc, event
+from sqlalchemy import text, or_, desc, asc, event, select
 from sqlalchemy.orm import Session
 from wtforms.fields import SelectMultipleField, StringField
 from wtforms.widgets import ListWidget, CheckboxInput, TextInput
@@ -323,10 +323,16 @@ FEED_PATTERN = re.compile(r"(?<![\/])~([a-zA-Z0-9_.-]*)@([a-zA-Z0-9_.-]*)\b")
 
 
 # sanitise HTML using an allow list
-def allowlist_html(html: str, a_target='_blank') -> str:
+def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
     # RUN THE TESTS in tests/test_allowlist_html.py whenever you alter this function, it's fragile and bugs are hard to spot.
     if html is None or html == '':
         return ''
+
+    # Produce a short, random string that is used for footnotes
+    if test_env:
+        fn_string = test_env.get('fn_string', 'fn-test')
+    else:
+        fn_string = gibberish(6)
 
     # Pre-escape angle brackets that aren't valid HTML tags before BeautifulSoup parsing
     # We need to distinguish between:
@@ -366,6 +372,11 @@ def allowlist_html(html: str, a_target='_blank') -> str:
     # Parse the HTML using BeautifulSoup
     soup = BeautifulSoup(html, 'html.parser')
 
+    if not test_env:
+        instance_domains = fediverse_domains()
+    else:
+        instance_domains = []
+
     # Filter tags, leaving only safe ones
     # スキップ対象タグのリストを明確化
     for tag in soup.find_all():
@@ -399,8 +410,19 @@ def allowlist_html(html: str, a_target='_blank') -> str:
                 tag.extract()
             # Add nofollow and target=_blank to anchors
             if tag.name == 'a':
-                tag.attrs['rel'] = 'nofollow ugc'
-                tag.attrs['target'] = a_target
+                if not tag.attrs.get('href', "").startswith("#"):
+                    tag.attrs['rel'] = 'nofollow ugc'
+                    tag.attrs['target'] = a_target
+                    if furl(tag['href']).host in instance_domains:
+                        tag['href'] = rewrite_href(tag['href'])
+                else:
+                    # This is a same-page anchor - a footnote, give unique suffix for href
+                    tag.attrs['href'] = tag.attrs.get('href', '') + '-' + fn_string
+            # Add unique suffix for footnote id's
+            if 'class' in tag.attrs and 'footnote-ref' in tag.attrs.get('class'):
+                tag.attrs['id'] = tag.attrs.get('id', '') + '-' + fn_string
+            if tag.name == 'li' and tag.attrs.get('id', '').startswith('fn-'):
+                tag.attrs['id'] = tag.attrs.get('id', '') + '-' + fn_string
             # Add loading=lazy to images
             if tag.name == 'img':
                 tag.attrs['loading'] = 'lazy'
@@ -566,7 +588,7 @@ def handle_lemmy_autocomplete(text: str) -> str:
 
 # use this for Markdown irrespective of origin, as it can deal with both soft break newlines ('\n' used by PieFed) and hard break newlines ('  \n' or ' \\n')
 # ' \\n' will create <br /><br /> instead of just <br />, but hopefully that's acceptable.
-def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_target="_blank") -> str:
+def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_target="_blank", test_env=False) -> str:
     if markdown_text:
         # Lemmyの改行の仕方と揃える
         # on_newlineをFalseにして、スペース2つを見つけたらバックスラッシュを入れてあげる
@@ -582,11 +604,18 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
         markdown_text = markdown_text.replace('þ', 'th')
 
         try:
-            md = markdown2.Markdown(extras={'middle-word-em': False, 'tables': True, 'fenced-code-blocks': None, 'strike': True,
-                                            'tg-spoiler': True, 'link-patterns': [(LINK_PATTERN, r'\1')],
+            md = markdown2.Markdown(extras={'middle-word-em': False,
+                                            'tables': True,
+                                            'fenced-code-blocks': None,
+                                            'strike': True,
+                                            'tg-spoiler': True,
+                                            'link-patterns': [(LINK_PATTERN, r'\1')],
                                             'breaks': {'on_newline': False, 'on_backslash': True},
-                                            'tag-friendly': True, 'task_list': True, 'footnotes': True, 'smarty-pants': True,
-                                            'enhanced-images': True})
+                                            'tag-friendly': True,
+                                            'smarty-pants': True,
+                                            'enhanced-images': True,
+                                            'footnotes': True,
+                                            'task_list': True})
             raw_html = md.convert(markdown_text)
             # Apply enhanced image attributes after markdown processing
             raw_html = apply_enhanced_image_attributes(raw_html, md)
@@ -594,11 +623,17 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
             # weird markdown, like https://mander.xyz/u/tty1 and https://feddit.uk/comment/16076443,
             # causes "markdown2.Markdown._color_with_pygments() argument after ** must be a mapping, not bool" error, so try again without fenced-code-blocks extra
             try:
-                md = markdown2.Markdown(extras={'middle-word-em': False, 'tables': True, 'strike': True,
-                                                'tg-spoiler': True, 'link-patterns': [(LINK_PATTERN, r'\1')],
+                md = markdown2.Markdown(extras={'middle-word-em': False,
+                                                'tables': True,
+                                                'strike': True,
+                                                'tg-spoiler': True,
+                                                'link-patterns': [(LINK_PATTERN, r'\1')],
                                                 'breaks': {'on_newline': False, 'on_backslash': True},
-                                                'tag-friendly': True, 'task_list': True, 'footnotes': True, 'smarty-pants': True,
-                                                'enhanced-images': True})
+                                                'tag-friendly': True,
+                                                'smarty-pants': True,
+                                                'enhanced-images': True,
+                                                'footnotes': True,
+                                                'task_list': True})
                 raw_html = md.convert(markdown_text)
                 # Apply enhanced image attributes after markdown processing
                 raw_html = apply_enhanced_image_attributes(raw_html, md)
@@ -608,7 +643,7 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
         if not allow_img:
             raw_html = escape_img(raw_html)
 
-        return allowlist_html(raw_html, a_target=a_target if anchors_new_tab else '')
+        return allowlist_html(raw_html, a_target=a_target if anchors_new_tab else '', test_env=test_env)
     else:
         return ''
 
@@ -918,7 +953,7 @@ def domain_from_url(url: str, create=True) -> Domain:
         find_this = parsed_url.hostname.lower()
         if find_this == 'youtu.be':
             find_this = 'youtube.com'
-        domain = Domain.query.filter_by(name=find_this).first()
+        domain = db.session.query(Domain).filter_by(name=find_this).first()
         if create and domain is None:
             domain = Domain(name=find_this)
             db.session.add(domain)
@@ -1056,6 +1091,14 @@ def blocked_communities(user_id) -> List[int]:
 
 
 @cache.memoize(timeout=86400)
+def blocked_or_banned_instances(user_id) -> List[int]:
+    if user_id == 0:
+        return []
+    blocks = db.session.query(InstanceBlock).filter_by(user_id=user_id)
+    return [block.instance_id for block in blocks] + banned_instances(user_id)
+
+
+@cache.memoize(timeout=86400)
 def blocked_instances(user_id) -> List[int]:
     if user_id == 0:
         return []
@@ -1094,6 +1137,27 @@ def blocked_referrers() -> List[str]:
         return [referrer for referrer in site.auto_decline_referrers.split('\n') if referrer != '']
     else:
         return []
+
+
+def block_honey_pot():
+    # Return 403 for any IP address that has visited /honey/* too many times. See honey_pot()
+    if current_user.is_anonymous:
+        from app import redis_client
+        if redis_client.exists(f"ban:{ip_address()}"):
+            abort(403)
+
+
+def instance_community_ids(instance_id) -> List[int]:
+    rows = db.session.execute(select(Community.id).where(Community.instance_id == instance_id)).scalars()
+    return list(rows)
+
+
+@cache.memoize(timeout=86400)
+def banned_instances(user_id) -> List[int]:
+    if user_id == 0:
+        return []
+    blocks = db.session.query(InstanceBan).filter_by(user_id=user_id)
+    return [block.instance_id for block in blocks]
 
 
 def retrieve_block_list():
@@ -1741,11 +1805,17 @@ def moderating_communities_ids_all_users() -> dict[int, List[int]]:
 def joined_communities(user_id) -> List[Community]:
     if user_id is None or user_id == 0:
         return []
+    banned_instance_ids = banned_instances(user_id)
     communities = Community.query.join(CommunityMember, Community.id == CommunityMember.community_id). \
         filter(Community.banned == False). \
         filter(CommunityMember.is_moderator == False, CommunityMember.is_owner == False). \
         filter(CommunityMember.is_banned == False). \
-        filter(CommunityMember.user_id == user_id).order_by(Community.title).all()
+        filter(CommunityMember.user_id == user_id)
+
+    if banned_instance_ids:
+        communities = communities.filter(Community.instance_id.notin_(banned_instances(user_id)))
+
+    communities = communities.order_by(Community.title).all()
 
     # track display names to identify duplicates
     display_name_counts = {}
@@ -1910,6 +1980,7 @@ def feed_tree_public(search_param=None) -> List[dict]:
     return [feed for feed in feeds_dict.values() if feed['feed'].parent_feed_id is None]
 
 
+@cache.memoize(timeout=600)
 def opengraph_parse(url):
     if '?' in url:
         url = url.split('?')
@@ -2045,23 +2116,10 @@ def url_to_thumbnail_file(filename) -> File:
 
 
 # By no means is this a complete list, but it is very easy to search for the ones you need later.
-KNOWN_OPENGRAPH_TAGS = [
-    "og:site_name",
-    "og:title",
-    "og:locale",
-    "og:type",
-    "og:image",
-    "og:url",
-    "og:image:url",
-    "og:image:secure_url",
-    "og:image:type",
-    "og:image:width",
-    "og:image:height",
-    "og:image:alt",
-]
 
 
-def parse_page(page_url, tags_to_search=KNOWN_OPENGRAPH_TAGS, fallback_tags=None):
+
+def parse_page(page_url):
     '''
     Parses a page, returns a JSON style dictionary of all OG tags found on that page.
 
@@ -2069,6 +2127,23 @@ def parse_page(page_url, tags_to_search=KNOWN_OPENGRAPH_TAGS, fallback_tags=None
 
     Returns False if page is unreadable
     '''
+
+    tags_to_search = [
+        "og:site_name",
+        "og:title",
+        "og:locale",
+        "og:type",
+        "og:image",
+        "og:url",
+        "og:image:url",
+        "og:image:secure_url",
+        "og:image:type",
+        "og:image:width",
+        "og:image:height",
+        "og:image:alt",
+        "og:description"
+    ]
+
     # read the html from the page
     response = get_request(page_url)
 
@@ -2085,9 +2160,20 @@ def parse_page(page_url, tags_to_search=KNOWN_OPENGRAPH_TAGS, fallback_tags=None
         new_found_tag = soup.find("meta", property=og_tag)
         if new_found_tag is not None:
             found_tags[new_found_tag["property"]] = new_found_tag["content"]
-        elif fallback_tags is not None and og_tag in fallback_tags:
-            found_tags[og_tag] = soup.find(fallback_tags[og_tag]).text
 
+    desc = soup.find("meta", attrs={"name": "description"})
+    if desc and desc.get("content"):
+        found_tags["description"] = desc["content"]
+        if "og:description" not in found_tags:
+            found_tags["og_description"] = desc["content"]
+
+    if "og:description" in found_tags and "description" not in found_tags:
+        found_tags["description"] = found_tags["og_description"]
+
+    if len(found_tags) == 0 or 'og:title' not in found_tags:
+        title = soup.find("title")
+        if title:
+            found_tags['og:title'] = title.get_text()
     return found_tags
 
 
@@ -2230,7 +2316,7 @@ def in_sorted_list(arr, target):
 @cache.memoize(timeout=600)
 def recently_upvoted_posts(user_id) -> List[int]:
     post_ids = db.session.execute(
-        text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 300'),
+        text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 3000'),
         {'user_id': user_id}).scalars()
     return sorted(post_ids)  # sorted so that in_sorted_list can be used
 
@@ -2238,7 +2324,7 @@ def recently_upvoted_posts(user_id) -> List[int]:
 @cache.memoize(timeout=600)
 def recently_downvoted_posts(user_id) -> List[int]:
     post_ids = db.session.execute(
-        text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 300'),
+        text('SELECT post_id FROM "post_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 3000'),
         {'user_id': user_id}).scalars()
     return sorted(post_ids)
 
@@ -2246,7 +2332,7 @@ def recently_downvoted_posts(user_id) -> List[int]:
 @cache.memoize(timeout=600)
 def recently_upvoted_post_replies(user_id) -> List[int]:
     reply_ids = db.session.execute(text(
-        'SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 300'),
+        'SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect > 0 ORDER BY id DESC LIMIT 3000'),
                                    {'user_id': user_id}).scalars()
     return sorted(reply_ids)  # sorted so that in_sorted_list can be used
 
@@ -2254,7 +2340,7 @@ def recently_upvoted_post_replies(user_id) -> List[int]:
 @cache.memoize(timeout=600)
 def recently_downvoted_post_replies(user_id) -> List[int]:
     reply_ids = db.session.execute(text(
-        'SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 300'),
+        'SELECT post_reply_id FROM "post_reply_vote" WHERE user_id = :user_id AND effect < 0 ORDER BY id DESC LIMIT 3000'),
                                    {'user_id': user_id}).scalars()
     return sorted(reply_ids)
 
@@ -2404,8 +2490,10 @@ def authorise_api_user(auth, return_type=None, id_match=None) -> User | dict | i
     decoded = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=["HS256"])
     if decoded:
         user_id = decoded['sub']
-        user = User.query.filter_by(id=user_id, ap_id=None, verified=True, banned=False, deleted=False).first()
+        user = User.query.get(user_id)
         if user is None:
+            raise Exception('incorrect_login')
+        if user.ap_id is not None or user.verified is False or user.banned is True or user.deleted is True:
             raise Exception('incorrect_login')
         if user.password_updated_at:
             issued_at_time = decoded['iat']
@@ -2797,7 +2885,7 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str, ha
             post_id_where.append('c.id NOT IN :filtered_out_community_ids ')
             params['filtered_out_community_ids'] = tuple(filtered_out_community_ids)
 
-        if bi := blocked_instances(current_user.id):
+        if bi := blocked_or_banned_instances(current_user.id):
             post_id_where.append('c.instance_id NOT IN :filtered_out_instance_ids ')
             params['filtered_out_instance_ids'] = tuple(bi)
             post_id_where.append('p.instance_id NOT IN :filtered_out_instance_ids2 ')
@@ -2815,10 +2903,13 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str, ha
         if current_user.hide_nsfl == 1:
             post_id_where.append('p.nsfl is false ')
         if current_user.hide_nsfw == 1:
-            post_id_where.append('p.nsfw is false')
+            post_id_where.append('p.nsfw is false ')
         if current_user.hide_read_posts:
             post_id_where.append('p.id NOT IN (SELECT read_post_id FROM "read_posts" WHERE user_id = :user_id) ')
-            params['user_id'] = current_user.id
+        if current_user.hide_gen_ai == 1:
+            post_id_where.append('p.ai_generated is false ')
+        post_id_where.append('p.id NOT IN (SELECT hidden_post_id FROM "hidden_posts" WHERE user_id = :user_id) ')
+        params['user_id'] = current_user.id
 
         # Language filter
         if current_user.read_language_ids and len(current_user.read_language_ids) > 0:
@@ -2832,7 +2923,7 @@ def get_deduped_post_ids(result_id: str, community_ids: List[int], sort: str, ha
         if domains_ids:
             post_id_where.append('(p.domain_id NOT IN :domain_ids OR p.domain_id is null) ')
             params['domain_ids'] = tuple(domains_ids)
-        instance_ids = blocked_instances(current_user.id)
+        instance_ids = blocked_or_banned_instances(current_user.id)
         if instance_ids:
             post_id_where.append('(p.instance_id NOT IN :instance_ids OR p.instance_id is null) ')
             params['instance_ids'] = tuple(instance_ids)
@@ -3691,6 +3782,37 @@ def to_srgb(im: Image.Image, assume="sRGB"):
 @cache.memoize(timeout=30)
 def show_explore():
     return num_topics() > 0 or num_feeds() > 0
+
+
+@cache.memoize(timeout=30)
+def fediverse_domains():
+    return [instance.domain for instance in db.session.query(Instance).filter(Instance.id != 1).all() if instance.online()]
+
+
+def rewrite_href(url: str) -> str:
+    if '/post/' in url or ('/c/' in url and '/p/' in url) or ('/m/' in url and '/t/' in url and '/comment/' not in url):
+        post = Post.get_by_ap_id(url)
+        if post:
+            if post.slug:
+                return post.slug
+            else:
+                return f'/post/{post.id}'
+    elif '/comment/' in url:
+        post_reply = PostReply.get_by_ap_id(url)
+        if post_reply:
+            return f'/comment/{post_reply.id}'
+    elif ('/c/' in url and '/p/' not in url) or ('/m/' in url and '/t/' not in url):
+        community = db.session.query(Community).filter(Community.ap_profile_id == url, Community.banned == False).first()
+        if community and not community.is_local():
+            url = f'/c/{community.link()}'
+    else:
+        post = Post.get_by_ap_id(url)
+        if post is None:
+            post_reply = PostReply.get_by_ap_id(url)
+            if post_reply:
+                return f'/comment/{post_reply.id}'
+
+    return url
 
 
 def expand_hex_color(text: str) -> str:

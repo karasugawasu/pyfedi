@@ -23,7 +23,7 @@ from app.community.forms import SearchRemoteCommunity, CreateDiscussionForm, Cre
     DeleteCommunityForm, AddCommunityForm, EditCommunityForm, AddModeratorForm, BanUserCommunityForm, \
     EscalateReportForm, ResolveReportForm, CreateVideoForm, CreatePollForm, EditCommunityWikiPageForm, \
     InviteCommunityForm, MoveCommunityForm, EditCommunityFlairForm, SetMyFlairForm, FindAndBanUserCommunityForm, \
-    CreateEventForm, RateCommunityModsForm
+    CreateEventForm, RateCommunityForm
 from app.community.util import search_for_community, actor_to_community, \
     save_icon_file, save_banner_file, \
     delete_post_from_community, delete_post_reply_from_community, \
@@ -39,26 +39,28 @@ from app.models import User, Community, CommunityMember, CommunityJoinRequest, C
     File, utcnow, Report, Notification, Topic, PostReply, \
     NotificationSubscription, Language, ModLog, CommunityWikiPage, \
     CommunityWikiPageRevision, read_posts, Feed, FeedItem, CommunityBlock, CommunityFlair, post_flair, UserFlair, \
-    post_tag, Tag, Rating
+    post_tag, Tag, Rating, hidden_posts
 from app.community import bp
 from app.post.util import tags_to_string
 from app.shared.community import invite_with_chat, invite_with_email, subscribe_community, add_mod_to_community, \
-    remove_mod_from_community, get_comm_flair_list, rate_community_moderation
+    remove_mod_from_community, get_comm_flair_list, rate_community
 from app.utils import get_setting, render_template, markdown_to_html, validation_required, \
     shorten_string, gibberish, community_membership, \
     request_etag_matches, return_304, can_upvote, can_downvote, user_filters_posts, \
     joined_communities, moderating_communities, moderating_communities_ids, blocked_domains, mimetype_from_url, \
-    blocked_instances, \
+    blocked_or_banned_instances, \
     community_moderators, communities_banned_from, show_ban_message, recently_upvoted_posts, recently_downvoted_posts, \
     blocked_users, languages_for_form, add_to_modlog, \
     blocked_communities, remove_tracking_from_link, piefed_markdown_to_lemmy_markdown, \
     instance_software, domain_from_email, referrer, flair_for_form, find_flair_id, login_required_if_private_instance, \
     possible_communities, reported_posts, user_notes, login_required, get_task_session, patch_db_session, \
     approval_required, permission_required, aged_account_required, communities_banned_from_all_users, \
-    moderating_communities_ids_all_users
+    moderating_communities_ids_all_users, block_honey_pot
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
-from app.utils import get_recipient_language
+from app.shared.community import leave_community
+from app.shared.feed import leave_feed
+from app.utils import get_recipient_language, subscribed_feeds, feed_membership
 from feedgen.feed import FeedGenerator
 from datetime import timezone, timedelta
 
@@ -102,9 +104,10 @@ def add_local():
                               ap_followers_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data + '/followers',
                               ap_moderators_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + form.url.data + '/moderators',
                               ap_domain=current_app.config['SERVER_NAME'],
-                              subscriptions_count=1, instance_id=1,
+                              subscriptions_count=1, instance_id=1, ai_generated=form.ai_generated.data,
                               low_quality=('memes' in form.url.data or 'shitpost' in form.url.data) and
-                                           get_setting('meme_comms_low_quality', False))
+                                           get_setting('meme_comms_low_quality', False),
+                              question_answer=form.question_answer.data, first_federated_at=utcnow())
         icon_file = request.files['icon_file']
         if icon_file and icon_file.filename != '':
             file = save_icon_file(icon_file)
@@ -231,7 +234,9 @@ def _make_community_results_datalist_html(community_name):
 def show_community(community: Community):
     if community.banned:
         abort(404)
-    
+
+    block_honey_pot()
+
     if current_user.is_anonymous:
         if current_app.config['CONTENT_WARNING']:
             if community.nsfl:
@@ -356,6 +361,11 @@ def show_community(community: Community):
                 posts = posts.outerjoin(read_posts, (Post.id == read_posts.c.read_post_id) & (
                         read_posts.c.user_id == current_user.id))
                 posts = posts.filter(read_posts.c.read_post_id.is_(None))  # Filter where there is no corresponding read post for the current user
+            if current_user.hide_gen_ai == 1:
+                posts = posts.filter(Post.ai_generated == False)
+            posts = posts.outerjoin(hidden_posts, (Post.id == hidden_posts.c.hidden_post_id) & (
+                    hidden_posts.c.user_id == current_user.id))
+            posts = posts.filter(hidden_posts.c.hidden_post_id.is_(None))  # Filter where there is no corresponding hidden post for the current user
             content_filters = user_filters_posts(current_user.id)
             posts = posts.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING)
 
@@ -363,7 +373,7 @@ def show_community(community: Community):
             domains_ids = blocked_domains(current_user.id)
             if domains_ids:
                 posts = posts.filter(or_(Post.domain_id.not_in(domains_ids), Post.domain_id == None))
-            instance_ids = blocked_instances(current_user.id)
+            instance_ids = blocked_or_banned_instances(current_user.id)
             if instance_ids:
                 posts = posts.filter(or_(Post.instance_id.not_in(instance_ids), Post.instance_id == None))
             community_ids = blocked_communities(current_user.id)
@@ -451,7 +461,7 @@ def show_community(community: Community):
             comments = comments.filter(PostReply.deleted == False)
 
             # filter instances
-            instance_ids = blocked_instances(current_user.id)
+            instance_ids = blocked_or_banned_instances(current_user.id)
             if instance_ids:
                 comments = comments.filter(or_(PostReply.instance_id.not_in(instance_ids), PostReply.instance_id == None))
 
@@ -989,6 +999,9 @@ def add_post(actor, type=None):
     if community.nsfl:
         form.nsfl.data = True
         form.nsfw.render_kw = {'disabled': True}
+    if community.ai_generated:
+        form.ai_generated.data = True
+        form.ai_generated.render_kw = {'disabled': True}
     if not (community.is_moderator() or community.is_owner() or current_user.is_admin()):
         form.sticky.render_kw = {'disabled': True}
 
@@ -1007,6 +1020,7 @@ def add_post(actor, type=None):
                 'title': form.title.data,
                 'content': form.body.data if hasattr(form, 'body') else '',
                 'community': community.name,
+                'community_id': community.id,
                 'post_type': post_type,
                 'user_id': current_user.id
             }
@@ -1016,6 +1030,8 @@ def add_post(actor, type=None):
             post = make_post(form, community, post_type, SRC_WEB, uploaded_file=uploaded_file)
         except Exception as ex:
             flash(_('Your post was not accepted because %(reason)s', reason=str(ex)), 'error')
+            if current_app.debug:
+                raise ex
             return redirect(url_for('activitypub.community_profile',
                                     actor=community.ap_id if community.ap_id is not None else community.name))
 
@@ -1060,6 +1076,7 @@ def add_post(actor, type=None):
             form.body.data = source_post.body
             form.nsfw.data = source_post.nsfw
             form.nsfl.data = source_post.nsfl
+            form.ai_generated.data = source_post.ai_generated
             form.language_id.data = source_post.language_id
             if post_type == POST_TYPE_LINK:
                 form.link_url.data = source_post.url
@@ -1077,6 +1094,9 @@ def add_post(actor, type=None):
     # empty post to pass since add_post.html extends edit_post.html 
     # and that one checks for a post.image_id for editing image posts
     post = None
+
+    if form.language_id.data not in community.language_ids() and len(community.language_ids()) > 0:
+        flash(_('This community prefers posts in %(language_names)s', language_names=', '.join(community.language_names())), 'warning')
 
     return render_template('community/add_post.html', title=_('Add post to community'), form=form,
                            post_type=post_type, community=community, post=post, hide_community_actions=True,
@@ -1142,6 +1162,7 @@ def community_edit(community_id: int):
             community.description_html = markdown_to_html(form.description.data, anchors_new_tab=False)
             community.posting_warning = form.posting_warning.data
             community.nsfw = form.nsfw.data
+            community.ai_generated = form.ai_generated.data
             community.local_only = form.local_only.data
             community.restricted_to_mods = form.restricted_to_mods.data
             community.new_mods_wanted = form.new_mods_wanted.data
@@ -1150,6 +1171,7 @@ def community_edit(community_id: int):
             community.default_post_type = form.default_post_type.data
             community.downvote_accept_mode = form.downvote_accept_mode.data
             community.post_url_type = form.post_url_type.data
+            community.question_answer = form.question_answer.data
 
             icon_file = request.files['icon_file']
             if icon_file and icon_file.filename != '':
@@ -1198,6 +1220,7 @@ def community_edit(community_id: int):
             form.description.data = community.description
             form.posting_warning.data = community.posting_warning
             form.nsfw.data = community.nsfw
+            form.ai_generated.data = community.ai_generated
             form.local_only.data = community.local_only
             form.new_mods_wanted.data = community.new_mods_wanted
             form.restricted_to_mods.data = community.restricted_to_mods
@@ -1207,6 +1230,7 @@ def community_edit(community_id: int):
             form.default_post_type.data = community.default_post_type
             form.downvote_accept_mode.data = community.downvote_accept_mode
             form.post_url_type.data = community.post_url_type if community.post_url_type else 'friendly'
+            form.question_answer.data = community.question_answer
         return render_template('community/community_edit.html', title=_('Edit community'), form=form,
                                current_app=current_app, current="edit_settings",
                                community=community)
@@ -2313,59 +2337,38 @@ def community_flair_delete(community_id, flair_id):
         abort(401)
 
 
-@bp.route('/community/leave_all')
+@bp.route('/leave_all', methods=['POST'])
 @login_required
 def community_leave_all():
     all_communities = Community.query.filter_by(banned=False)
     user_joined_communities = joined_communities(current_user.id)
-    user_moderating_communities = moderating_communities(current_user.id)
     # get the joined community ids list
     joined_ids = []
     for jc in user_joined_communities:
         joined_ids.append(jc.id)
-    for mc in user_moderating_communities:
-        joined_ids.append(mc.id)
     # filter down to just the joined communities
     communities = all_communities.filter(Community.id.in_(joined_ids))
 
     for community in communities.all():
         subscription = community_membership(current_user, community)
-        if subscription:
+        if subscription is not False and subscription < SUBSCRIPTION_MODERATOR:
+            # send leave requests to celery - also handles db commits and cache busting
+            leave_community(community_id=community.id, src=SRC_WEB, bulk_leave=True)
+    
+    joined_feed_ids = subscribed_feeds(current_user.id)
+
+    if joined_feed_ids:
+        for feed_id in joined_feed_ids:
+            feed = Feed.query.get(feed_id)
+            subscription = feed_membership(current_user, feed)
             if subscription != SUBSCRIPTION_OWNER:
-                # Undo the Follow
-                if not community.is_local():
-                    if not community.instance.gone_forever:
-                        follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{gibberish(15)}"
-                        if community.instance.domain == 'ovo.st':
-                            join_request = CommunityJoinRequest.query.filter_by(user_id=current_user.id,
-                                                                                community_id=community.id).first()
-                            if join_request:
-                                follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.uuid}"
-                        undo_id = f"https://{current_app.config['SERVER_NAME']}/activities/undo/" + gibberish(15)
-                        follow = {
-                            "actor": current_user.public_url(),
-                            "to": [community.public_url()],
-                            "object": community.public_url(),
-                            "type": "Follow",
-                            "id": follow_id
-                        }
-                        undo = {
-                            'actor': current_user.public_url(),
-                            'to': [community.public_url()],
-                            'type': 'Undo',
-                            'id': undo_id,
-                            'object': follow
-                        }
-                        send_post_request(community.ap_inbox_url, undo, current_user.private_key,
-                                          current_user.public_url() + '#main-key', timeout=10)
+                # send leave requests to celery - also handles db commits and cache busting
+                leave_feed(feed=feed, src=SRC_WEB, bulk_leave=True)
+    
+    flash(_('You are being unsubscribed from all communities and feeds. '
+            'Please allow a couple minutes for the process to complete.'))
 
-                db.session.query(CommunityMember).filter_by(user_id=current_user.id, community_id=community.id).delete()
-                db.session.query(CommunityJoinRequest).filter_by(user_id=current_user.id,
-                                                                 community_id=community.id).delete()
-                cache.delete_memoized(community_membership, current_user, community)
-                db.session.commit()
-
-    return redirect(url_for('main.list_communities'))
+    return redirect(url_for('user.edit_profile', actor=current_user.user_name))
 
 
 @bp.route('/<actor>/invite', methods=['GET', 'POST'])
@@ -2540,26 +2543,22 @@ def fixup_from_remote(actor: str):
     return redirect(url_for('activitypub.community_profile', actor=actor))
 
 
-@bp.route('/c/<actor>/rate_moderation', methods=['GET', 'POST'])
+@bp.route('/c/<actor>/rate', methods=['GET', 'POST'])
 @login_required
 @validation_required
 @approval_required
-def rate_moderation(actor: str):
+def rate(actor: str):
 
-    form = RateCommunityModsForm()
+    form = RateCommunityForm()
 
     community = actor_to_community(actor)
-
-    if current_user.created_very_recently() and not current_user.is_admin():
-        flash(_('Sorry your account is too new to do this.'), 'warning')
-        return redirect(referrer())
 
     if community is not None:
         if form.validate_on_submit():
             try:
-                rate_community_moderation(community.id, form.rating.data, SRC_WEB)
+                rate_community(community.id, form.rating.data, SRC_WEB)
             except Exception as e:
-                if str(e) == 'community_members_only':
+                if str(e) == 'community_members_only' or str(e) == 'wait_one_day':
                     return redirect(url_for('community.rate_moderation_denied'))
                 else:
                     raise e
@@ -2579,7 +2578,7 @@ def community_ratings(actor: str):
         return render_template('community/ratings.html',
                                ratings=ratings,
                                community=community,
-                               title=_('%(community_name)s moderation ratings', community_name=community.display_name()),
+                               title=_('%(community_name)s ratings', community_name=community.display_name()),
                                is_admin_or_staff=current_user.is_authenticated and current_user.is_admin_or_staff())
 
 
@@ -2588,4 +2587,4 @@ def community_ratings(actor: str):
 @validation_required
 @approval_required
 def rate_moderation_denied():
-    return render_template('generic_message.html', title=_('Access denied'), message=_('Only community members can rate the moderation of a community.'))
+    return render_template('generic_message.html', title=_('Please try again tomorrow'), message=_('You can rate a community once you’ve been part of it for a while.'))

@@ -58,8 +58,10 @@
                 <div id="image_div" class="community_header mb-4" style="display: none; height: 240px; background-image: url({{ community.header_image() }});"></div>
             {% endif %}
             {{ render_field(form.nsfw) }}
+            {{ render_field(form.ai_generated) }}
             {{ render_field(form.restricted_to_mods) }}
             {{ render_field(form.local_only) }}
+            {{ render_field(form.question_answer) }}
             {{ render_field(form.new_mods_wanted) }}
             {{ render_field(form.downvote_accept_mode) }}
             {{ render_field(form.topic) }}
@@ -67,15 +69,9 @@
             {{ render_field(form.default_layout) }}
             {{ render_field(form.default_post_type) }}
             {{ render_field(form.post_url_type) }}
-            <ul>
-                <li>
-                    <small class="field_hint">{{ _('Friendly urls are of the form /c/community_name/p/1234/post_title') }}</small>
-                </li>
-                <li>
-                    <small class="field_hint">{{ _('Post id urls are of the form /post/1234') }}</small>
-                </li>
-            </ul>
-            <div class="row mb-4">
+            <small class="field_hint">{{ _('Some languages, e.g. Japanese, do not work well with friendly urls.') }}</small>
+
+            <div class="row mb-4 mt-4">
                 <div class="col-auto">
                     {{ render_field(form.submit) }}
                 </div>

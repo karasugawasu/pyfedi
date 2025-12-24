@@ -17,6 +17,7 @@ import pytesseract
 from PIL import Image, ImageOps
 from flask import current_app, request, g, url_for, json
 from flask_babel import _, force_locale, gettext
+from furl import furl
 from sqlalchemy import text, Integer
 from sqlalchemy.exc import IntegrityError
 
@@ -26,7 +27,7 @@ from app.constants import *
 from app.models import User, Post, Community, File, PostReply, Instance, utcnow, \
     PostVote, PostReplyVote, ActivityPubLog, Notification, Site, CommunityMember, InstanceRole, Report, Conversation, \
     Language, Tag, Poll, PollChoice, CommunityBan, CommunityJoinRequest, NotificationSubscription, \
-    Licence, UserExtraField, Feed, FeedMember, FeedItem, CommunityFlair, UserFlair, Topic, Event
+    Licence, UserExtraField, Feed, FeedMember, FeedItem, CommunityFlair, UserFlair, Topic, Event, InstanceBan, Emoji
 from app.utils import get_request, allowlist_html, get_setting, ap_datetime, markdown_to_html, \
     is_image_url, domain_from_url, gibberish, ensure_directory_exists, head_request, \
     shorten_string, fixup_url, \
@@ -34,7 +35,8 @@ from app.utils import get_request, allowlist_html, get_setting, ap_datetime, mar
     notification_subscribers, communities_banned_from, html_to_text, add_to_modlog, joined_communities, \
     moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse, mastodon_extra_field_link, \
     blocked_users, piefed_markdown_to_lemmy_markdown, store_files_in_s3, guess_mime_type, get_recipient_language, \
-    patch_db_session, to_srgb, communities_banned_from_all_users, blocked_communities, blocked_instances
+    patch_db_session, to_srgb, communities_banned_from_all_users, blocked_communities, blocked_or_banned_instances, \
+    instance_community_ids, banned_instances
 
 from bs4 import BeautifulSoup
 
@@ -146,6 +148,7 @@ def post_to_page(post: Post):
         "attachment": [],
         "commentsEnabled": post.comments_enabled,
         "sensitive": post.nsfw or post.nsfl,
+        "genAI": post.ai_generated,
         "published": ap_datetime(post.created_at),
         "stickied": post.sticky,
         "audience": post.community.public_url(),
@@ -244,7 +247,8 @@ def comment_model_to_json(reply: PostReply) -> dict:
             'name': reply.language_name()
         },
         'flair': reply.author.community_flair(reply.community_id),
-        'repliesEnabled': reply.replies_enabled
+        'repliesEnabled': reply.replies_enabled,
+        'answer': reply.answer
     }
     if reply.edited_at:
         reply_data['updated'] = ap_datetime(reply.edited_at)
@@ -295,7 +299,7 @@ def find_actor_or_create(actor: str, create_if_not_found=True, community_only=Fa
         return None
 
 
-@cache.memoize(timeout=300)  # 5 minutes
+@cache.memoize(timeout=600)  # 10 minutes
 def _find_actor_id_cached(actor_url: str, community_only: bool, feed_only: bool) -> Union[Tuple[int, str], None]:
     """Cache only the actor ID and type, not the full SQLAlchemy model (cache.memoize cannot do DB models).
     Returns a tuple of (id, class_name) or None if not found, to avoid Redis serialization issues with SQLAlchemy models.
@@ -350,15 +354,12 @@ def find_actor_or_create_cached(actor: str, create_if_not_found=True, community_
             return actor_obj
 
     # Not in cache - fall back to the original function
-    if create_if_not_found:
-        actor_obj = find_actor_or_create(actor_url, create_if_not_found=True, community_only=community_only, feed_only=feed_only)
-        # Cache the newly created actor for next time
-        if actor_obj:
-            cache.set(f"_find_actor_id_cached({actor_url},{community_only},{feed_only})",
-                     (actor_obj.id, actor_obj.__class__.__name__), timeout=300)
-        return actor_obj
-
-    return None
+    actor_obj = find_actor_or_create(actor_url, create_if_not_found=create_if_not_found, community_only=community_only, feed_only=feed_only)
+    # Cache the actor for next time
+    if actor_obj:
+        cache.set(f"_find_actor_id_cached({actor_url},{community_only},{feed_only})",
+                 (actor_obj.id, actor_obj.__class__.__name__), timeout=600)
+    return actor_obj
 
 
 def find_language(code: str) -> Language | None:
@@ -490,6 +491,13 @@ def find_flair_or_create(flair: dict, community_id: int, session=None) -> Commun
             return new_flair
         else:
             return None
+
+
+def find_flair(flair: str, community_id: int, session=None) -> CommunityFlair | None:
+    if session is None:
+        session = db.session
+    return session.query(CommunityFlair).\
+        filter(CommunityFlair.flair == flair, CommunityFlair.community_id == community_id).first()
 
 
 def update_community_flair_from_tags(community: Community, flair_tags: list, session=None):
@@ -735,6 +743,8 @@ def refresh_community_profile_task(community_id, activity_json):
                     community.restricted_to_mods = activity_json['postingRestrictedToMods'] if 'postingRestrictedToMods' in activity_json else False
                     community.new_mods_wanted = activity_json['newModsWanted'] if 'newModsWanted' in activity_json else False
                     community.private_mods = activity_json['privateMods'] if 'privateMods' in activity_json else False
+                    community.question_answer = activity_json['questionAnswer'] if 'questionAnswer' in activity_json else False
+                    community.default_post_type = activity_json['defaultPostType'] if 'default_post_type' in activity_json else 'link'
                     community.ap_moderators_url = mods_url
                     if 'followers' in activity_json:
                         community.ap_followers_url = activity_json['followers']
@@ -796,6 +806,8 @@ def refresh_community_profile_task(community_id, activity_json):
                             new_language = find_language_or_create(ap_language['identifier'], ap_language['name'], session)
                             if new_language not in community.languages:
                                 community.languages.append(new_language)
+                    if 'genAI' in activity_json and not community.ignore_remote_gen_ai:
+                        community.ai_generated = activity_json['genAI']
                     instance = session.query(Instance).get(community.instance_id)
                     if instance and instance.software == 'peertube':
                         community.restricted_to_mods = True
@@ -1152,9 +1164,12 @@ def actor_json_to_model(activity_json, address, server):
         community = Community(name=activity_json['preferredUsername'].strip(),
                               title=activity_json['name'].strip(),
                               nsfw=activity_json['sensitive'] if 'sensitive' in activity_json else False,
+                              ai_generated=activity_json['genAI'] if 'genAI' in activity_json else False,
                               restricted_to_mods=activity_json['postingRestrictedToMods'] if 'postingRestrictedToMods' in activity_json else False,
                               new_mods_wanted=activity_json['newModsWanted'] if 'newModsWanted' in activity_json else False,
                               private_mods=activity_json['privateMods'] if 'privateMods' in activity_json else False,
+                              question_answer=activity_json['questionAnswer'] if 'questionAnswer' in activity_json else False,
+                              default_post_type=activity_json['defaultPostType'] if 'defaultPostType' in activity_json else 'link',
                               created_at=activity_json['published'] if 'published' in activity_json else utcnow(),
                               last_active=activity_json['updated'] if 'updated' in activity_json else utcnow(),
                               posting_warning=activity_json['postingWarning'] if 'postingWarning' in activity_json else None,
@@ -1171,7 +1186,8 @@ def actor_json_to_model(activity_json, address, server):
                               public_key=activity_json['publicKey']['publicKeyPem'],
                               # language=community_json['language'][0]['identifier'] # todo: language
                               instance_id=find_instance_id(server),
-                              content_retention=current_app.config['DEFAULT_CONTENT_RETENTION']
+                              content_retention=current_app.config['DEFAULT_CONTENT_RETENTION'],
+                              first_federated_at=utcnow(),
                               )
         if get_setting('meme_comms_low_quality', False):
             community.low_quality = 'memes' in activity_json['preferredUsername'] or 'shitpost' in activity_json['preferredUsername']
@@ -1377,11 +1393,14 @@ def actor_json_to_model(activity_json, address, server):
             db.session.commit()
 
         # add the communities from the remote /following list as feeditems
-        for c in feed_following:
-            fi = FeedItem(feed_id=feed.id, community_id=c.id)
-            feed.num_communities += 1
-            db.session.add(fi)
-            db.session.commit()
+        feed = db.session.query(Feed).filter_by(ap_profile_id=activity_json['id'].lower()).first()
+        if feed:
+            for c in feed_following:
+                fi = FeedItem(feed_id=feed.id,
+                            community_id=c.id)
+                feed.num_communities += 1
+                db.session.add(fi)
+                db.session.commit()
 
         if feed.icon_id:
             make_image_sizes(feed.icon_id, 60, 250, 'feeds')
@@ -1889,10 +1908,13 @@ def delete_post_or_comment(deletor, to_delete, store_ap_json, request_json, reas
             with redis_client.lock(f"lock:post:{to_delete.id}", timeout=10, blocking_timeout=6):
                 to_delete.deleted = True
                 to_delete.deleted_by = deletor.id
-                community.post_count -= 1
-                to_delete.author.post_count -= 1
+                db.session.commit()
                 if to_delete.url and to_delete.cross_posts is not None:
                     to_delete.calculate_cross_posts(delete_only=True)
+            with redis_client.lock(f"lock:community:{community.id}", timeout=10, blocking_timeout=6):
+                community.post_count -= 1
+            with redis_client.lock(f"lock:user:{to_delete.user_id}", timeout=10, blocking_timeout=6):
+                to_delete.author.post_count -= 1
                 db.session.commit()
             if to_delete.author.id != deletor.id:
                 add_to_modlog('delete_post', actor=deletor, target_user=to_delete.author, reason=reason,
@@ -1910,14 +1932,21 @@ def delete_post_or_comment(deletor, to_delete, store_ap_json, request_json, reas
             with redis_client.lock(f"lock:post_reply:{to_delete.id}", timeout=10, blocking_timeout=6):
                 to_delete.deleted = True
                 to_delete.deleted_by = deletor.id
-                to_delete.author.post_reply_count -= 1
-                community.post_reply_count -= 1
-                if not to_delete.author.bot:
-                    to_delete.post.reply_count -= 1
                 if to_delete.path:
                     db.session.execute(text('update post_reply set child_count = child_count - 1 where id in :parents'),
                                        {'parents': tuple(to_delete.path[:-1])})
                 db.session.commit()
+            with redis_client.lock(f"lock:user:{to_delete.user_id}", timeout=10, blocking_timeout=6):
+                to_delete.author.post_reply_count -= 1
+                db.session.commit()
+                if not to_delete.author.bot:
+                    with redis_client.lock(f"lock:post:{to_delete.id}", timeout=10, blocking_timeout=6):
+                        to_delete.post.reply_count -= 1
+                        db.session.commit()
+            with redis_client.lock(f"lock:community:{community.id}", timeout=10, blocking_timeout=6):
+                community.post_reply_count -= 1
+                db.session.commit()
+
             if to_delete.author.id != deletor.id:
                 add_to_modlog('delete_post_reply', actor=deletor, target_user=to_delete.author, reason=reason,
                               community=community, post=to_delete.post, reply=to_delete,
@@ -2042,58 +2071,43 @@ def community_ban_remove_data(blocker_id, community_id, blocked):
 
 
 def ban_user(blocker, blocked, community, core_activity):
-    existing = CommunityBan.query.filter_by(community_id=community.id, user_id=blocked.id).first()
-    if not existing:
-        new_ban = CommunityBan(community_id=community.id, user_id=blocked.id, banned_by=blocker.id)
+    if community is None:   # instance-wide ban
+        target = core_activity['target']
         if 'summary' in core_activity:
             reason = core_activity['summary']
         else:
             reason = ''
-        new_ban.reason = shorten_string(reason, 255)
+        reason = shorten_string(reason, 255)
 
-        ban_until = None
-        if 'expires' in core_activity:
-            try:
-                ban_until = datetime.fromisoformat(core_activity['expires'])
-            except ValueError:
-                ban_until = arrow.get(core_activity['expires']).datetime
-        elif 'endTime' in core_activity:
-            try:
-                ban_until = datetime.fromisoformat(core_activity['endTime'])
-            except ValueError:
-                ban_until = arrow.get(core_activity['endTime']).datetime
-
-        if ban_until:
-            # Ensure ban_until is timezone-aware for comparison
-            if ban_until.tzinfo is None:
-                ban_until = ban_until.replace(tzinfo=timezone.utc)
-            if ban_until > datetime.now(timezone.utc):
-                new_ban.ban_until = ban_until
-
-        db.session.add(new_ban)
-
-        community_membership_record = CommunityMember.query.filter_by(community_id=community.id,
-                                                                      user_id=blocked.id).first()
-        if community_membership_record:
-            community_membership_record.is_banned = True
-        db.session.commit()
+        instance_id = find_instance_id(furl(target).host)
+        existing_ban = db.session.query(InstanceBan).filter(InstanceBan.user_id == blocked.id,
+                                                            InstanceBan.instance_id == instance_id).first()
+        if not existing_ban:
+            instance_ban = InstanceBan(user_id=blocked.id, instance_id=instance_id)
+            if 'expires' in core_activity:
+                instance_ban.banned_until = datetime.fromisoformat(core_activity['expires'])
+            elif 'endTime' in core_activity:
+                instance_ban.banned_until = datetime.fromisoformat(core_activity['endTime'])
+            db.session.add(instance_ban)
+            db.session.commit()
 
         if blocked.is_local():
-            db.session.query(CommunityJoinRequest).filter(CommunityJoinRequest.community_id == community.id,
+            communities = instance_community_ids(instance_id)
+            db.session.query(CommunityJoinRequest).filter(CommunityJoinRequest.community_id.in_(communities),
                                                           CommunityJoinRequest.user_id == blocked.id).delete()
 
             # Notify banned person
-            targets_data = {'gen': '0', 'community_id': community.id}
-            notify = Notification(title=shorten_string('You have been banned from ' + community.title),
-                                  url=f'/chat/ban_from_mod/{blocked.id}/{community.id}', user_id=blocked.id,
-                                  author_id=blocker.id, notif_type=NOTIF_BAN, subtype='user_banned_from_community',
+            targets_data = {'gen': '0', 'instance_id': instance_id}
+            notify = Notification(title=shorten_string('You have been banned from ' + target),
+                                  url=f'/chat/ban_from_mod/{blocked.id}/{instance_id}', user_id=blocked.id,
+                                  author_id=blocker.id, notif_type=NOTIF_BAN, subtype='user_banned_from_instance',
                                   targets=targets_data)
             db.session.add(notify)
             if not current_app.debug:  # user.unread_notifications += 1 hangs app if 'user' is the same person
                 blocked.unread_notifications += 1  # who pressed 'Re-submit this activity'.
 
             # Remove their notification subscription,  if any
-            db.session.query(NotificationSubscription).filter(NotificationSubscription.entity_id == community.id,
+            db.session.query(NotificationSubscription).filter(NotificationSubscription.entity_id.in_(communities),
                                                               NotificationSubscription.user_id == blocked.id,
                                                               NotificationSubscription.type == NOTIF_COMMUNITY).delete()
             db.session.commit()
@@ -2102,9 +2116,75 @@ def ban_user(blocker, blocked, community, core_activity):
             cache.delete_memoized(communities_banned_from_all_users)
             cache.delete_memoized(joined_communities, blocked.id)
             cache.delete_memoized(moderating_communities, blocked.id)
+            cache.delete_memoized(banned_instances, blocked.id)
+            cache.delete_memoized(blocked_or_banned_instances, blocked.id)
 
         add_to_modlog('ban_user', actor=blocker, target_user=blocked, reason=reason,
-                      community=community, link_text=blocked.display_name(), link=f'u/{blocked.link()}')
+                      link_text=blocked.display_name(), link=f'u/{blocked.link()}')
+    else:
+        existing = CommunityBan.query.filter_by(community_id=community.id, user_id=blocked.id).first()
+        if not existing:
+            new_ban = CommunityBan(community_id=community.id, user_id=blocked.id, banned_by=blocker.id)
+            if 'summary' in core_activity:
+                reason = core_activity['summary']
+            else:
+                reason = ''
+            new_ban.reason = shorten_string(reason, 255)
+
+            ban_until = None
+            if 'expires' in core_activity:
+                try:
+                    ban_until = datetime.fromisoformat(core_activity['expires'])
+                except ValueError:
+                    ban_until = arrow.get(core_activity['expires']).datetime
+            elif 'endTime' in core_activity:
+                try:
+                    ban_until = datetime.fromisoformat(core_activity['endTime'])
+                except ValueError:
+                    ban_until = arrow.get(core_activity['endTime']).datetime
+
+            if ban_until:
+                # Ensure ban_until is timezone-aware for comparison
+                if ban_until.tzinfo is None:
+                    ban_until = ban_until.replace(tzinfo=timezone.utc)
+                if ban_until > datetime.now(timezone.utc):
+                    new_ban.ban_until = ban_until
+
+            db.session.add(new_ban)
+
+            community_membership_record = CommunityMember.query.filter_by(community_id=community.id,
+                                                                          user_id=blocked.id).first()
+            if community_membership_record:
+                community_membership_record.is_banned = True
+            db.session.commit()
+
+            if blocked.is_local():
+                db.session.query(CommunityJoinRequest).filter(CommunityJoinRequest.community_id == community.id,
+                                                              CommunityJoinRequest.user_id == blocked.id).delete()
+
+                # Notify banned person
+                targets_data = {'gen': '0', 'community_id': community.id}
+                notify = Notification(title=shorten_string('You have been banned from ' + community.title),
+                                      url=f'/chat/ban_from_mod/{blocked.id}/{community.id}', user_id=blocked.id,
+                                      author_id=blocker.id, notif_type=NOTIF_BAN, subtype='user_banned_from_community',
+                                      targets=targets_data)
+                db.session.add(notify)
+                if not current_app.debug:  # user.unread_notifications += 1 hangs app if 'user' is the same person
+                    blocked.unread_notifications += 1  # who pressed 'Re-submit this activity'.
+
+                # Remove their notification subscription,  if any
+                db.session.query(NotificationSubscription).filter(NotificationSubscription.entity_id == community.id,
+                                                                  NotificationSubscription.user_id == blocked.id,
+                                                                  NotificationSubscription.type == NOTIF_COMMUNITY).delete()
+                db.session.commit()
+
+                cache.delete_memoized(communities_banned_from, blocked.id)
+                cache.delete_memoized(communities_banned_from_all_users)
+                cache.delete_memoized(joined_communities, blocked.id)
+                cache.delete_memoized(moderating_communities, blocked.id)
+
+            add_to_modlog('ban_user', actor=blocker, target_user=blocked, reason=reason,
+                          community=community, link_text=blocked.display_name(), link=f'u/{blocked.link()}')
 
 
 def unban_user(blocker, blocked, community, core_activity):
@@ -2112,34 +2192,60 @@ def unban_user(blocker, blocked, community, core_activity):
         reason = core_activity['object']['summary']
     else:
         reason = ''
-    db.session.query(CommunityBan).filter(CommunityBan.community_id == community.id,
-                                          CommunityBan.user_id == blocked.id).delete()
-    community_membership_record = CommunityMember.query.filter_by(community_id=community.id, user_id=blocked.id).first()
-    if community_membership_record:
-        community_membership_record.is_banned = False
-    db.session.commit()
+    if community is None:   # instance unban
+        target = core_activity['object']['target']
+        instance_id = find_instance_id(furl(target).host)
+        db.session.query(InstanceBan).filter(InstanceBan.instance_id == instance_id, InstanceBan.user_id == blocked.id).delete()
+        db.session.commit()
+        if blocked.is_local():
+            # Notify unbanned person
+            targets_data = {'gen': '0', 'instance_id': instance_id}
+            notify = Notification(title=shorten_string('You have been unbanned from ' + target),
+                                  url=f'/chat/unban_from_mod/{blocked.id}/{instance_id}', user_id=blocked.id,
+                                  author_id=blocker.id, notif_type=NOTIF_UNBAN,
+                                  subtype='user_unbanned_from_instance',
+                                  targets=targets_data)
+            db.session.add(notify)
+            if not current_app.debug:  # user.unread_notifications += 1 hangs app if 'user' is the same person
+                blocked.unread_notifications += 1  # who pressed 'Re-submit this activity'.
 
-    if blocked.is_local():
-        # Notify unbanned person
-        targets_data = {'gen': '0', 'community_id': community.id}
-        notify = Notification(title=shorten_string('You have been unbanned from ' + community.display_name()),
-                              url=f'/chat/ban_from_mod/{blocked.id}/{community.id}', user_id=blocked.id,
-                              author_id=blocker.id, notif_type=NOTIF_UNBAN,
-                              subtype='user_unbanned_from_community',
-                              targets=targets_data)
-        db.session.add(notify)
-        if not current_app.debug:  # user.unread_notifications += 1 hangs app if 'user' is the same person
-            blocked.unread_notifications += 1  # who pressed 'Re-submit this activity'.
+            db.session.commit()
 
+            cache.delete_memoized(communities_banned_from, blocked.id)
+            cache.delete_memoized(communities_banned_from_all_users)
+            cache.delete_memoized(joined_communities, blocked.id)
+            cache.delete_memoized(moderating_communities, blocked.id)
+            cache.delete_memoized(banned_instances, blocked.id)
+            cache.delete_memoized(blocked_or_banned_instances, blocked.id)
+    else:
+        db.session.query(CommunityBan).filter(CommunityBan.community_id == community.id,
+                                              CommunityBan.user_id == blocked.id).delete()
+        community_membership_record = CommunityMember.query.filter_by(community_id=community.id, user_id=blocked.id).first()
+        if community_membership_record:
+            community_membership_record.is_banned = False
         db.session.commit()
 
-        cache.delete_memoized(communities_banned_from, blocked.id)
-        cache.delete_memoized(communities_banned_from_all_users)
-        cache.delete_memoized(joined_communities, blocked.id)
-        cache.delete_memoized(moderating_communities, blocked.id)
+        if blocked.is_local():
+            # Notify unbanned person
+            targets_data = {'gen': '0', 'community_id': community.id}
+            notify = Notification(title=shorten_string('You have been unbanned from ' + community.display_name()),
+                                  url=f'/chat/ban_from_mod/{blocked.id}/{community.id}', user_id=blocked.id,
+                                  author_id=blocker.id, notif_type=NOTIF_UNBAN,
+                                  subtype='user_unbanned_from_community',
+                                  targets=targets_data)
+            db.session.add(notify)
+            if not current_app.debug:  # user.unread_notifications += 1 hangs app if 'user' is the same person
+                blocked.unread_notifications += 1  # who pressed 'Re-submit this activity'.
 
-    add_to_modlog('unban_user', actor=blocker, target_user=blocked, reason=reason,
-                  community=community, link_text=blocked.display_name(), link=f'u/{blocked.link()}')
+            db.session.commit()
+
+            cache.delete_memoized(communities_banned_from, blocked.id)
+            cache.delete_memoized(communities_banned_from_all_users)
+            cache.delete_memoized(joined_communities, blocked.id)
+            cache.delete_memoized(moderating_communities, blocked.id)
+
+        add_to_modlog('unban_user', actor=blocker, target_user=blocked, reason=reason,
+                      community=community, link_text=blocked.display_name(), link=f'u/{blocked.link()}')
 
 
 def create_post_reply(store_ap_json, community: Community, in_reply_to, request_json: dict, user: User,
@@ -2202,6 +2308,7 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             language_id = site_language_id()
 
         distinguished = request_json['object']['distinguished'] if 'distinguished' in request_json['object'] else False
+        answer = request_json['object']['answer'] if 'answer' in request_json['object'] else False
 
         if 'attachment' in request_json['object']:
             attachment_list = []
@@ -2245,7 +2352,7 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             db.session.commit()
         try:
             post_reply = PostReply.new(user, post, parent_comment, notify_author=False, body=body, body_html=body_html,
-                                       language_id=language_id, distinguished=distinguished, request_json=request_json,
+                                       language_id=language_id, distinguished=distinguished, answer=answer, request_json=request_json,
                                        announce_id=announce_id)
             for lutn in local_users_to_notify:
                 recipient = db.session.query(User).filter_by(ap_profile_id=lutn, ap_id=None).first()
@@ -2359,7 +2466,7 @@ def notify_about_post_task(post_id):
             user_send_notifs_to = notification_subscribers(post.user_id, NOTIF_USER)
             for notify_id in user_send_notifs_to:
                 blocked_comms = blocked_communities(notify_id)
-                blocked_ints = blocked_instances(notify_id)
+                blocked_ints = blocked_or_banned_instances(notify_id)
                 if notify_id != post.user_id and notify_id not in notifications_sent_to and \
                         post.community_id not in blocked_comms and \
                         post.instance_id not in blocked_ints:
@@ -2384,7 +2491,7 @@ def notify_about_post_task(post_id):
             community_send_notifs_to = notification_subscribers(post.community_id, NOTIF_COMMUNITY)
             for notify_id in community_send_notifs_to:
                 blocked_senders = blocked_users(notify_id)
-                blocked_ints = blocked_instances(notify_id)
+                blocked_ints = blocked_or_banned_instances(notify_id)
                 if notify_id != post.user_id and notify_id not in notifications_sent_to and \
                         post.user_id not in blocked_senders and post.instance_id not in blocked_ints:
                     targets_data = {'gen': '0',
@@ -2410,7 +2517,7 @@ def notify_about_post_task(post_id):
             for notify_id in topic_send_notifs_to:
                 blocked_senders = blocked_users(notify_id)
                 blocked_comms = blocked_communities(notify_id)
-                blocked_ints = blocked_instances(notify_id)
+                blocked_ints = blocked_or_banned_instances(notify_id)
                 if notify_id != post.user_id and \
                         notify_id not in notifications_sent_to and \
                         post.user_id not in blocked_senders and \
@@ -2444,7 +2551,7 @@ def notify_about_post_task(post_id):
                 for notify_id in feed_send_notifs_to:
                     blocked_senders = blocked_users(notify_id)
                     blocked_comms = blocked_communities(notify_id)
-                    blocked_ints = blocked_instances(notify_id)
+                    blocked_ints = blocked_or_banned_instances(notify_id)
                     if notify_id != post.user_id and \
                             notify_id not in notifications_sent_to and \
                             post.user_id not in blocked_senders and \
@@ -2912,22 +3019,24 @@ def update_post_from_activity(post: Post, request_json: dict):
             len(request_json['object']['attachment']) > 0 and
             'type' in request_json['object']['attachment'][0]):
 
-        if request_json['object']['attachment'][0]['type'] == 'Link':
-            if 'href' in request_json['object']['attachment'][0]:
-                new_url = request_json['object']['attachment'][0]['href']  # Lemmy < 0.19.4
-            elif 'url' in request_json['object']['attachment'][0]:
-                new_url = request_json['object']['attachment'][0]['url']  # NodeBB
-
-        if request_json['object']['attachment'][0]['type'] == 'Document':
-            new_url = request_json['object']['attachment'][0]['url']  # Mastodon
-
-        if request_json['object']['attachment'][0]['type'] == 'Image':
-            new_url = request_json['object']['attachment'][0]['url']  # PixelFed / PieFed / Lemmy >= 0.19.4
-
-        if request_json['object']['attachment'][0]['type'] == 'Audio':  # WordPress podcast
-            new_url = request_json['object']['attachment'][0]['url']
-            if 'name' in request_json['object']['attachment'][0]:
-                post.title = request_json['object']['attachment'][0]['name']
+        for attachment in request_json['object']['attachment']:
+            if attachment['type'] == 'Link':
+                if 'href' in attachment:
+                    new_url = attachment['href']  # Lemmy < 0.19.4
+                elif 'url' in attachment:
+                    new_url = attachment['url']  # NodeBB
+                if new_url:
+                    break
+            elif attachment['type'] == 'Document':
+                new_url = attachment['url']  # Mastodon
+                if new_url:
+                    break
+            elif attachment['type'] == 'Audio':  # WordPress podcast
+                new_url = attachment['url']
+                if 'name' in attachment:
+                    post.title = attachment['name']
+                if new_url:
+                    break
         # tagにlinkが含まれてたら上書き
         if post.microblog:
             tags = request_json.get('object', {}).get('tag', [])
@@ -2947,6 +3056,11 @@ def update_post_from_activity(post: Post, request_json: dict):
                 ![{alt_text}]({new_url})
                 '''
                 new_url = None
+        # Lastly, check for image posts. Mbin sends link posts with both image and link and we want to ignore the image in that case.
+        if not new_url:
+            for attachment in request_json['object']['attachment']:
+                if attachment['type'] == 'Image':
+                    new_url = attachment['url']  # PixelFed, PieFed, Lemmy >= 0.19.4
 
     if 'attachment' in request_json['object'] and isinstance(request_json['object']['attachment'],
                                                              dict):  # Mastodon / a.gup.pe
@@ -3308,8 +3422,30 @@ def lemmy_site_data():
         })
     data['discussion_languages'] = discussion_languages
 
-    # Admins
-    for admin in Site.admins():
+    # Custom emojis (only local instance emojis)
+    local_emojis = Emoji.query.filter_by(instance_id=1).all()
+    for emoji in local_emojis:
+        # Extract shortcode from token (remove colons if present)
+        shortcode = emoji.token.strip(':') if emoji.token else ''
+
+        # Parse aliases (space-separated string) into keyword objects
+        keywords = []
+        if emoji.aliases:
+            for alias in emoji.aliases.split():
+                keywords.append({"keyword": alias})
+
+        emoji_data = {
+            "custom_emoji": {
+                "shortcode": shortcode,
+                "image_url": emoji.url,
+                "category": emoji.category if emoji.category else ""
+            },
+            "keywords": keywords
+        }
+        data['custom_emojis'].append(emoji_data)
+
+    # Admins (plus staff)
+    for admin in Site.admins() + Site.staff():
         person = {
             "id": admin.id,
             "name": admin.user_name,

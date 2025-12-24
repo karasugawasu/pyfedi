@@ -7,7 +7,7 @@
 {% set active_child = 'admin_content' %}
 {% from "_macros.html" import render_username, render_communityname %}
 {% from "post/post_teaser/_macros.html" import render_article, render_link, render_poll, render_image, render_video %}
-{% from "post/reply/_macros.html" import render_comment_voting_buttons, render_reply_notification_toggle %}
+{% from "post/reply/_macros.html" import render_comment_voting_buttons, render_reply_notification_toggle, render_emoji_button %}
 
 {% block app_content %}
 {% include 'admin/_tabbed_nav.html' %}
@@ -23,17 +23,18 @@
             </div>
             <br />
             <div>
-                <label for="posts_replies" class="form-label">Posts/Comments:</label>
+                <label for="posts_replies" class="form-label">{{ _('Posts/Comments:') }}</label>
                 <select name="posts_replies" class="form-select-sm submit_on_change">
                     <option value="">All</option>
-                    <option value="posts" {{ 'selected' if posts_replies == 'posts' }}>Posts</option>
-                    <option value="replies" {{ 'selected' if posts_replies == 'replies' }}>Comments</option>
+                    <option value="posts" {{ 'selected' if posts_replies == 'posts' }}>{{ _('Posts') }}</option>
+                    <option value="replies" {{ 'selected' if posts_replies == 'replies' }}>{{ _('Comments') }}</option>
                 </select>
                 <label for="days" class="form-label">Days:</label>
                 <select name="days" class="form-select-sm submit_on_change">
-                    <option value="3" {{ 'selected' if days == 3 }}>3 days</option>
-                    <option value="7" {{ 'selected' if days == 7 }}>7 days</option>
-                    <option value="14" {{ 'selected' if days == 14 }}>14 days</option>
+                    <option value="1" {{ 'selected' if days == 1 }}>{{ _('1 day') }}</option>
+                    <option value="3" {{ 'selected' if days == 3 }}>{{ _('3 days') }}</option>
+                    <option value="7" {{ 'selected' if days == 7 }}>{{ _('7 days') }}</option>
+                    <option value="14" {{ 'selected' if days == 14 }}>{{ _('14 days') }}</option>
                 </select>
             </div>
         </form>

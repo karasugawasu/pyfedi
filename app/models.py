@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import html
 import math
 import os
 import uuid
 import re
+from collections import defaultdict
 from datetime import datetime, timedelta
 from time import time
 from typing import List, Union
@@ -16,8 +19,9 @@ from flask_babel import _, lazy_gettext as _l
 from flask_babel import force_locale, gettext
 from flask_login import UserMixin, current_user
 from flask_sqlalchemy.query import Query
+from furl import furl
 from slugify import slugify
-from sqlalchemy import or_, text, desc, Index
+from sqlalchemy import or_, text, desc, Index, func
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.dialects.postgresql import BIT
 from sqlalchemy.exc import IntegrityError
@@ -131,6 +135,12 @@ class Instance(db.Model):
         elif self.failures > 2 and self.dormant == False:
             self.dormant = True
 
+    def can_poll(self):
+        return self.software != 'lemmy'
+
+    def can_event(self):
+        return self.software != 'lemmy'
+
     @classmethod
     def weight(cls, domain: str):
         if domain:
@@ -201,6 +211,26 @@ class Conversation(db.Model):
             if member.instance.id != 1 and member.instance not in retval:
                 retval.append(member.instance)
         return retval
+    
+    def delete_if_abandoned(self):
+        # Delete the conversation if all the participants are either remote or have left the conversation
+        keep_convo = False
+        for member in self.members:
+            if member.is_local():
+                joined = db.session.execute(text("SELECT joined FROM conversation_member WHERE user_id = :person_id AND conversation_id = :conversation_id"),
+                                            {"person_id": member.id, "conversation_id": self.id}).first()
+                
+                # Returns None or a tuple, need to make it into a bool
+                if joined and any(joined):
+                    # There is still a local user joined to this conversation, just break and don't delete the convo
+                    keep_convo = True
+                    break
+        
+        if not keep_convo:
+            # Delete the conversation
+            Report.query.filter(Report.suspect_conversation_id == self.id).delete()
+            db.session.delete(self)
+            db.session.commit()
 
     def last_ap_id(self, sender_id):
         for message in self.messages.filter(ChatMessage.sender_id == sender_id).order_by(
@@ -506,6 +536,7 @@ class Community(db.Model):
     post_reply_count = db.Column(db.Integer, default=0)
     nsfw = db.Column(db.Boolean, default=False)
     nsfl = db.Column(db.Boolean, default=False)
+    ai_generated = db.Column(db.Boolean, default=False, index=True)
     instance_id = db.Column(db.Integer, db.ForeignKey('instance.id'), index=True)
     low_quality = db.Column(db.Boolean, default=False)  # upvotes earned in low quality communities don't improve reputation
     created_at = db.Column(db.DateTime, default=utcnow)
@@ -521,8 +552,11 @@ class Community(db.Model):
     rss_url = db.Column(db.String(2048))
     can_be_archived = db.Column(db.Boolean, default=True, index=True)
     average_rating = db.Column(db.Float)
+    total_ratings = db.Column(db.Integer)
     always_translate = db.Column(db.Boolean)
     post_url_type = db.Column(db.String(15))
+    question_answer = db.Column(db.Boolean, default=False)     # if this is a stackoverflow-style question and answer community
+    first_federated_at = db.Column(db.DateTime, index=True, default=utcnow)
 
     ap_id = db.Column(db.String(255), index=True)
     ap_profile_id = db.Column(db.String(255), index=True, unique=True)
@@ -556,6 +590,7 @@ class Community(db.Model):
     show_all = db.Column(db.Boolean, default=True)
 
     ignore_remote_language = db.Column(db.Boolean, default=False)
+    ignore_remote_gen_ai = db.Column(db.Boolean, default=False)
 
     search_vector = db.Column(TSVectorType('name', 'title', 'description', 'rules', auto_index=False))
 
@@ -580,6 +615,9 @@ class Community(db.Model):
 
     def language_ids(self):
         return [language.id for language in self.languages.all()]
+
+    def language_names(self):
+        return [language.name for language in self.languages.filter(Language.code != 'und').all()]
 
     def icon_image(self, size='default') -> str:
         if self.icon_id is not None:
@@ -814,6 +852,44 @@ class Community(db.Model):
                 })
         
         return result
+    
+    @cache.memoize(timeout=300)
+    def can_rate(self, user):
+        if isinstance(user, int):
+            user = User.query.get(user)
+        
+        if not user:
+            return [False, "no user provided"]
+
+        # Returns [boolean, message] if the provided user is able to rate the community
+        if user.is_admin_or_staff():
+            return [True, ""]
+        
+        if not user.subscribed(self.id):
+            return [False, "community members only"]
+        else:
+            cm = CommunityMember.query.filter(CommunityMember.user_id == user.id, CommunityMember.community_id == self.id).first()
+            if cm and cm.created_at + timedelta(days=1) > utcnow():
+                return [False, "not subscribed for long enough"]
+            
+        return [True, ""]
+
+    def rate(self, user, rating):
+        db.session.execute(text('DELETE FROM "rating" WHERE user_id = :user_id AND community_id = :community_id'),
+                           {'user_id': user.id,
+                            'community_id': self.id})
+        db.session.add(Rating(user_id=user.id, community_id=self.id, rating=rating))
+        db.session.commit()
+        db.session.execute(text("""
+                            UPDATE "community"
+                            SET average_rating = (
+                                SELECT AVG(rating)
+                                FROM "rating"
+                                WHERE community_id = :community_id
+                            )
+                            WHERE id = :community_id
+                        """), {'community_id': self.id})
+        db.session.commit()
 
     def delete_dependencies(self):
         from app import redis_client
@@ -848,12 +924,21 @@ user_file = db.Table('user_file',
                      db.PrimaryKeyConstraint('user_id', 'file_id')
                      )
 
-# table to hold users' 'read' post ids
+# table to hold users' read post ids
 read_posts = db.Table('read_posts',
                       db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True, nullable=False),
                       db.Column('read_post_id', db.Integer, db.ForeignKey('post.id'), primary_key=True, nullable=False),
                       db.Column('interacted_at', db.DateTime, index=True, default=utcnow),
                       db.Index('ix_read_posts_user_post', 'user_id', 'read_post_id')
+                      )
+
+
+# table to hold users' hidden post ids
+hidden_posts = db.Table('hidden_posts',
+                      db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True, nullable=False),
+                      db.Column('hidden_post_id', db.Integer, db.ForeignKey('post.id'), primary_key=True, nullable=False),
+                      db.Column('interacted_at', db.DateTime, index=True, default=utcnow),
+                      db.Index('ix_hidden_posts_user_post', 'user_id', 'hidden_post_id')
                       )
 
 
@@ -893,6 +978,7 @@ class User(UserMixin, db.Model):
     matrix_user_id = db.Column(db.String(256))
     hide_nsfw = db.Column(db.Integer, default=1)
     hide_nsfl = db.Column(db.Integer, default=1)
+    hide_gen_ai = db.Column(db.Integer, default=2)      # 0 = show, 1 = hide, 2 = label, 3 = semi-transparent
     created = db.Column(db.DateTime, default=utcnow)
     last_seen = db.Column(db.DateTime, default=utcnow, index=True)
     avatar_id = db.Column(db.Integer, db.ForeignKey('file.id'), index=True)
@@ -982,6 +1068,7 @@ class User(UserMixin, db.Model):
     # this is the User side, so its referencing the Post side
     # read_by is the corresponding Post object variable
     read_post = db.relationship('Post', secondary=read_posts, back_populates='read_by', lazy='dynamic')
+    hidden_post = db.relationship('Post', secondary=hidden_posts, back_populates='hidden_by', lazy='dynamic')
 
     def __repr__(self):
         return '<User {}_{}>'.format(self.user_name, self.id)
@@ -1339,6 +1426,8 @@ class User(UserMixin, db.Model):
         if self.waiting_for_approval():
             db.session.query(UserRegistration).filter(UserRegistration.user_id == self.id).delete()
         db.session.execute(text('DELETE FROM "user_role" WHERE user_id = :user_id'), {'user_id': self.id})
+        db.session.execute(text('DELETE FROM "hidden_posts" WHERE user_id = :user_id'), {'user_id': self.id})
+        db.session.execute(text('DELETE FROM "read_posts" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.query(NotificationSubscription).filter(NotificationSubscription.user_id == self.id).delete()
         db.session.query(Filter).filter(Filter.user_id == self.id).delete()
         db.session.query(UserFlair).filter(UserFlair.user_id == self.id).delete()
@@ -1426,6 +1515,18 @@ class User(UserMixin, db.Model):
     def has_read_post(self, post):
         return self.read_post.filter(read_posts.c.read_post_id == post.id).count() > 0
 
+
+    # mark a post as 'hidden' for this user
+    def mark_post_as_hidden(self, post):
+        # check if its already marked as hidden, if not, mark it as hidden
+        if not self.has_hidden_post(post):
+            self.hidden_post.append(post)
+
+    # check if post has been hidden by this user
+    # returns true if the post has been hidden, false if not
+    def has_hidden_post(self, post):
+        return self.hidden_post.filter(hidden_posts.c.hidden_post_id == post.id).count() > 0
+
     def get_note(self, by_user):
         user_note = self.user_notes.filter(UserNote.target_id == self.id, UserNote.user_id == by_user.id).first()
         if user_note:
@@ -1469,6 +1570,7 @@ class Post(db.Model):
     nsfw = db.Column(db.Boolean, default=False, index=True)
     nsfl = db.Column(db.Boolean, default=False, index=True)
     sticky = db.Column(db.Boolean, default=False, index=True)
+    ai_generated = db.Column(db.Boolean, default=False, index=True)
     notify_author = db.Column(db.Boolean, default=True)
     indexable = db.Column(db.Boolean, default=True)
     from_bot = db.Column(db.Boolean, default=False, index=True)
@@ -1487,6 +1589,7 @@ class Post(db.Model):
     scheduled_for = db.Column(db.DateTime, index=True)  # The first (or only) occurrence of this post
     repeat = db.Column(db.String(20), default='')  # 'daily', 'weekly', 'monthly'. Empty string = no repeat, just post once.
     stop_repeating = db.Column(db.DateTime, index=True)  # No more repeats after this datetime
+    emoji_reactions = db.Column(db.JSON)            # a cache of the emoji reactions a post has received, to avoid joins
     tags = db.relationship('Tag', lazy='joined', secondary=post_tag, backref=db.backref('posts', lazy='dynamic'))
     timezone = db.Column(db.String(30))
     archived = db.Column(db.String(100))
@@ -1508,16 +1611,17 @@ class Post(db.Model):
     language = db.relationship('Language', foreign_keys=[language_id], lazy='joined')
     licence = db.relationship('Licence', foreign_keys=[licence_id])
     modlog = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.post_id", back_populates='post')
-    event = db.relationship('Event', uselist=False, backref='post', cascade='all, delete-orphan')
+    event = db.relationship('Event', uselist=False, backref='post', lazy='select', cascade='all, delete-orphan')
     gallery = db.relationship('File', secondary=post_file, lazy='dynamic')
     votes = db.relationship('PostVote', lazy='dynamic', backref='post', cascade='all, delete-orphan', passive_deletes=True)
-    bookmarks = db.relationship('PostBookmark', backref='post', cascade='all, delete-orphan')
-    poll = db.relationship('Poll', uselist=False, backref='post', cascade='all, delete-orphan')
+    bookmarks = db.relationship('PostBookmark', backref='post', lazy='dynamic', cascade='all, delete-orphan')
+    poll = db.relationship('Poll', uselist=False, backref='post', lazy='select', cascade='all, delete-orphan')
 
     # db relationship tracked by the "read_posts" table
     # this is the Post side, so its referencing the User side
     # read_post is the corresponding User object variable
     read_by = db.relationship('User', secondary=read_posts, back_populates='read_post', lazy='dynamic')
+    hidden_by = db.relationship('User', secondary=hidden_posts, back_populates='hidden_post', lazy='dynamic')
 
     __table_args__ = (
         db.Index(
@@ -1584,6 +1688,7 @@ class Post(db.Model):
                     sticky=request_json['object']['stickied'] if 'stickied' in request_json['object'] else False,
                     nsfw=request_json['object']['sensitive'] if 'sensitive' in request_json['object'] else False,
                     nsfl=request_json['object']['nsfl'] if 'nsfl' in request_json['object'] else nsfl_in_title,
+                    ai_generated=request_json['object']['genAI'] if 'genAI' in request_json['object'] else False,
                     ap_id=request_json['object']['id'],
                     ap_create_id=request_json['id'],
                     ap_announce_id=announce_id,
@@ -1601,6 +1706,8 @@ class Post(db.Model):
             post.nsfw = True  # old Lemmy instances ( < 0.19.8 ) allow nsfw content in nsfw communities to be flagged as sfw which makes no sense
         if community.nsfl:
             post.nsfl = True
+        if community.ai_generated:
+            post.ai_generated = True
         if 'content' in request_json['object'] and request_json['object']['content'] is not None:
             # prefer Markdown in 'source' in provided
             if 'source' in request_json['object'] and isinstance(request_json['object']['source'], dict) and \
@@ -1731,6 +1838,25 @@ class Post(db.Model):
                 post.image = image
             elif is_video_url(post.url) or is_video_hosting_site(post.url):
                 post.type = constants.POST_TYPE_VIDEO
+            elif post.url.startswith('https://pixelfed.social') or post.url.startswith('pixelfed.uno'):
+                post.type = constants.POST_TYPE_IMAGE
+                opengraph = opengraph_parse(thumbnail_url)
+                if opengraph and (opengraph.get('og:image', '') != '' or opengraph.get('og:image:url', '') != ''):
+                    filename = opengraph.get('og:image') or opengraph.get('og:image:url')
+                    if not filename.startswith('/'):
+                        file = File(source_url=filename, alt_text=shorten_string(opengraph.get('og:title'), 295))
+                        post.image = file
+                        db.session.add(file)
+            elif post.url.startswith('https://loops.video'):
+                post.type = constants.POST_TYPE_VIDEO
+                opengraph = opengraph_parse(thumbnail_url)
+                if opengraph and (opengraph.get('og:image', '') != '' or opengraph.get('og:image:url', '') != ''):
+                    filename = opengraph.get('og:image') or opengraph.get('og:image:url')
+                    if not filename.startswith('/'):
+                        filename = filename.replace('.jpg', '.720p.mp4')
+                        file = File(source_url=filename, alt_text=shorten_string(opengraph.get('og:title'), 295))
+                        post.image = file
+                        db.session.add(file)
             else:
                 post.type = constants.POST_TYPE_LINK
             if 'blogspot.com' in post.url:
@@ -1936,6 +2062,55 @@ class Post(db.Model):
             post.generate_slug(community)
             db.session.commit()
 
+            # check new accounts to see if their comments are AI generated
+            if current_app.config['DETECT_AI_ENDPOINT'] and user.created_very_recently() and len(post.body) > 250:
+                from app.utils import get_request, notify_admin
+                is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={post.ap_id}")
+                if is_ai and is_ai.status_code == 200:
+                    is_ai_result = is_ai.json()
+                    if is_ai_result['confidence'] > 0.8:
+                        # use redis to keep track of the posts this person has done in the last day and whether each is AI-generated
+                        from app import redis_client
+
+                        redis_key = f"ai_detection:user:{user.id}"
+                        now = time()
+
+                        # Store each detection as a JSON entry with timestamp
+                        detection_data = {
+                            'detection': is_ai_result['detection_result'],
+                            'confidence': is_ai_result['confidence'],
+                            'timestamp': utcnow().isoformat()
+                        }
+
+                        # Add with timestamp as score
+                        redis_client.zadd(redis_key, {json.dumps(detection_data): now})
+
+                        # Remove entries older than 24h
+                        redis_client.zremrangebyscore(redis_key, 0, now - 86400)
+
+                        # Get all recent detections
+                        detections = redis_client.zrange(redis_key, 0, -1)
+                        if len(detections) >= 3:
+                            ai_count = sum(1 for d in detections if json.loads(d)['detection'] != 'human')
+                            ai_percentage = ai_count / len(detections)
+
+                            # if there are 3 or more posts and > 66% of them are ai generated
+                            if ai_percentage > 0.66:
+                                user.banned = True  # ban
+                                db.session.commit()
+
+                                # notify admin
+                                targets_data = {'gen': '0',
+                                                'suspect_user_id': user.id,
+                                                'suspect_user_user_name': user.ap_id if user.ap_id else user.user_name,
+                                                'source_instance_id': 1,
+                                                'source_instance_domain': '',
+                                                'reporter_id': 1,
+                                                'reporter_user_name': 'automated'
+                                                }
+                                notify_admin('User auto-banned for AI-generated content', f'/u/{user.link()}', 1,
+                                             NOTIF_REPORT, 'user_reported', targets_data)
+
         return post
 
     def calculate_cross_posts(self, delete_only=False, url_changed=False):
@@ -1992,6 +2167,9 @@ class Post(db.Model):
 
         # Delete event_user entries (association table, no cascade relationship)
         db.session.execute(text('DELETE FROM "event_user" WHERE post_id = :post_id'), {'post_id': self.id})
+
+        db.session.execute(text('DELETE FROM "hidden_posts" WHERE hidden_post_id = :post_id'), {'post_id': self.id})
+        db.session.execute(text('DELETE FROM "read_posts" WHERE read_post_id = :post_id'), {'post_id': self.id})
 
         # Handle file deletions from disk before cascade deletes the File records
         if self.image_id and self.image:
@@ -2059,6 +2237,9 @@ class Post(db.Model):
                 return f'{video_id}'
 
         return ''
+
+    def url_domain(self):
+        return 'https://' + furl(self.url).host + '/'
 
     def generate_ap_id(self, community: Community):
         if not community.post_url_type or community.post_url_type == 'friendly':
@@ -2200,7 +2381,7 @@ class Post(db.Model):
         seconds = self.epoch_seconds(post_date) - 1685766018
         return round(sign * order + seconds / 45000, 7)
 
-    def vote(self, user: User, vote_direction: str):
+    def vote(self, user: User, vote_direction: str, emoji: str | None):
         from app import redis_client
         if vote_direction == 'downvote':
             if self.author.has_blocked_user(user.id) or self.author.has_blocked_instance(user.instance_id):
@@ -2215,6 +2396,15 @@ class Post(db.Model):
             assert vote_direction == 'upvote' or vote_direction == 'downvote'
             undo = None
             if existing_vote:
+                # If emoji is provided and vote direction matches existing vote, just update the emoji
+                if emoji and ((existing_vote.effect > 0 and vote_direction == 'upvote') or
+                             (existing_vote.effect < 0 and vote_direction == 'downvote')):
+                    existing_vote.emoji = emoji
+                    db.session.commit()
+                    self.update_reaction_cache()
+                    db.session.commit()
+                    return None  # No undo, vote stays as-is with new emoji
+
                 with redis_client.lock(f"lock:vote:{existing_vote.id}", timeout=10, blocking_timeout=6):
                     if not self.community.low_quality:
                         with redis_client.lock(f"lock:user:{self.user_id}", timeout=10, blocking_timeout=6):
@@ -2231,6 +2421,7 @@ class Post(db.Model):
                             undo = 'Like'
                         else:  # new vote is down while previous vote was up, so reverse their previous vote
                             existing_vote.effect = -1
+                            existing_vote.emoji = emoji
                             db.session.commit()
                             self.up_votes -= 1
                             self.down_votes += 1
@@ -2244,6 +2435,7 @@ class Post(db.Model):
                             undo = 'Dislike'
                         else:  # new vote is up while previous vote was down, so reverse their previous vote
                             existing_vote.effect = 1
+                            existing_vote.emoji = emoji
                             db.session.commit()
                             self.up_votes += 1
                             self.down_votes -= 1
@@ -2277,7 +2469,7 @@ class Post(db.Model):
                         effect = spicy_effect = 0
                     self.score += spicy_effect  # score + (-1) = score-1
                 vote = PostVote(user_id=user.id, post_id=self.id, author_id=self.author.id,
-                                effect=effect)
+                                effect=effect, emoji=emoji)
                 # upvotes do not increase reputation in low quality communities
                 if self.community.low_quality and effect > 0:
                     effect = 0
@@ -2286,6 +2478,10 @@ class Post(db.Model):
                                        {'effect': effect, 'user_id': self.user_id})
                     db.session.commit()
                 db.session.add(vote)
+
+            if emoji or emoji == '-1':
+                db.session.commit()
+                self.update_reaction_cache()
 
             # Calculate new ranking values
             self.ranking = self.post_ranking(self.score, self.created_at)
@@ -2297,6 +2493,27 @@ class Post(db.Model):
                 cache.delete_memoized(recently_upvoted_posts, user.id)
                 cache.delete_memoized(recently_downvoted_posts, user.id)
         return undo
+
+    def update_reaction_cache(self):
+        count = func.count(PostVote.id).label("count")
+        # Use LEFT JOIN so unicode emojis (not in Emoji table) are included
+        rows = db.session.query(PostVote.emoji, Emoji.url, count,
+                                func.array_agg(User.user_name).label("authors")).\
+            outerjoin(Emoji, PostVote.emoji == Emoji.token).\
+            join(User, User.id == PostVote.user_id).\
+            filter(PostVote.post_id == self.id, PostVote.emoji.isnot(None)).\
+            group_by(PostVote.emoji, Emoji.url).\
+            order_by(count.desc()).all()
+
+        self.emoji_reactions = [
+            {
+                "url": url if url else '',  # None for unicode emoji, URL for custom emoji
+                "token": emoji,  # The actual emoji value (unicode or :token:)
+                "authors": authors,
+                "count": count,
+            }
+            for emoji, url, count, authors in rows
+        ]
 
 
 class PostReply(db.Model):
@@ -2334,6 +2551,8 @@ class PostReply(db.Model):
     language_id = db.Column(db.Integer, db.ForeignKey('language.id'), index=True)
     edited_at = db.Column(db.DateTime)
     reports = db.Column(db.Integer, default=0)  # how many times this post has been reported. Set to -1 to ignore reports
+    answer = db.Column(db.Boolean, default=False)   # this comment was designated as the best answer to a question
+    emoji_reactions = db.Column(db.JSON)            # a cache of the emoji reactions a post has received, to avoid joins
 
     ap_id = db.Column(db.String(255), index=True, unique=True)
     ap_create_id = db.Column(db.String(100))
@@ -2374,7 +2593,7 @@ class PostReply(db.Model):
     )
 
     @classmethod
-    def new(cls, user: User, post: Post, in_reply_to, body, body_html, notify_author, language_id, distinguished,
+    def new(cls, user: User, post: Post, in_reply_to, body, body_html, notify_author, language_id, distinguished, answer,
             request_json: dict = None, announce_id=None, session=None):
         from app.utils import shorten_string, blocked_phrases, recently_upvoted_post_replies, reply_already_exists, \
             reply_is_just_link_to_gif_reaction, reply_is_stupid, wilson_confidence_lower_bound
@@ -2404,6 +2623,7 @@ class PostReply(db.Model):
                           notify_author=notify_author, instance_id=user.instance_id,
                           language_id=language_id,
                           distinguished=distinguished,
+                          answer=answer,
                           ap_id=request_json['object']['id'] if request_json else None,
                           ap_create_id=request_json['id'] if request_json else None,
                           ap_announce_id=announce_id)
@@ -2481,8 +2701,23 @@ class PostReply(db.Model):
         session.execute(text('UPDATE "site" SET last_active = NOW()'))
         session.commit()
 
-        # check new accounts to see if their comments are AI generated
-        if current_app.config['DETECT_AI_ENDPOINT'] and user.created_very_recently() and len(reply.body) > 20:
+        # LLM Detection
+        if reply.body and '—' in reply.body and user.created_very_recently():
+            # usage of em-dash is highly suspect.
+            from app.utils import notify_admin
+            # notify admin
+            targets_data = {'gen': '0',
+                            'suspect_user_id': user.id,
+                            'suspect_user_user_name': user.ap_id if user.ap_id else user.user_name,
+                            'source_instance_id': 1,
+                            'source_instance_domain': '',
+                            'reporter_id': 1,
+                            'reporter_user_name': 'automated'
+                            }
+            notify_admin('Used em-dash in comment - likely AI', f'/u/{user.link()}', 1,
+                         NOTIF_REPORT, 'user_reported', targets_data)
+        elif current_app.config['DETECT_AI_ENDPOINT'] and user.created_very_recently() and len(reply.body) >= 250:
+            # Use API to check new accounts to see if their comments are AI generated
             from app.utils import get_request, notify_admin
             is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={reply.ap_id}")
             if is_ai and is_ai.status_code == 200:
@@ -2629,7 +2864,7 @@ class PostReply(db.Model):
                                                                       NotificationSubscription.type == NOTIF_REPLY).first()
         return existing_notification is not None
 
-    def vote(self, user: User, vote_direction: str):
+    def vote(self, user: User, vote_direction: str, emoji: str):
         from app import redis_client
         from app.utils import wilson_confidence_lower_bound
         with redis_client.lock(f"lock:post_reply:{self.id}", timeout=10, blocking_timeout=6):
@@ -2642,6 +2877,15 @@ class PostReply(db.Model):
             assert vote_direction == 'upvote' or vote_direction == 'downvote'
             undo = None
             if existing_vote:
+                # If emoji is provided and vote direction matches existing vote, just update the emoji
+                if emoji and ((existing_vote.effect > 0 and vote_direction == 'upvote') or
+                             (existing_vote.effect < 0 and vote_direction == 'downvote')):
+                    existing_vote.emoji = emoji
+                    db.session.commit()
+                    self.update_reaction_cache()
+                    db.session.commit()
+                    return None  # No undo, vote stays as-is with new emoji
+
                 with redis_client.lock(f"lock:user:{self.user_id}", timeout=10, blocking_timeout=6):
                     db.session.execute(text('UPDATE "user" SET reputation = reputation - :effect WHERE id = :user_id'),
                                        {'effect': existing_vote.effect, 'user_id': self.user_id})
@@ -2655,6 +2899,7 @@ class PostReply(db.Model):
                         undo = 'Like'
                     else:  # new vote is down while previous vote was up, so reverse their previous vote
                         existing_vote.effect = -1
+                        existing_vote.emoji = emoji
                         db.session.commit()
                         self.up_votes -= 1
                         self.down_votes += 1
@@ -2668,6 +2913,7 @@ class PostReply(db.Model):
                         undo = 'Dislike'
                     else:  # new vote is up while previous vote was down, so reverse their previous vote
                         existing_vote.effect = 1
+                        existing_vote.emoji = emoji
                         db.session.commit()
                         self.up_votes += 1
                         self.down_votes -= 1
@@ -2684,12 +2930,15 @@ class PostReply(db.Model):
                     self.down_votes += 1
                 self.score += effect
                 vote = PostReplyVote(user_id=user.id, post_reply_id=self.id, author_id=self.author.id,
-                                     effect=effect)
+                                     effect=effect, emoji=emoji)
                 with redis_client.lock(f"lock:user:{self.user_id}", timeout=10, blocking_timeout=6):
                     db.session.execute(text('UPDATE "user" SET reputation = reputation + :effect WHERE id = :user_id'),
                                        {'effect': effect, 'user_id': self.user_id})
                     db.session.commit()
                 db.session.add(vote)
+            if emoji or emoji == '-1':
+                db.session.commit()
+                self.update_reaction_cache()
 
             # Calculate the new ranking value
             self.ranking = wilson_confidence_lower_bound(self.up_votes, self.down_votes)
@@ -2699,6 +2948,27 @@ class PostReply(db.Model):
                 cache.delete_memoized(recently_upvoted_post_replies, user.id)
                 cache.delete_memoized(recently_downvoted_post_replies, user.id)
         return undo
+
+    def update_reaction_cache(self):
+        count = func.count(PostReplyVote.id).label("count")
+        # Use LEFT JOIN so unicode emojis (not in Emoji table) are included
+        rows = db.session.query(PostReplyVote.emoji, Emoji.url, count,
+                                func.array_agg(User.user_name).label("authors")).\
+            outerjoin(Emoji, PostReplyVote.emoji == Emoji.token).\
+            join(User, User.id == PostReplyVote.user_id).\
+            filter(PostReplyVote.post_reply_id == self.id, PostReplyVote.emoji.isnot(None)).\
+            group_by(PostReplyVote.emoji, Emoji.url).\
+            order_by(count.desc()).all()
+
+        self.emoji_reactions = [
+            {
+                "url": url if url else '',  # None for unicode emoji, URL for custom emoji
+                "token": emoji,  # The actual emoji value (unicode or :token:)
+                "authors": authors,
+                "count": count,
+            }
+            for emoji, url, count, authors in rows
+        ]
 
 
 class ScheduledPost(db.Model):
@@ -2773,6 +3043,8 @@ class CommunityMember(db.Model):
     notify_new_posts = db.Column(db.Boolean, default=False)
     joined_via_feed = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=utcnow)
+
+    user = db.relationship('User', foreign_keys=[user_id], lazy='joined')
 
     __table_args__ = (
         db.Index('ix_community_member_community_banned', 'community_id', 'is_banned'),
@@ -2910,6 +3182,7 @@ class PostVote(db.Model):
     author_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
     post_id = db.Column(db.Integer, db.ForeignKey('post.id'), index=True)
     effect = db.Column(db.Float, index=True)
+    emoji = db.Column(db.String(20))
     created_at = db.Column(db.DateTime, default=utcnow)
 
     __table_args__ = (
@@ -2928,6 +3201,7 @@ class PostReplyVote(db.Model):
     author_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)  # the author of the reply voted on - who's reputation is affected
     post_reply_id = db.Column(db.Integer, db.ForeignKey('post_reply.id'), index=True)
     effect = db.Column(db.Float)
+    emoji = db.Column(db.String(20))
     created_at = db.Column(db.DateTime, default=utcnow)
 
     __table_args__ = (
@@ -3056,12 +3330,21 @@ class Poll(db.Model):
             db.session.add(new_vote)
             choice = PollChoice.query.get(choice_id)
             choice.num_votes += 1
-            self.latest_vote = datetime.utcnow()
+            self.latest_vote = utcnow()
             db.session.commit()
+    
+    def user_votes(self, user_id):
+        existing_votes = PollChoiceVote.query.filter(PollChoiceVote.user_id == user_id,
+                                                     PollChoiceVote.post_id == self.post_id).all()
+        
+        if not existing_votes:
+            existing_votes = []
+        
+        return existing_votes
 
     def total_votes(self):
         return db.session.execute(text('SELECT SUM(num_votes) as s FROM "poll_choice" WHERE post_id = :post_id'),
-                                  {'post_id': self.post_id}).scalar()
+                                  {'post_id': self.post_id}).scalar() or 0
 
 
 class PollChoice(db.Model):
@@ -3585,6 +3868,15 @@ class Rating(db.Model):
     rating = db.Column(db.Float)
 
     author = db.relationship('User', lazy='joined', back_populates='ratings')
+
+
+class Emoji(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    url = db.Column(db.String(1024))
+    token = db.Column(db.String(20), index=True)
+    category = db.Column(db.String(20))
+    aliases = db.Column(db.String(100), index=True)
+    instance_id = db.Column(db.Integer, index=True)
 
 
 def _large_community_subscribers() -> float:

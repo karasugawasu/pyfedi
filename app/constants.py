@@ -1,4 +1,4 @@
-VERSION = '1.3.9-KR1'
+VERSION = '1.4.0-KR1'
 
 POST_TYPE_LINK = 1
 POST_TYPE_ARTICLE = 2
@@ -57,6 +57,7 @@ NOTIF_BAN = 8  # I have been banned from a community
 NOTIF_UNBAN = 9  # I have been un-banned from a community
 NOTIF_NEW_MOD = 10  # I have been made a moderator for a community
 NOTIF_REMINDER = 11  # A reminder that the user set before
+NOTIF_ANSWER = 12  # An answer was accepted as the preferred one
 
 # --- mod/admin level ---
 NOTIF_REPORT = 20  # a user, post, comment, or community have been reported
@@ -103,6 +104,7 @@ APLOG_CREATE = (True, 'Create')
 APLOG_UPDATE = (True, 'Update')
 APLOG_LIKE = (True, 'Like')
 APLOG_DISLIKE = (True, 'Dislike')
+APLOG_RATE = (True, 'Rate')
 APLOG_REPORT = (True, 'Report')
 APLOG_USERBAN = (True, 'User Ban')
 APLOG_LOCK = (True, 'Post Lock')

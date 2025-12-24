@@ -30,14 +30,14 @@ from app.translation import LibreTranslateAPI
 from app.utils import render_template, get_setting, request_etag_matches, return_304, blocked_domains, \
     ap_datetime, shorten_string, user_filters_home, \
     joined_communities, moderating_communities, markdown_to_html, allowlist_html, \
-    blocked_instances, communities_banned_from, topic_tree, recently_upvoted_posts, recently_downvoted_posts, \
+    blocked_or_banned_instances, communities_banned_from, topic_tree, recently_upvoted_posts, recently_downvoted_posts, \
     menu_topics, blocked_communities, \
     permission_required, debug_mode_only, ip_address, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, \
     feed_tree_public, gibberish, get_deduped_post_ids, paginate_post_ids, post_ids_to_models, html_to_text, \
     get_redis_connection, subscribed_feeds, joined_or_modding_communities, login_required_if_private_instance, \
     pending_communities, retrieve_image_hash, possible_communities, remove_tracking_from_link, reported_posts, \
     moderating_communities_ids, user_notes, login_required, safe_order_by, filtered_out_communities, archive_post, \
-    num_topics, referrer
+    num_topics, referrer, block_honey_pot, banned_instances
 from app.models import Community, CommunityMember, Post, Site, User, utcnow, Topic, Instance, \
     Notification, Language, community_language, ModLog, Feed, FeedItem, CmsPage
 from app.ldap_utils import test_ldap_connection, sync_user_to_ldap, login_with_ldap
@@ -58,6 +58,7 @@ def index(sort=None, view_filter=None):
 
 def home_page(sort, view_filter):
     verification_warning()
+    block_honey_pot()
 
     if sort is None:
         sort = current_user.default_sort if current_user.is_authenticated else 'hot'
@@ -132,13 +133,14 @@ def home_page(sort, view_filter):
         community_ids = blocked_communities(current_user.id)
         if community_ids:
             active_communities = active_communities.filter(Community.id.not_in(community_ids))
-        active_communities = active_communities.filter(Community.instance_id.not_in(blocked_instances(current_user.id)))
+        active_communities = active_communities.filter(Community.instance_id.not_in(blocked_or_banned_instances(current_user.id)))
 
     active_communities = active_communities.order_by(desc(Community.last_active)).limit(5).all()
 
     # New Communities
     cutoff = utcnow() - timedelta(days=30)
-    new_communities = Community.query.filter_by(banned=False).filter_by(nsfw=False).filter_by(nsfl=False).filter(Community.created_at > cutoff)
+    new_communities = Community.query.filter_by(banned=False).filter_by(nsfw=False).filter_by(nsfl=False). \
+        filter(Community.created_at > cutoff)
     if current_user.is_authenticated:  # do not show communities current user is banned from
         banned_from = communities_banned_from(current_user.id)
         if banned_from:
@@ -146,8 +148,9 @@ def home_page(sort, view_filter):
         community_ids = blocked_communities(current_user.id)
         if community_ids:
             new_communities = new_communities.filter(Community.id.not_in(community_ids))
-        new_communities = new_communities.filter(Community.instance_id.not_in(blocked_instances(current_user.id)))
-    new_communities = new_communities.order_by(desc(Community.created_at)).limit(5).all()
+        new_communities = new_communities.filter(Community.instance_id.not_in(blocked_or_banned_instances(current_user.id)))
+    new_communities = new_communities.order_by(desc(Community.first_federated_at)). \
+        order_by(desc(Community.created_at)).limit(5).all()
 
     # Upcoming events
     upcoming_events = db.session.execute(text("""SELECT e.start, p.title, p.id FROM "event" e
@@ -315,6 +318,8 @@ def list_communities():
     # if filtering by home instance
     if instance:
         communities = communities.filter(Community.ap_domain == instance)
+    
+    hide_nsfw = False
 
     if current_user.is_authenticated:
         if current_user.hide_low_quality:
@@ -333,7 +338,7 @@ def list_communities():
                 communities = communities.filter(Community.nsfw == True)
         if current_user.hide_nsfl == 1:
             communities = communities.filter(Community.nsfl == False)
-        instance_ids = blocked_instances(current_user.id)
+        instance_ids = blocked_or_banned_instances(current_user.id)
         if instance_ids:
             communities = communities.filter(or_(Community.instance_id.not_in(instance_ids), Community.instance_id == None))
         filtered_out_community_ids = filtered_out_communities(current_user)
@@ -349,7 +354,7 @@ def list_communities():
 
     communities = communities.order_by(safe_order_by(sort_by, Community, {'title', 'subscriptions_count', 'post_count',
                                                                           'post_reply_count', 'last_active', 'created_at',
-                                                                          'active_weekly'}))
+                                                                          'active_weekly', 'average_rating'}))
 
     # dict used for pagination query parameters
     args_dict = dict()
@@ -388,7 +393,10 @@ def list_communities():
         "low_bandwidth": low_bandwidth,
         "feed_id": feed_id,
         "server_has_feeds": server_has_feeds,
-        "public_feeds": public_feeds
+        "public_feeds": public_feeds,
+        "hide_nsfw": hide_nsfw,
+        "create_admin_only": create_admin_only,
+        "is_admin": is_admin,
     })
 
     return render_template('list_communities.html', **context)
@@ -405,6 +413,12 @@ def modlog():
     user_name = request.args.get('user_name', '')
     can_see_names = False
     is_admin = False
+
+    arg_dict = {"low_bandwidth": low_bandwidth,
+                "mod_action": mod_action,
+                "suspect_user_name": suspect_user_name,
+                "communities": community_id,
+                "user_name": user_name}
 
     # Admins can see all of the modlog, everyone else can only see public entries
     modlog_entries = ModLog.query
@@ -441,8 +455,8 @@ def modlog():
 
     # Pagination
     modlog_entries = modlog_entries.paginate(page=page, per_page=100 if not low_bandwidth else 50, error_out=False)
-    next_url = url_for('main.modlog', page=modlog_entries.next_num) if modlog_entries.has_next else None
-    prev_url = url_for('main.modlog', page=modlog_entries.prev_num) if modlog_entries.has_prev and page != 1 else None
+    next_url = url_for('main.modlog', page=modlog_entries.next_num, **arg_dict) if modlog_entries.has_next else None
+    prev_url = url_for('main.modlog', page=modlog_entries.prev_num, **arg_dict) if modlog_entries.has_prev and page != 1 else None
 
     instances = {instance.id: instance.domain for instance in Instance.query.all()}
     communities = {community.id: community.display_name() for community in Community.query.filter(Community.banned == False).all()}
@@ -560,6 +574,34 @@ def replay_inbox():
     replay_inbox_request(request_json)
 
     return 'ok'
+
+
+@bp.route('/honey')
+@bp.route('/honey/<whatever>')
+def honey_pot(whatever=None):
+    from app import redis_client
+    from time import time
+    ip = ip_address()
+    key = f"honeypot:{ip}"
+
+    now = time()
+    score = now
+    member = str(now)  # unique enough for repeated entries
+
+    added = redis_client.zadd(key, {member: score})
+
+    if added == 1 and redis_client.ttl(key) == -1:
+        redis_client.expire(key, 86400)  # auto-expire key after 24h of inactivity
+
+    # Remove entries older than 24 hours
+    redis_client.zremrangebyscore(key, 0, now - 86400)
+
+    # Count recent events
+    count = redis_client.zcount(key, now - 86400, now)
+
+    if count >= 3:
+        redis_client.set(f"ban:{ip}", 1, ex=86400 * 7)
+    return ''
 
 
 @bp.route('/test')
@@ -1086,6 +1128,12 @@ def content_warning():
     return render_template('generic_form.html', title=_('Content warning'), message=message, form=form)
 
 
+@bp.route('/my-year-in-review/<year>')
+@login_required
+def my_year_in_review(year):
+    return render_template('generic_message.html', title=_('This page is intentionally left blank.'), message=_("We don't track you, so there's not much data to make graphs of."))
+
+
 @bp.route('/health', methods=['HEAD', 'GET'])
 def health():
     return 'Ok'
@@ -1156,7 +1204,7 @@ def health2():
                 communities = communities.filter(Community.nsfw == True)
         if current_user.hide_nsfl == 1:
             communities = communities.filter(Community.nsfl == False)
-        instance_ids = blocked_instances(current_user.id)
+        instance_ids = blocked_or_banned_instances(current_user.id)
         if instance_ids:
             communities = communities.filter(
                 or_(Community.instance_id.not_in(instance_ids), Community.instance_id == None))

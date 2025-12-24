@@ -7,17 +7,18 @@ import time
 import httpx
 import boto3
 from flask import current_app
-from sqlalchemy import text
+from sqlalchemy import text, select, func
 
 from app import celery, cache, httpx_client
-from app.activitypub.util import find_actor_or_create, find_language_or_create
+from app.activitypub.util import find_actor_or_create, find_language_or_create, find_instance_id
 from app.constants import NOTIF_UNBAN
 from app.models import Notification, SendQueue, CommunityBan, CommunityMember, User, Community, Post, PostReply, \
     DefederationSubscription, Instance, ActivityPubLog, InstanceRole, utcnow, InstanceChooser, \
-    InstanceBan
+    InstanceBan, Emoji
 from app.post.routes import post_delete_post
 from app.utils import get_task_session, download_defeds, instance_banned, get_request_instance, get_request, \
-    shorten_string, patch_db_session, archive_post, get_setting, set_setting, communities_banned_from_all_users
+    shorten_string, patch_db_session, archive_post, get_setting, set_setting, communities_banned_from_all_users, \
+    banned_instances, blocked_or_banned_instances
 
 
 @celery.task
@@ -109,10 +110,12 @@ def process_expired_bans():
             session.delete(expired_ban)
             session.commit()
 
-        expired_instance_bans = session.query(InstanceBan).filter(InstanceBan.banned_until < utcnow()).all()
+        expired_instance_bans = session.query(InstanceBan).filter(InstanceBan.banned_until != None, InstanceBan.banned_until < utcnow()).all()
         for expired_ban in expired_instance_bans:
+            cache.delete_memoized(banned_instances, expired_ban.user_id)
+            cache.delete_memoized(blocked_or_banned_instances, expired_ban.user_id)
             session.delete(expired_ban)
-            session.commit()
+        session.commit()
 
     except Exception:
         session.rollback()
@@ -261,9 +264,17 @@ def update_community_stats():
         ).all()
 
         for community in communities:
-            community.subscriptions_count = session.execute(text(
-                'SELECT COUNT(user_id) as c FROM community_member WHERE community_id = :community_id AND is_banned = false'
-            ), {'community_id': community.id}).scalar()
+            stmt = (
+                select(func.count())
+                .select_from(CommunityMember)
+                .join(User, User.id == CommunityMember.user_id)
+                .where(
+                    CommunityMember.community_id == community.id,
+                    CommunityMember.is_banned == False,
+                    User.bot == False
+                )
+            )
+            community.subscriptions_count = session.execute(stmt).scalar()
             # ensure local communities have something their total_subscriptions_count, for use in topic and feed sidebar
             if community.is_local() and \
                     (community.total_subscriptions_count is None or community.total_subscriptions_count < community.subscriptions_count):
@@ -593,6 +604,25 @@ def monitor_healthy_instances():
                                     InstanceRole.instance_id == instance.id,
                                     InstanceRole.role == 'admin'
                                 ).delete()
+
+                        # refresh custom emoji
+                        if instance.trusted:
+                            for emoji in instance_data['custom_emojis']:
+                                token = emoji['custom_emoji']['shortcode']
+                                aliases = [keyword['keyword'] for keyword in emoji['keywords']]
+                                existing_emoji = session.query(Emoji).filter(Emoji.instance_id == instance.id,
+                                                                             Emoji.token == f":{token}:").first()
+                                if existing_emoji:
+                                    existing_emoji.url = emoji['custom_emoji']['image_url']
+                                    existing_emoji.category = emoji['custom_emoji']['category']
+                                    existing_emoji.aliases = ' '.join(aliases)
+                                else:
+                                    new_emoji = Emoji(instance_id=instance.id, token=f':{token}:',
+                                                      url=emoji['custom_emoji']['image_url'],
+                                                      category=emoji['custom_emoji']['category'],
+                                                      aliases=' '.join(aliases))
+                                    session.add(new_emoji)
+                                session.commit()
                 except Exception:
                     session.rollback()
                     instance.failures += 1
@@ -1044,7 +1074,7 @@ def add_remote_community_from_post(post_data):
             if f"@{current_app.config['SERVER_NAME']}" not in cl:
                 try:
                     search_for_community(cl)
-                except Exception as e:
+                except Exception:
                     pass
 
 

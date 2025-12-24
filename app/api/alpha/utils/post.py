@@ -5,17 +5,18 @@ from sqlalchemy import desc, text, and_, exists, asc
 from sqlakeyset import get_page
 from sqlalchemy.exc import IntegrityError
 
-from app import db
+from app import db, plugins
 from app.api.alpha.views import post_view, post_report_view, reply_view, community_view, user_view, flair_view
 from app.constants import *
 from app.feed.routes import get_all_child_feed_ids
 from app.models import Post, Community, CommunityMember, utcnow, User, Feed, FeedItem, Topic, PostReply, PostVote, \
-    CommunityFlair, read_posts
+    CommunityFlair, read_posts, Poll
 from app.shared.post import vote_for_post, bookmark_post, remove_bookmark_post, subscribe_post, make_post, edit_post, \
-    delete_post, restore_post, report_post, lock_post, sticky_post, mod_remove_post, mod_restore_post, mark_post_read
-from app.post.util import post_replies, get_comment_branch
+    delete_post, restore_post, report_post, lock_post, sticky_post, mod_remove_post, mod_restore_post, mark_post_read, \
+    vote_for_poll, hide_post
+from app.post.util import post_replies, get_comment_branch, tags_to_string, flair_to_string
 from app.topic.routes import get_all_child_topic_ids
-from app.utils import authorise_api_user, blocked_users, blocked_communities, blocked_instances, recently_upvoted_posts, \
+from app.utils import authorise_api_user, blocked_users, blocked_communities, blocked_or_banned_instances, recently_upvoted_posts, \
     site_language_id, filtered_out_communities, joined_or_modding_communities, \
     user_filters_home, user_filters_posts, in_sorted_list, \
     communities_banned_from_all_users, moderating_communities_ids_all_users, blocked_domains, SqlKeysetPagination
@@ -63,7 +64,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     if user_id and user_id != person_id:
         blocked_person_ids = blocked_users(user_id)
         blocked_community_ids = blocked_communities(user_id)
-        blocked_instance_ids = blocked_instances(user_id)
+        blocked_instance_ids = blocked_or_banned_instances(user_id)
         blocked_domain_ids = blocked_domains(user_id)
     else:
         blocked_person_ids = []
@@ -205,14 +206,11 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                                                               blocked_instance_ids))
             content_filters = user_filters_home(user_id) if user_id else {}
 
-    # change when polls and events are supported
-    posts = posts.filter(Post.type != POST_TYPE_POLL).filter(Post.type != POST_TYPE_EVENT)
-
     if query:
         if search_type == 'Url':
             posts = posts.filter(Post.url.ilike(f"%{query}%"))
         else:
-            posts = posts.filter(Post.title.ilike(f"%{query}%"))
+            posts = posts.search(query, sort=sort == 'Relevance')
 
     if user_id:
         if liked_only:
@@ -225,7 +223,15 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         else:
             u_rp_ids = tuple(db.session.execute(text('SELECT read_post_id FROM "read_posts" WHERE user_id = :user_id'),
                                           {"user_id": user_id}).scalars())
-            if user.hide_read_posts:
+            if user.ignore_bots == 1:
+                posts = posts.filter(Post.from_bot == False)
+            if user.hide_nsfl == 1:
+                posts = posts.filter(Post.nsfl == False)
+            if user.hide_nsfw == 1:
+                posts = posts.filter(Post.nsfw == False)
+            if user.hide_gen_ai == 1:
+                posts = posts.filter(Post.ai_generated == False)
+            if user.hide_read_posts and not query:
                 # Alias the read_posts table
                 rp = read_posts.alias()
 
@@ -290,6 +296,8 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         posts = posts.order_by(desc(Post.last_active))
     elif sort == "Old":
         posts = posts.order_by(asc(Post.posted_at))
+    elif sort == "Relevance":
+        pass    # sorting by relevance is already done by posts = posts.search(query, sort=True)
 
     posts = posts.paginate(page=page, per_page=limit, error_out=False)
 
@@ -372,7 +380,7 @@ def get_post_list2(auth, data, user_id=None, search_type='Posts') -> dict:
     if user_id and user_id != person_id:
         blocked_person_ids = blocked_users(user_id)
         blocked_community_ids = blocked_communities(user_id)
-        blocked_instance_ids = blocked_instances(user_id)
+        blocked_instance_ids = blocked_or_banned_instances(user_id)
         blocked_domain_ids = blocked_domains(user_id)
     else:
         blocked_person_ids = []
@@ -839,6 +847,7 @@ def post_post_like(auth, data):
     post_id = data['post_id']
     score = data['score']
     private = data['private'] if 'private' in data else False
+    emoji = data['emoji'] if 'emoji' in data else None
     if score == 1:
         direction = 'upvote'
     elif score == -1:
@@ -847,7 +856,7 @@ def post_post_like(auth, data):
         score = 0
         direction = 'reversal'
 
-    user_id = vote_for_post(post_id, direction, not private, SRC_API, auth)
+    user_id = vote_for_post(post_id, direction, not private, emoji, SRC_API, auth)
     post_json = post_view(post=post_id, variant=4, user_id=user_id, my_vote=score)
     return post_json
 
@@ -876,17 +885,52 @@ def post_post(auth, data):
     body = data['body'] if 'body' in data else ''
     url = data['url'] if 'url' in data else None
     nsfw = data['nsfw'] if 'nsfw' in data else False
+    ai_generated = data['ai_generated'] if 'ai_generated' in data else False
+    alt_text = data['alt_text'] if 'alt_text' in data else title
     language_id = data['language_id'] if 'language_id' in data else site_language_id()
     if language_id < 2:
         language_id = site_language_id()
+    
+    user_id = authorise_api_user(auth)
 
-    # change when Polls are supported
-    type = POST_TYPE_ARTICLE
-    if url:
+    # Determine post type based on data provided
+    if 'event' in data and data['event']:
+        type = POST_TYPE_EVENT
+    elif 'poll' in data and data['poll']:
+        type = POST_TYPE_POLL
+        if 'end_poll' not in data['poll']:
+            # Default to ending the poll in three days
+            end_poll = utcnow() + timedelta(days=3)
+            data['poll']['end_poll'] = end_poll.isoformat(timespec="microseconds")
+    elif url:
         type = POST_TYPE_LINK
+    else:
+        type = POST_TYPE_ARTICLE
 
-    input = {'title': title, 'body': body, 'url': url, 'nsfw': nsfw, 'language_id': language_id, 'notify_author': True}
+    input = {'title': title, 'body': body, 'url': url, 'nsfw': nsfw, 'language_id': language_id, 'notify_author': True,
+             'ai_generated': ai_generated, 'image_alt_text': alt_text}
+
+    # Add event data if present
+    if 'event' in data and data['event']:
+        input['event'] = data['event']
+
+    # Add poll data if present
+    if 'poll' in data and data['poll']:
+        input['poll'] = data['poll']
+
     community = Community.query.filter_by(id=community_id).one()
+
+    # Fire hook for plugins
+    post_data = {
+        "title": title,
+        "content": body,
+        "community": community.name,
+        "community_id": community.id,
+        "post_type": type,
+        "user_id": user_id,
+    }
+    plugins.fire_hook('before_post_create', post_data)
+
     user_id, post = make_post(input, community, type, SRC_API, auth)
 
     post_json = post_view(post=post, variant=4, user_id=user_id)
@@ -901,16 +945,39 @@ def put_post(auth, data):
     body = data['body'] if 'body' in data else post.body
     url = data['url'] if 'url' in data else post.url
     nsfw = data['nsfw'] if 'nsfw' in data else post.nsfw
+    ai_generated = data['ai_generated'] if 'ai_generated' in data else post.ai_generated
     language_id = data['language_id'] if 'language_id' in data else post.language_id
+    tags = data['tags'] if 'tags' in data else tags_to_string(post) or ''
+    flair = data['flair'] if 'flair' in data else flair_to_string(post) or ''
     if language_id < 2:
         language_id = site_language_id()
+    if 'alt_text' in data:
+        alt_text = data['alt_text']
+    elif post.image.alt_text:
+        alt_text = post.image.alt_text
+    else:
+        alt_text = ''
 
-    # change when Polls are supported
-    type = POST_TYPE_ARTICLE
-    if url:
-        type = POST_TYPE_LINK
+    # Determine post type - keep existing type unless explicitly changed
+    type = post.type
+    # Only infer type change if URL is being changed
+    if 'url' in data:
+        if url:
+            type = POST_TYPE_LINK
+        else:
+            type = POST_TYPE_ARTICLE
 
-    input = {'title': title, 'body': body, 'url': url, 'nsfw': nsfw, 'language_id': language_id, 'notify_author': True}
+    input = {'title': title, 'body': body, 'url': url, 'nsfw': nsfw, 'language_id': language_id, 'notify_author': True,
+             'tags': tags, 'flair': flair, 'ai_generated': ai_generated, 'image_alt_text': alt_text}
+
+    # Add event data if present
+    if 'event' in data and data['event']:
+        input['event'] = data['event']
+
+    # Add poll data if present
+    if 'poll' in data and data['poll']:
+        input['poll'] = data['poll']
+
     user_id, post = edit_post(input, post, type, SRC_API, auth=auth)
 
     post_json = post_view(post=post, variant=4, user_id=user_id)
@@ -952,6 +1019,16 @@ def post_post_lock(auth, data):
     locked = data['locked']
 
     user_id, post = lock_post(post_id, locked, SRC_API, auth)
+
+    post_json = post_view(post=post, variant=4, user_id=user_id)
+    return post_json
+
+
+def post_post_hide(auth, data):
+    post_id = data['post_id']
+    hidden = data['hidden']
+
+    user_id, post = hide_post(post_id, hidden, SRC_API, auth)
 
     post_json = post_view(post=post, variant=4, user_id=user_id)
     return post_json
@@ -1005,7 +1082,7 @@ def get_post_like_list(auth, data):
     limit = data['limit'] if 'limit' in data else 50
 
     user = authorise_api_user(auth, return_type='model')
-    post = Post.query.filter_by(id=post_id).one()
+    post = Post.query.get(post_id)
 
     if post.community.is_moderator(user) or user.is_admin() or user.is_staff():
         banned_from_site_user_ids = list(db.session.execute(text('SELECT id FROM "user" WHERE banned = true')).scalars())
@@ -1034,7 +1111,7 @@ def put_post_set_flair(auth, data):
     post_id = data['post_id']
     flair_list = data['flair_id_list'] if 'flair_id_list' in data else []
 
-    post = Post.query.filter_by(id=post_id).one()
+    post = Post.query.get(post_id)
     user = authorise_api_user(auth, return_type='model')
     
     if post.community.is_moderator(user) or user.is_admin_or_staff() or post.user_id == user.id:
@@ -1055,6 +1132,17 @@ def put_post_set_flair(auth, data):
         if post.status == POST_STATUS_PUBLISHED:
             task_selector('edit_post', post_id=post.id)
         
-        return post_view(post=post, variant=2, stub=False)
+        return post_view(post=post, variant=2, stub=False, user_id=user.id)
     else:
         raise Exception("Insufficient permissions")
+
+
+def post_poll_vote(auth, data):
+    post_id = data['post_id']
+    choice_id = data['choice_id']
+
+    user_id = authorise_api_user(auth)
+
+    vote_for_poll(post_id, choice_id, SRC_API, auth=auth)
+
+    return {"post_view": post_view(post=post_id, variant=2, stub=False, user_id=user_id)}

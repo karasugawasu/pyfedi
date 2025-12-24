@@ -14,6 +14,9 @@ from sqlalchemy import text, desc, or_
 from PIL import Image
 from urllib.parse import urlparse
 from furl import furl
+from pygments import highlight
+from pygments.lexers import JsonLexer, TextLexer
+from pygments.formatters import HtmlFormatter
 
 from app import db, celery, cache
 from app.activitypub.routes import process_inbox_request, process_delete_request, replay_inbox_request
@@ -23,7 +26,7 @@ from app.admin.constants import ReportTypes
 from app.admin.forms import FederationForm, SiteMiscForm, SiteProfileForm, EditCommunityForm, EditUserForm, \
     EditTopicForm, SendNewsletterForm, AddUserForm, PreLoadCommunitiesForm, ImportExportBannedListsForm, \
     EditInstanceForm, RemoteInstanceScanForm, MoveCommunityForm, EditBlockedImageForm, AddBlockedImageForm, \
-    CmsPageForm, CreateOfflineInstanceForm, InstanceChooserForm, CloseInstanceForm
+    CmsPageForm, CreateOfflineInstanceForm, InstanceChooserForm, CloseInstanceForm, EmojiForm
 from flask_wtf import FlaskForm
 from app.admin.util import unsubscribe_from_everything_then_delete, unsubscribe_from_community, send_newsletter, \
     topics_for_form, move_community_images_to_here
@@ -33,7 +36,7 @@ from app.constants import REPORT_STATE_NEW, REPORT_STATE_ESCALATED, POST_STATUS_
 from app.email import send_registration_approved_email
 from app.models import AllowedInstances, BannedInstances, ActivityPubLog, utcnow, Site, Community, CommunityMember, \
     User, Instance, File, Report, Topic, UserRegistration, Role, Post, PostReply, Language, RolePermission, Domain, \
-    Tag, DefederationSubscription, BlockedImage, CmsPage, Notification
+    Tag, DefederationSubscription, BlockedImage, CmsPage, Notification, Emoji
 from app.shared.tasks import task_selector
 from app.translation import LibreTranslateAPI
 from app.utils import render_template, permission_required, set_setting, get_setting, gibberish, markdown_to_html, \
@@ -1104,9 +1107,34 @@ def admin_activities():
 @login_required
 def activity_json(activity_id):
     activity = ActivityPubLog.query.get_or_404(activity_id)
-    return render_template('admin/activity_json.html', title=_('Activity JSON'),
-                           activity_json_data=activity.activity_json, activity=activity,
-                           current_app=current_app)
+
+    raw_json = activity.activity_json
+
+    # Try pretty printing
+    try:
+        parsed = json.loads(raw_json)
+        pretty_json = json.dumps(parsed, indent=2, ensure_ascii=False)
+        is_valid_json = True
+    except Exception:
+        # Fall back to just keeping raw json
+        pretty_json = raw_json
+        is_valid_json = False
+
+    if is_valid_json:
+        json_md = "```json\n" + pretty_json + "\n```"
+        json_html = markdown_to_html(json_md)
+    else:
+        json_md = "`" + pretty_json + "`"
+        json_html = markdown_to_html(json_md)
+
+    return render_template(
+        'admin/activity_json.html',
+        title=_('Activity JSON'),
+        json_html=json_html,
+        activity=activity,
+        current_app=current_app,
+    )
+
 
 
 @bp.route('/activity_json/<int:activity_id>/replay')
@@ -1205,6 +1233,7 @@ def admin_community_edit(community_id):
         community.description_html = markdown_to_html(form.description.data)
         community.rules = form.rules.data
         community.nsfw = form.nsfw.data
+        community.ai_generated = form.ai_generated.data
         community.banned = form.banned.data
         community.local_only = form.local_only.data
         community.restricted_to_mods = form.restricted_to_mods.data
@@ -1217,6 +1246,7 @@ def admin_community_edit(community_id):
         community.default_layout = form.default_layout.data
         community.posting_warning = form.posting_warning.data
         community.ignore_remote_language = form.ignore_remote_language.data
+        community.ignore_remote_gen_ai = form.ignore_remote_gen_ai.data
         community.always_translate = form.always_translate.data
         community.can_be_archived = form.can_be_archived.data
 
@@ -1263,6 +1293,7 @@ def admin_community_edit(community_id):
         form.description.data = community.description
         form.rules.data = community.rules
         form.nsfw.data = community.nsfw
+        form.ai_generated.data = community.ai_generated
         form.banned.data = community.banned
         form.local_only.data = community.local_only
         form.new_mods_wanted.data = community.new_mods_wanted
@@ -1276,6 +1307,7 @@ def admin_community_edit(community_id):
         form.posting_warning.data = community.posting_warning
         form.languages.data = community.language_ids()
         form.ignore_remote_language.data = community.ignore_remote_language
+        form.ignore_remote_gen_ai.data = community.ignore_remote_gen_ai
         form.always_translate.data = community.always_translate
         form.can_be_archived.data = community.can_be_archived
     return render_template('admin/edit_community.html', title=_('Edit community'), form=form, community=community)
@@ -2132,6 +2164,61 @@ def admin_cms_page_delete(page_id):
     db.session.commit()
     flash(_('Page deleted.'))
     return redirect(url_for('admin.admin_cms_pages'))
+
+
+# Emoji
+@bp.route('/emoji', methods=['GET'])
+@permission_required('change instance settings')
+@login_required
+def admin_emoji():
+    emojis = Emoji.query.order_by(Emoji.token).all()
+    return render_template('admin/emoji.html', emojis=emojis, title=_('Emoji'))
+
+
+@bp.route('/emoji/add', methods=['GET', 'POST'])
+@permission_required('change instance settings')
+@login_required
+def admin_emoji_add():
+    form = EmojiForm()
+    if form.validate_on_submit():
+        e = Emoji(token=form.token.data, url=form.url.data, category=form.category.data, aliases=form.aliases.data,
+                  instance_id=1)
+        db.session.add(e)
+        db.session.commit()
+        flash(_('Emoji saved.'))
+        return redirect(url_for('admin.admin_emoji'))
+
+    return render_template('admin/emoji_edit.html', form=form, title=_('Add Emoji'))
+
+
+@bp.route('/emoji/<int:emoji_id>/edit', methods=['GET', 'POST'])
+@permission_required('change instance settings')
+@login_required
+def admin_emoji_edit(emoji_id):
+    emoji = Emoji.query.get_or_404(emoji_id)
+    form = EmojiForm(original_page=emoji, obj=emoji)
+
+    if form.validate_on_submit():
+        emoji.token = form.token.data
+        emoji.url = form.url.data
+        emoji.aliases = form.aliases.data
+        emoji.category = form.category.data
+        db.session.commit()
+        flash(_('Emoji saved.'))
+        return redirect(url_for('admin.admin_emoji'))
+
+    return render_template('admin/emoji_edit.html', form=form, page=emoji, title=_('Edit Emoji'))
+
+
+@bp.route('/emoji/<int:emoji_id>/delete', methods=['POST'])
+@permission_required('change instance settings')
+@login_required
+def admin_emoji_delete(emoji_id):
+    emoji = Emoji.query.get_or_404(emoji_id)
+    db.session.delete(emoji)
+    db.session.commit()
+    flash(_('Emoji deleted.'))
+    return redirect(url_for('admin.admin_emoji'))
 
 
 @bp.route('/masquerade/<int:user_id>')

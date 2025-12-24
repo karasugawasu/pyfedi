@@ -2,7 +2,7 @@ from datetime import datetime
 
 from dateutil.relativedelta import relativedelta
 from flask import current_app
-from sqlalchemy import desc, or_, text
+from sqlalchemy import desc, or_, text, asc
 from sqlalchemy.orm.exc import NoResultFound
 
 from app import db, cache
@@ -10,14 +10,17 @@ from app.api.alpha.views import community_view, user_view, post_view, cached_mod
 from app.community.util import search_for_community
 from app.constants import *
 from app.models import Community, CommunityMember, User, CommunityBan, Notification, CommunityJoinRequest, \
-    NotificationSubscription, Post, CommunityFlair, utcnow
+    NotificationSubscription, Post, CommunityFlair, Feed, utcnow
 from app.shared.community import join_community, leave_community, block_community, unblock_community, make_community, \
     edit_community, subscribe_community, delete_community, restore_community, add_mod_to_community, \
-    remove_mod_from_community
+    remove_mod_from_community, rate_community
+from app.shared.feed import leave_feed
 from app.shared.tasks import task_selector
-from app.utils import authorise_api_user, communities_banned_from_all_users, moderating_communities_ids
+from app.utils import authorise_api_user, communities_banned_from_all_users, moderating_communities_ids, \
+    blocked_or_banned_instances
 from app.utils import communities_banned_from, blocked_instances, blocked_communities, shorten_string, \
-    joined_communities, moderating_communities, expand_hex_color
+    joined_communities, moderating_communities, expand_hex_color, community_membership, subscribed_feeds, \
+    feed_membership
 
 
 def get_community_list(auth, data):
@@ -27,6 +30,7 @@ def get_community_list(auth, data):
     limit = int(data['limit']) if 'limit' in data else 10
     show_nsfw = data['show_nsfw'] if 'show_nsfw' in data else False
     show_nsfl = show_nsfw
+    show_genai = data['show_genai'] if 'show_genai' in data else True
 
     user = authorise_api_user(auth, return_type='model') if auth else None
     user_id = user.id if user else None
@@ -41,7 +45,7 @@ def get_community_list(auth, data):
             CommunityMember.user_id == user_id)
     elif type_ == 'Local':
         communities = Community.query.filter_by(ap_id=None, banned=False)
-    elif type_ == 'ModeratorView':
+    elif type_ == 'ModeratorView' or type_ == 'Moderating':
         communities = Community.query.filter(Community.id.in_(moderating_communities_ids(user_id)))
     else:
         communities = Community.query.filter_by(banned=False)
@@ -50,7 +54,7 @@ def get_community_list(auth, data):
         banned_from = communities_banned_from(user_id)
         if banned_from:
             communities = communities.filter(Community.id.not_in(banned_from))
-        blocked_instance_ids = blocked_instances(user_id)
+        blocked_instance_ids = blocked_or_banned_instances(user_id)
         if blocked_instance_ids:
             communities = communities.filter(Community.instance_id.not_in(blocked_instance_ids))
         blocked_community_ids = blocked_communities(user_id)
@@ -60,6 +64,8 @@ def get_community_list(auth, data):
             communities = communities.filter(Community.nsfw == False)
         if user.hide_nsfl and not show_nsfl:
             communities = communities.filter(Community.nsfl == False)
+        if user.hide_gen_ai and not show_genai:
+            communities = communities.filter(Community.ai_generated == False)
     else:
         if not show_nsfw:
             communities = communities.filter_by(nsfw=False)
@@ -73,6 +79,8 @@ def get_community_list(auth, data):
         communities = communities.order_by(desc(Community.created_at))
     elif sort.startswith('Top'):
         communities = communities.order_by(desc(Community.post_count))
+    elif sort == 'Old':
+        communities = communities.order_by(asc(Community.created_at))
     else:
         communities = communities.order_by(desc(Community.last_active))
 
@@ -122,6 +130,51 @@ def post_community_follow(auth, data):
     community_json = community_view(community=community_id, variant=4, stub=False, user_id=user_id)
     return community_json
 
+def post_community_leave_all(auth):
+    user = authorise_api_user(auth, return_type='model') if auth else None
+
+    if not user:
+        raise Exception('incorrect login')
+
+    all_communities = Community.query.filter_by(banned=False)
+    user_joined_communities = joined_communities(user_id=user.id)
+
+    joined_ids = []
+    for jc in user_joined_communities:
+        joined_ids.append(jc.id)
+
+    # filter down to just the joined communities
+    communities = all_communities.filter(Community.id.in_(joined_ids))
+
+    for community in communities.all():
+        subscription = community_membership(user, community)
+        if subscription is not False and subscription < SUBSCRIPTION_MODERATOR:
+            # send leave requests to celery - also handles db commits and cache busting, ignore returned value
+            user_id = leave_community(community_id=community.id, src=SRC_API, auth=auth, bulk_leave=True)
+
+    joined_feed_ids = subscribed_feeds(user.id)
+
+    if joined_feed_ids:
+        for feed_id in joined_feed_ids:
+            feed = Feed.query.get(feed_id)
+            subscription = feed_membership(user, feed)
+            if subscription != SUBSCRIPTION_OWNER:
+                # send leave requests to celery - also handles db commits and cache busting, ignore returned value
+                user_id = leave_feed(feed=feed, src=SRC_API, auth=auth, bulk_leave=True)
+
+    return user_view(user=user, variant=6, user_id=user_id)
+
+
+def post_community_rate(auth, data):
+    community_id = data['community_id']
+    rating = data['rating']
+
+    user_id = authorise_api_user(auth) if auth else None
+
+    rate_community(community_id, rating, SRC_API, auth)
+    community_json = community_view(community=community_id, variant=3, stub=False, user_id=user_id)
+    return community_json
+
 
 def post_community_block(auth, data):
     community_id = data['community_id']
@@ -143,11 +196,12 @@ def post_community(auth, data):
     restricted_to_mods = data['restricted_to_mods'] if 'restricted_to_mods' in data else False
     local_only = data['local_only'] if 'local_only' in data else False
     discussion_languages = data['discussion_languages'] if 'discussion_languages' in data else [2]  # FIXME: use site language
+    question_answer = data['question_answer'] if 'question_answer' in data else False
 
     input = {'name': name, 'title': title, 'description': description, 'rules': rules,
              'icon_url': icon_url, 'banner_url': banner_url,
              'nsfw': nsfw, 'restricted_to_mods': restricted_to_mods, 'local_only': local_only,
-             'discussion_languages': discussion_languages}
+             'discussion_languages': discussion_languages, 'question_answer': question_answer}
 
     user_id, community_id = make_community(input, SRC_API, auth)
     community_json = community_view(community=community_id, variant=4, user_id=user_id)
@@ -174,6 +228,7 @@ def put_community(auth, data):
     else:
         banner_url = None
     nsfw = data['nsfw'] if 'nsfw' in data else community.nsfw
+    question_answer = data['question_answer'] if 'question_answer' in data else community.question_answer
     restricted_to_mods = data['restricted_to_mods'] if 'restricted_to_mods' in data else community.restricted_to_mods
     local_only = data['local_only'] if 'local_only' in data else community.local_only
     if 'discussion_languages' in data:
@@ -186,7 +241,7 @@ def put_community(auth, data):
     input = {'community_id': community_id, 'title': title, 'description': description, 'rules': rules,
              'icon_url': icon_url, 'banner_url': banner_url,
              'nsfw': nsfw, 'restricted_to_mods': restricted_to_mods, 'local_only': local_only,
-             'discussion_languages': discussion_languages}
+             'discussion_languages': discussion_languages, 'question_answer': question_answer}
 
     user_id = edit_community(input, community, SRC_API, auth)
     community_json = community_view(community=community, variant=4, user_id=user_id)

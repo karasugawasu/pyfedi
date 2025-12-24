@@ -11,7 +11,7 @@ from sqlalchemy import desc, asc, text, or_
 from app import db, cache
 from app.constants import POST_TYPE_LINK, POST_TYPE_IMAGE, POST_TYPE_VIDEO, POST_TYPE_POLL
 from app.models import PostReply, Post, Community, User, Language, utcnow
-from app.utils import blocked_instances, blocked_users, is_video_hosting_site, get_request
+from app.utils import blocked_or_banned_instances, blocked_users, is_video_hosting_site, get_request
 
 
 @cache.memoize(timeout=600)
@@ -148,7 +148,7 @@ def post_replies(post: Post, sort_by: str, viewer: User, db_only=False) -> List[
     
     comments = db.session.query(PostReply).filter_by(post_id=post.id)
     if viewer:
-        instance_ids = blocked_instances(viewer.id)
+        instance_ids = blocked_or_banned_instances(viewer.id)
         if instance_ids:
             comments = comments.filter(or_(PostReply.instance_id.not_in(instance_ids), PostReply.instance_id == None))
         if viewer.ignore_bots == 1:
@@ -204,7 +204,7 @@ def get_comment_branch(post: Post, comment_id: int, sort_by: str, viewer: User) 
 
     comments = PostReply.query.filter(PostReply.post_id == post.id)
     if viewer:
-        instance_ids = blocked_instances(viewer.id)
+        instance_ids = blocked_or_banned_instances(viewer.id)
         if instance_ids:
             comments = comments.filter(or_(PostReply.instance_id.not_in(instance_ids), PostReply.instance_id == None))
         if viewer.ignore_bots == 1:
@@ -250,6 +250,11 @@ def get_post_reply_count(post_id) -> int:
 def tags_to_string(post: Post) -> str:
     if len(post.tags) > 0:
         return ', '.join([tag.display_as for tag in post.tags])
+
+
+def flair_to_string(post: Post) -> str:
+    if len(post.flair) > 0:
+        return ', '.join([flair.flair for flair in post.flair])     # flair flair flair flair flfl flfl flflflfl
 
 
 def body_has_no_archive_link(body):

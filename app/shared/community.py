@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from flask import current_app, flash, render_template
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
@@ -14,7 +16,7 @@ from app.chat.util import send_message
 from app.constants import *
 from app.email import send_email
 from app.models import CommunityBlock, CommunityMember, Notification, NotificationSubscription, User, Conversation, \
-    Community, Language, File, CommunityFlair, Rating
+    Community, Language, File, CommunityFlair, Rating, utcnow
 from app.shared.tasks import task_selector
 from app.shared.upload import process_upload
 from app.user.utils import search_for_user
@@ -51,23 +53,23 @@ def join_community(community_id: int, src, auth=None, user_id=None):
 
 
 # function can be shared between WEB and API (only API calls it for now)
-def leave_community(community_id: int, src, auth=None):
+def leave_community(community_id: int, src, auth=None, bulk_leave=False):
     user_id = authorise_api_user(auth) if src == SRC_API else current_user.id
     cm = db.session.query(CommunityMember).filter_by(user_id=user_id, community_id=community_id).one()
-    if not cm.is_owner:
+    if not cm.is_owner or not cm.is_moderator:
         task_selector('leave_community', user_id=user_id, community_id=community_id)
 
         db.session.query(CommunityMember).filter_by(user_id=user_id, community_id=community_id).delete()
         db.session.commit()
 
-        if src == SRC_WEB:
+        if src == SRC_WEB and not bulk_leave:
             flash(_('You have left the community'))
     else:
         # todo: community deletion
         if src == SRC_API:
-            raise Exception('need_to_make_someone_else_owner')
+            raise Exception('Step down as a moderator before leaving the community')
         else:
-            flash(_('You need to make someone else the owner before unsubscribing.'), 'warning')
+            flash(_('You need to step down as moderator before unsubscribing.'), 'warning')
             return
 
     if src == SRC_API:
@@ -180,6 +182,7 @@ def make_community(input, src, auth=None, uploaded_icon_file=None, uploaded_bann
         restricted_to_mods = input['restricted_to_mods']
         local_only = input['local_only']
         discussion_languages = input['discussion_languages']
+        question_answer = input['question_answer']
         user = authorise_api_user(auth, return_type='model')
     else:
         if input.url.data.strip().lower().startswith('/c/'):
@@ -192,6 +195,7 @@ def make_community(input, src, auth=None, uploaded_icon_file=None, uploaded_bann
         restricted_to_mods = input.restricted_to_mods.data
         local_only = input.local_only.data
         discussion_languages = input.languages.data
+        question_answer = input.question_answer.data
         user = current_user
 
     if user.verified is False or user.private_key is None:
@@ -216,7 +220,8 @@ def make_community(input, src, auth=None, uploaded_icon_file=None, uploaded_bann
                           ap_public_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + name,
                           ap_followers_url='https://' + current_app.config['SERVER_NAME'] + '/c/' + name + '/followers',
                           ap_domain=current_app.config['SERVER_NAME'],
-                          subscriptions_count=1, instance_id=1, low_quality='memes' in name)
+                          subscriptions_count=1, instance_id=1, low_quality='memes' in name,
+                          question_answer=question_answer, first_federated_at=utcnow())
     try:
         db.session.add(community)
         db.session.commit()
@@ -255,6 +260,7 @@ def edit_community(input, community, src, auth=None, uploaded_icon_file=None, up
         restricted_to_mods = input['restricted_to_mods']
         local_only = input['local_only']
         discussion_languages = input['discussion_languages']
+        question_answer = input['question_answer']
         user = authorise_api_user(auth, return_type='model')
     else:
         title = input.community_name.data
@@ -266,6 +272,7 @@ def edit_community(input, community, src, auth=None, uploaded_icon_file=None, up
         restricted_to_mods = input.restricted_to_mods.data
         local_only = input.local_only.data
         discussion_languages = input.languages.data
+        question_answer = input.question_answer.data
         user = current_user
 
     icon_url_changed = banner_url_changed = False
@@ -317,6 +324,7 @@ def edit_community(input, community, src, auth=None, uploaded_icon_file=None, up
     community.description_html = markdown_to_html(description)
     community.restricted_to_mods = restricted_to_mods
     community.local_only = local_only
+    community.question_answer = question_answer
     db.session.commit()
 
     if not from_scratch:
@@ -587,30 +595,26 @@ def comm_flair_ap_format(flair: CommunityFlair | int | str) -> dict:
     return flair_dict
 
 
-def rate_community_moderation(community_id: int, rating: int, src, auth=None):
+def rate_community(community_id: int, rating: int, src, auth=None):
     if src == SRC_API:
         user = authorise_api_user(auth, return_type='model')
     else:
         user = current_user
 
     community = db.session.query(Community).filter_by(id=community_id).one()
+    can_rate = community.can_rate(user)
 
-    if community_membership(user, community) >= SUBSCRIPTION_MEMBER or user.is_admin_or_staff():
+    if can_rate[0]:
+        community.rate(user, rating)
+        task_selector('rate_community', user_id=user.id, community_id=community_id, rating=rating)
+        existing_rating = db.session.query(Rating).filter_by(community_id=community_id, user_id=user.id)
 
-        db.session.execute(text('DELETE FROM "rating" WHERE user_id = :user_id AND community_id = :community_id'),
-                           {'user_id': user.id,
-                            'community_id': community.id})
-        db.session.add(Rating(user_id=user.id, community_id=community.id, rating=rating))
-        db.session.commit()
-        db.session.execute(text("""
-                            UPDATE "community"
-                            SET average_rating = (
-                                SELECT AVG(rating)
-                                FROM "rating"
-                                WHERE community_id = :community_id
-                            )
-                            WHERE id = :community_id
-                        """), {'community_id': community.id})
-        db.session.commit()
+        if not existing_rating:
+            if rating is not None:
+                community.total_ratings += 1
+            else:
+                community.total_ratings -= 1
+        
+            db.session.commit()
     else:
-        raise Exception('community_members_only')
+        raise Exception(can_rate[1])
