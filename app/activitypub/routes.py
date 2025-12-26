@@ -26,7 +26,8 @@ from app.feed.routes import show_feed
 from app.models import User, Community, CommunityJoinRequest, CommunityMember, CommunityBan, ActivityPubLog, Post, \
     PostReply, Instance, AllowedInstances, BannedInstances, utcnow, Site, Notification, \
     ChatMessage, Conversation, UserFollower, UserBlock, Poll, PollChoice, Feed, FeedItem, FeedMember, FeedJoinRequest, \
-    IpBan, ActivityBatch, InstanceBan
+    IpBan, ActivityBatch, InstanceBan, \
+    Emoji
 from app.post.routes import continue_discussion, show_post
 from app.shared.tasks import task_selector
 from app.user.routes import show_profile
@@ -2157,28 +2158,68 @@ def process_new_content(user, community, store_ap_json, request_json, announced)
 
 def process_upvote(user, store_ap_json, request_json, announced):
     saved_json = request_json if store_ap_json else None
-    id = request_json['id']
-    ap_id = request_json['object'] if not announced else request_json['object']['object']
-    if not announced:
-        emoji = request_json['content'] if 'content' in request_json else None
-    else:
-        emoji = request_json['object']['content'] if 'content' in request_json['object'] else None
+    activity_id = request_json['id']
+
+    like_obj = request_json if not announced else (request_json.get('object') or {})
+    ap_id = request_json['object'] if not announced else like_obj.get('object')
+    emoji = like_obj.get('content') if 'content' in like_obj else None
 
     if isinstance(ap_id, dict) and 'id' in ap_id:
         ap_id = ap_id['id']
+
     liked = find_liked_object(ap_id)
     if liked is None:
-        log_incoming_ap(id, APLOG_LIKE, APLOG_FAILURE, saved_json, 'Unfound object ' + ap_id)
+        log_incoming_ap(activity_id, APLOG_LIKE, APLOG_FAILURE, saved_json, 'Unfound object ' + str(ap_id))
         return
+
     if can_upvote(user, liked.community) and not instance_banned(user.instance.domain):
         if isinstance(liked, (Post, PostReply)):
+            try:
+                upsert_custom_emojis_from_like(like_obj, user.instance_id)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+
             liked.vote(user, 'upvote', emoji)
-            log_incoming_ap(id, APLOG_LIKE, APLOG_SUCCESS, saved_json)
+
+            log_incoming_ap(activity_id, APLOG_LIKE, APLOG_SUCCESS, saved_json)
             if not announced:
                 announce_activity_to_followers(liked.community, user, request_json, can_batch=True)
     else:
-        log_incoming_ap(id, APLOG_LIKE, APLOG_IGNORED, saved_json, 'Cannot upvote this')
+        log_incoming_ap(activity_id, APLOG_LIKE, APLOG_IGNORED, saved_json, 'Cannot upvote this')
 
+
+def upsert_custom_emojis_from_like(like_obj: dict, instance_id: int) -> int:
+    if not instance.trusted:
+        return 0
+    tags = like_obj.get("tag") or []
+    changed = 0
+
+    for t in tags:
+        if t.get("type") != "Emoji":
+            continue
+
+        token = t.get("name")
+        icon = t.get("icon") or {}
+        url = icon.get("url")
+
+        if not token or not url:
+            continue
+
+        existing = (
+            db.session.query(Emoji)
+            .filter(Emoji.instance_id == instance_id, Emoji.token == token)
+            .first()
+        )
+        if existing:
+            if existing.url != url:
+                existing.url = url
+                changed += 1
+        else:
+            db.session.add(Emoji(instance_id=instance_id, token=token, url=url))
+            changed += 1
+
+    return changed
 
 def process_downvote(user, store_ap_json, request_json, announced):
     saved_json = request_json if store_ap_json else None
