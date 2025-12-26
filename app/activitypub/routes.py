@@ -36,7 +36,8 @@ from app.utils import gibberish, get_setting, community_membership, ap_datetime,
     community_moderators, html_to_text, add_to_modlog, instance_banned, get_redis_connection, \
     feed_membership, get_task_session, patch_db_session, \
     blocked_phrases, orjson_response, moderating_communities, joined_communities, moderating_communities_ids, \
-    moderating_communities_ids_all_users
+    moderating_communities_ids_all_users, \
+    trusted_instance_ids
 
 
 @bp.route('/testredis')
@@ -2190,7 +2191,7 @@ def process_upvote(user, store_ap_json, request_json, announced):
 
 
 def upsert_custom_emojis_from_like(like_obj: dict, instance_id: int) -> int:
-    if not instance.trusted:
+    if instance_id not in trusted_instance_ids():
         return 0
     tags = like_obj.get("tag") or []
     changed = 0
