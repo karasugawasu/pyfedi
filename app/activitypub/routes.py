@@ -14,7 +14,7 @@ from app.activitypub.util import users_total, active_half_year, active_month, lo
     post_to_activity, find_actor_or_create_cached, find_liked_object, \
     lemmy_site_data, is_activitypub_request, delete_post_or_comment, community_members, \
     create_post, create_post_reply, update_post_reply_from_activity, \
-    update_post_from_activity, undo_vote, post_to_page, find_reported_object, \
+    update_post_from_activity, undo_vote, post_to_page, post_to_page_microblog, post_to_page_misskey, find_reported_object, \
     process_report, ensure_domains_match, resolve_remote_post, refresh_community_profile, \
     comment_model_to_json, restore_post_or_comment, ban_user, unban_user, \
     log_incoming_ap, find_community, site_ban_remove_data, community_ban_remove_data, verify_object_from_source, \
@@ -1953,20 +1953,33 @@ def post_ap2(post_id):
     return redirect(url_for('activitypub.post_ap', post_id=post_id))
 
 
+def is_microblog_fetch():
+    ua = (request.user_agent.string or "")
+    return ("Mastodon/" in ua) or ("Fedibird/" in ua)
+
+def is_misskey_fetch():
+    ua = (request.user_agent.string or "")
+    return ("Misskey/" in ua)
+
 @bp.route('/post/<int:post_id>', methods=['GET', 'HEAD', 'POST'])
 def post_ap(post_id):
     if (request.method == 'GET' or request.method == 'HEAD') and is_activitypub_request():
         post: Post = Post.query.get_or_404(post_id)
         if post.is_local():
             if request.method == 'GET':
-                post_data = post_to_page(post)
+                if is_microblog_fetch():
+                    post_data = post_to_page_microblog(post)
+                elif is_misskey_fetch():
+                    post_data = post_to_page_misskey(post)
+                else:
+                    post_data = post_to_page(post)
                 post_data['@context'] = default_context()
             else:  # HEAD request
                 post_data = []
             resp = jsonify(post_data)
             resp.content_type = 'application/activity+json'
             resp.headers.set('Cache-Control', 'public, max-age=120')
-            resp.headers.set('Vary', 'Accept')
+            resp.headers.set('Vary', 'Accept User-Agent')
             if post.slug:
                 resp.headers.set('Link',
                                  f'<https://{current_app.config["SERVER_NAME"]}{post.slug}>; rel="alternate"; type="text/html"')

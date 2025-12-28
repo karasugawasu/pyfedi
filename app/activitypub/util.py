@@ -211,6 +211,175 @@ def post_to_page(post: Post):
         activity_data['searchableBy'] = 'https://www.w3.org/ns/activitystreams#Public'
     return activity_data
 
+def html_strip_tags(html: str) -> str:
+    if not html:
+        return ''
+    return BeautifulSoup(html, 'html.parser').get_text('\n').strip()
+
+def post_to_page_microblog(post: Post):
+    activity_data = {
+        "type": "Page",
+        "id": post.ap_id,
+        "context": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/context',
+        "attributedTo": post.author.ap_public_url,
+        "to": [
+            post.community.public_url(),
+            "https://www.w3.org/ns/activitystreams#Public"
+        ],
+        "name": post.title,
+        "cc": [],
+        "content": '',
+        "summary": '',
+        "mediaType": "text/html",
+        "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
+        "attachment": [],
+        "commentsEnabled": post.comments_enabled,
+        "sensitive": post.nsfw or post.nsfl,
+        "genAI": post.ai_generated,
+        "published": ap_datetime(post.created_at),
+        "stickied": post.sticky,
+        "audience": post.community.public_url(),
+        "tag": post.tags_for_activitypub(),
+        "replies": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/replies',
+        "language": {
+            "identifier": post.language_code(),
+            "name": post.language_name()
+        },
+    }
+    if post.language_id:
+        activity_data['contentMap'] = {post.language_code(): activity_data['content']}
+    if post.edited_at is not None:
+        activity_data["updated"] = ap_datetime(post.edited_at)
+    if (post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO or post.type == POST_TYPE_EVENT) and post.url is not None:
+        activity_data["attachment"] = [{"href": post.url, "type": "Link"}]
+    if post.image_id is not None:
+        activity_data["image"] = {"url": post.image.view_url(), "type": "Image"}
+        if post.type == POST_TYPE_IMAGE:
+            activity_data['attachment'] = [{'type': 'Image',
+                                            'url': post.image.source_url,
+                                            'name': post.image.alt_text}]
+    if post.type == POST_TYPE_POLL:
+        poll = Poll.query.filter_by(post_id=post.id).first()
+        activity_data['type'] = 'Question'
+        del activity_data['name']
+        activity_data['content'] = f"<p>{post.title}</p>{post.body_html if post.body_html else ''}"
+        mode = 'oneOf' if poll.mode == 'single' else 'anyOf'
+        choices = []
+        for choice in PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all():
+            choices.append({
+                "type": "Note",
+                "name": choice.choice_text,
+                "replies": {
+                    "type": "Collection",
+                    "totalItems": choice.num_votes
+                }
+            })
+        activity_data[mode] = choices
+        activity_data['endTime'] = ap_datetime(poll.end_poll)
+        activity_data['votersCount'] = poll.total_votes()
+    elif post.type == POST_TYPE_EVENT:
+        event = Event.query.filter_by(post_id=post.id).first()
+        activity_data['type'] = 'Event'
+        activity_data['startTime'] = ap_datetime(event.start)
+        activity_data['endTime'] = ap_datetime(event.end)
+        activity_data['timezone'] = event.timezone
+        activity_data['maximumAttendeeCapacity'] = event.max_attendees
+        activity_data['participantCount'] = event.participant_count
+        activity_data['onlineLink'] = event.online_link
+        activity_data['joinMode'] = event.join_mode
+        activity_data['externalParticipationUrl'] = event.external_participation_url
+        activity_data['anonymousParticipation'] = event.anonymous_participation
+        activity_data['isOnline'] = event.online
+        activity_data['buyTicketsLink'] = event.buy_tickets_link
+        activity_data['feeCurrency'] = event.event_fee_currency
+        activity_data['feeAmount'] = event.event_fee_amount
+
+    if post.indexable:
+        activity_data['searchableBy'] = 'https://www.w3.org/ns/activitystreams#Public'
+    return activity_data
+
+def post_to_page_misskey(post: Post):
+    plain = html_strip_tags(post.body_html)
+    activity_data = {
+        "type": "Page",
+        "id": post.ap_id,
+        "context": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/context',
+        "attributedTo": post.author.ap_public_url,
+        "to": [
+            post.community.public_url(),
+            "https://www.w3.org/ns/activitystreams#Public"
+        ],
+        "name": post.title,
+        "cc": [],
+        "content": plain,
+        "summary": plain,
+        "mediaType": "text/plain",
+        "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
+        "attachment": [],
+        "commentsEnabled": post.comments_enabled,
+        "sensitive": post.nsfw or post.nsfl,
+        "genAI": post.ai_generated,
+        "published": ap_datetime(post.created_at),
+        "stickied": post.sticky,
+        "audience": post.community.public_url(),
+        "tag": post.tags_for_activitypub(),
+        "replies": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/replies',
+        "language": {
+            "identifier": post.language_code(),
+            "name": post.language_name()
+        },
+    }
+    if post.language_id:
+        activity_data['contentMap'] = {post.language_code(): activity_data['content']}
+    if post.edited_at is not None:
+        activity_data["updated"] = ap_datetime(post.edited_at)
+    if (post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO or post.type == POST_TYPE_EVENT) and post.url is not None:
+        activity_data["attachment"] = [{"href": post.url, "type": "Link"}]
+    if post.image_id is not None:
+        activity_data["image"] = {"url": post.image.view_url(), "type": "Image"}
+        if post.type == POST_TYPE_IMAGE:
+            activity_data['attachment'] = [{'type': 'Image',
+                                            'url': post.image.source_url,
+                                            'name': post.image.alt_text}]
+    if post.type == POST_TYPE_POLL:
+        poll = Poll.query.filter_by(post_id=post.id).first()
+        activity_data['type'] = 'Question'
+        del activity_data['name']
+        activity_data['content'] = f"{post.title}\n{plain}"
+        mode = 'oneOf' if poll.mode == 'single' else 'anyOf'
+        choices = []
+        for choice in PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all():
+            choices.append({
+                "type": "Note",
+                "name": choice.choice_text,
+                "replies": {
+                    "type": "Collection",
+                    "totalItems": choice.num_votes
+                }
+            })
+        activity_data[mode] = choices
+        activity_data['endTime'] = ap_datetime(poll.end_poll)
+        activity_data['votersCount'] = poll.total_votes()
+    elif post.type == POST_TYPE_EVENT:
+        event = Event.query.filter_by(post_id=post.id).first()
+        activity_data['type'] = 'Event'
+        activity_data['startTime'] = ap_datetime(event.start)
+        activity_data['endTime'] = ap_datetime(event.end)
+        activity_data['timezone'] = event.timezone
+        activity_data['maximumAttendeeCapacity'] = event.max_attendees
+        activity_data['participantCount'] = event.participant_count
+        activity_data['onlineLink'] = event.online_link
+        activity_data['joinMode'] = event.join_mode
+        activity_data['externalParticipationUrl'] = event.external_participation_url
+        activity_data['anonymousParticipation'] = event.anonymous_participation
+        activity_data['isOnline'] = event.online
+        activity_data['buyTicketsLink'] = event.buy_tickets_link
+        activity_data['feeCurrency'] = event.event_fee_currency
+        activity_data['feeAmount'] = event.event_fee_amount
+
+    if post.indexable:
+        activity_data['searchableBy'] = 'https://www.w3.org/ns/activitystreams#Public'
+    return activity_data
 
 def post_replies_for_ap(post_id: int) -> List[dict]:
     replies = PostReply.query.filter_by(post_id=post_id, deleted=False).order_by(PostReply.posted_at).limit(2000)
