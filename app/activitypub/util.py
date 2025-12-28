@@ -246,8 +246,8 @@ def post_to_page_microblog(post: Post):
             "name": post.language_name()
         },
     }
-    if post.language_id:
-        activity_data['contentMap'] = {post.language_code(): activity_data['content']}
+    # if post.language_id:
+    #     activity_data['contentMap'] = {post.language_code(): activity_data['content']}
     if post.edited_at is not None:
         activity_data["updated"] = ap_datetime(post.edited_at)
     if (post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO or post.type == POST_TYPE_EVENT) and post.url is not None:
@@ -259,10 +259,12 @@ def post_to_page_microblog(post: Post):
                                             'url': post.image.source_url,
                                             'name': post.image.alt_text}]
     if post.type == POST_TYPE_POLL:
+        plain = html_strip_tags(post.body_html)
         poll = Poll.query.filter_by(post_id=post.id).first()
         activity_data['type'] = 'Question'
         del activity_data['name']
-        activity_data['content'] = f"<p>{post.title}</p>{post.body_html if post.body_html else ''}"
+        activity_data['content'] = f"{plain}"
+        activity_data['contentMap'] = {post.language_code(): activity_data['content']}
         mode = 'oneOf' if poll.mode == 'single' else 'anyOf'
         choices = []
         for choice in PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all():
@@ -312,7 +314,7 @@ def post_to_page_misskey(post: Post):
         "name": post.title,
         "cc": [],
         "content": plain,
-        "summary": plain,
+        #"summary": '',
         "mediaType": "text/plain",
         "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
         "attachment": [],
@@ -345,7 +347,7 @@ def post_to_page_misskey(post: Post):
         poll = Poll.query.filter_by(post_id=post.id).first()
         activity_data['type'] = 'Question'
         del activity_data['name']
-        activity_data['content'] = f"{post.title}\n{plain}"
+        activity_data['content'] = f"{plain}"
         mode = 'oneOf' if poll.mode == 'single' else 'anyOf'
         choices = []
         for choice in PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all():

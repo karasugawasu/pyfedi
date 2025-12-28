@@ -1979,7 +1979,7 @@ def post_ap(post_id):
             resp = jsonify(post_data)
             resp.content_type = 'application/activity+json'
             resp.headers.set('Cache-Control', 'public, max-age=120')
-            resp.headers.set('Vary', 'Accept User-Agent')
+            resp.headers.set('Vary', 'Accept, User-Agent')
             if post.slug:
                 resp.headers.set('Link',
                                  f'<https://{current_app.config["SERVER_NAME"]}{post.slug}>; rel="alternate"; type="text/html"')
