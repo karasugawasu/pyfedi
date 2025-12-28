@@ -80,7 +80,8 @@
                     <div class="message_reaction{{ ' reacted' if current_user.is_authenticated and current_user.lemmy_link() in reaction['authors'] }}"
                          hx-post="/comment/{{ post_reply.id }}/emoji_set"
                          hx-vals='{"emoji": "{{ reaction['token'] }}"}'
-                         hx-target="#reactions_{{ post_reply.id }}" hx-swap="outerHTML">
+                         hx-target="#reactions_{{ post_reply.id }}" hx-swap="outerHTML"
+                         title='{{ ", ".join(reaction["authors"]) }}'>
                         <div class="emoji">{% if reaction['url'] and reaction['url'].startswith('https://') -%}
                                                 <img src="{{ reaction['url'] }}" width="20" alt="{{ reaction['token'] }}">
                                             {%- else -%}
@@ -143,7 +144,7 @@
                 </div>
             {% endif -%}
         {% endif -%}
-        <div class="emoji_button">
+        <div class="emoji_button hide_skinny_mobile">
             {{ render_emoji_button(post_reply, post_reply.post.community, current_user=current_user, can_upvote_here=can_upvote_here, communities_banned_from_list=communities_banned_from_list, disable_voting=disable_voting, recently_upvoted_replies=recently_upvoted_replies) }}
         </div>
         <div class="hide_button">
@@ -158,7 +159,7 @@
                 {{ render_reply_notification_toggle(dict(comment=post_reply), current_user=current_user) }}
             {% endif -%}
         </div>
-        {% if post_reply.community.question_answer -%}
+        {% if post_reply.community.question_answer and post_reply.depth < 3 -%}
             <div class="choose_answer_icon">
                 {% if post_reply.answer -%}
                 <a rel="nofollow noindex" title="{{ _('Un-choose answer') }}" href="#"
