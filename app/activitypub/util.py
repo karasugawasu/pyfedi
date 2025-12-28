@@ -314,7 +314,7 @@ def post_to_page_misskey(post: Post):
         "name": post.title,
         "cc": [],
         "content": plain,
-        #"summary": '',
+        "summary": post.title,
         "mediaType": "text/plain",
         "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
         "attachment": [],
