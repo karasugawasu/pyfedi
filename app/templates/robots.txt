@@ -19,9 +19,6 @@ User-Agent: *
 User-agent: Applebot
 Disallow: /
 
-User-agent: Applebot
-Disallow: /
-
 User-agent: GPTBot
 Disallow: /
 
@@ -80,6 +77,9 @@ User-agent: Sogou web spider
 Disallow: /
 
 User-agent: Sogou inst spider
+Disallow: /
+
+User-agent: SERankingBacklinksBot
 Disallow: /
 
 User-Agent: PerplexityBot
