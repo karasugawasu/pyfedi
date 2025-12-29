@@ -1,5 +1,5 @@
 {% if community %}
-<div class="d-block">
+<div class="d-block mb-2 mt-2">
     <div class="row">
         <div class="col-6 pe-1">
             <div class="d-block d-xl-none">
@@ -117,123 +117,119 @@
         </div>
         <div class="col-6 ps-1">
             <div class="mobile_create_post">
-                <div class="row">
-                    <div class="col-auto pe-1">
-                        <a class="btn btn-outline-primary w-100 text-nowrap"
-                            href="/community/{{ community.link() }}/submit"
-                            rel="nofollow noindex">
-                            {{ _('Create post') }}
-                        </a>
-                    </div>
-                    <div class="col-auto pe-1">
-                        <div class="dropdown">
-                            <button class="btn btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
-                                {{ _('Options') }}
-                            </button>
-                            <ul class="dropdown-menu">
-                                <form class="px-3 py-1">
-                                    <div class="mb-3">
-                                        <label for="layout" class="form-label">
-                                            {{ _('Layout') }}
-                                        </label>
-                                        <select class="form-control form-select" id="layout" name="layout">
-                                            <option value="list" {{ 'selected' if post_layout == '' or post_layout == 'list' }}>
-                                                {{ _('List') }}
+                <div class="d-flex justify-content-end gap-2 flex-nowrap">
+                    <a class="btn btn-outline-primary w-100 text-nowrap"
+                        href="/community/{{ community.link() }}/submit"
+                        rel="nofollow noindex">
+                        {{ _('Create post') }}
+                    </a>
+                    <div class="dropdown">
+                        <button class="btn btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                            {{ _('Options') }}
+                        </button>
+                        <ul class="dropdown-menu">
+                            <form class="px-3 py-1">
+                                <div class="mb-3">
+                                    <label for="layout" class="form-label">
+                                        {{ _('Layout') }}
+                                    </label>
+                                    <select class="form-control form-select" id="layout" name="layout">
+                                        <option value="list" {{ 'selected' if post_layout == '' or post_layout == 'list' }}>
+                                            {{ _('List') }}
+                                        </option>
+                                        <option value="masonry" {{ 'selected' if post_layout == 'masonry' }}>
+                                            {{ _('Tile') }}
+                                        </option>
+                                        <option value="masonry_wide" {{ 'selected' if post_layout == 'masonry_wide' }}>
+                                            {{ _('Wide tile') }}
+                                        </option>
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="type" class="form-label">
+                                        {{ _('Content type') }}
+                                    </label>
+                                    <select class="form-control form-select" id="type" name="content_type">
+                                        <option value="posts" {{ 'selected' if content_type == '' or content_type == 'posts' }}>
+                                            {{ _('Posts') }}
+                                        </option>
+                                        <option value="comments" {{ 'selected' if content_type == 'comments' }}>
+                                            {{ _('Comments') }}
+                                        </option>
+                                        {% if has_events -%}
+                                            <option value="events" {{ 'selected' if content_type == 'events' }}>
+                                                {{ _('Events') }}
                                             </option>
-                                            <option value="masonry" {{ 'selected' if post_layout == 'masonry' }}>
-                                                {{ _('Tile') }}
-                                            </option>
-                                            <option value="masonry_wide" {{ 'selected' if post_layout == 'masonry_wide' }}>
-                                                {{ _('Wide tile') }}
-                                            </option>
-                                        </select>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label for="type" class="form-label">
-                                            {{ _('Content type') }}
-                                        </label>
-                                        <select class="form-control form-select" id="type" name="content_type">
-                                            <option value="posts" {{ 'selected' if content_type == '' or content_type == 'posts' }}>
-                                                {{ _('Posts') }}
-                                            </option>
-                                            <option value="comments" {{ 'selected' if content_type == 'comments' }}>
-                                                {{ _('Comments') }}
-                                            </option>
-                                            {% if has_events -%}
-                                                <option value="events" {{ 'selected' if content_type == 'events' }}>
-                                                    {{ _('Events') }}
-                                                </option>
-                                            {% endif -%}
-                                        </select>
-                                    </div>
-                                    <button type="submit" class="btn btn-outline-primary text-nowrap">
-                                        {{ _('Apply filters') }}
-                                    </button>
-                                </form>
-                                <div class="dropdown-divider"></div>
-                                {% if not community.restricted_to_mods or (community.restricted_to_mods and current_user.is_authenticated and community_membership(current_user, community) in [SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER]) %}
-                                    <li class="px-3 py-1">
-                                        <a class="btn btn-outline-primary w-100 text-nowrap"
-                                            href="/community/{{ community.link() }}/submit"
-                                            rel="nofollow noindex">
-                                            {{ _('Create post') }}
+                                        {% endif -%}
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-outline-primary text-nowrap">
+                                    {{ _('Apply filters') }}
+                                </button>
+                            </form>
+                            <div class="dropdown-divider"></div>
+                            {% if not community.restricted_to_mods or (community.restricted_to_mods and current_user.is_authenticated and community_membership(current_user, community) in [SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER]) %}
+                                <li class="px-3 py-1">
+                                    <a class="btn btn-outline-primary w-100 text-nowrap"
+                                        href="/community/{{ community.link() }}/submit"
+                                        rel="nofollow noindex">
+                                        {{ _('Create post') }}
+                                    </a>
+                                </li>
+                            {% endif %}
+                            <li>
+                                <a class="dropdown-item" href="/community/{{ community.link() }}/invite" rel="nofollow noindex">
+                                    {{ _('Invite people to join') }}
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" href="#search_community">
+                                    {{ _('Search') }}
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" href="#about_community">
+                                    {{ _('About community') }}
+                                </a>
+                            </li>
+                            <div class="dropdown-divider"></div>
+                            {% if current_user.is_authenticated and community_membership(current_user, community) in [SUBSCRIPTION_MEMBER, SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER] -%}
+                                <li>
+                                    <a class="dropdown-item" href="/community/{{ community.link() }}/unsubscribe" rel="nofollow">
+                                        {{ _('Leave') }}
+                                    </a>
+                                </li>
+                            {% elif current_user.is_authenticated and community_membership(current_user, community) == SUBSCRIPTION_PENDING -%}
+                                <li>
+                                    <a class="dropdown-item" href="/community/{{ community.link() }}/unsubscribe" rel="nofollow">
+                                        {{ _('Pending') }}
+                                    </a>
+                                </li>
+                            {% else -%}
+                                {% if not community.instance.gone_forever %}
+                                    <li>
+                                        <a class="dropdown-item" href="/community/{{ community.link() }}/subscribe" rel="nofollow">
+                                            {{ _('Join') }}
                                         </a>
                                     </li>
                                 {% endif %}
-                                <li>
-                                    <a class="dropdown-item" href="/community/{{ community.link() }}/invite" rel="nofollow noindex">
-                                        {{ _('Invite people to join') }}
-                                    </a>
-                                </li>
-                                <li>
-                                    <a class="dropdown-item" href="#search_community">
-                                        {{ _('Search') }}
-                                    </a>
-                                </li>
-                                <li>
-                                    <a class="dropdown-item" href="#about_community">
-                                        {{ _('About community') }}
-                                    </a>
-                                </li>
+                            {% endif -%}
+                            {% if is_moderator or is_owner or is_admin -%}
                                 <div class="dropdown-divider"></div>
-                                {% if current_user.is_authenticated and community_membership(current_user, community) in [SUBSCRIPTION_MEMBER, SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER] -%}
-                                    <li>
-                                        <a class="dropdown-item" href="/community/{{ community.link() }}/unsubscribe" rel="nofollow">
-                                            {{ _('Leave') }}
-                                        </a>
-                                    </li>
-                                {% elif current_user.is_authenticated and community_membership(current_user, community) == SUBSCRIPTION_PENDING -%}
-                                    <li>
-                                        <a class="dropdown-item" href="/community/{{ community.link() }}/unsubscribe" rel="nofollow">
-                                            {{ _('Pending') }}
-                                        </a>
-                                    </li>
-                                {% else -%}
-                                    {% if not community.instance.gone_forever %}
-                                        <li>
-                                            <a class="dropdown-item" href="/community/{{ community.link() }}/subscribe" rel="nofollow">
-                                                {{ _('Join') }}
-                                            </a>
-                                        </li>
-                                    {% endif %}
-                                {% endif -%}
-                                {% if is_moderator or is_owner or is_admin -%}
-                                    <div class="dropdown-divider"></div>
-                                    <li>
-                                        <a class="dropdown-item" href="/community/{{ community.link() }}/moderate">
-                                            {{ _('Moderate') }}
-                                        </a>
-                                    </li>
-                                {% endif -%}
-                                {% if is_owner or is_admin -%}
-                                    <li>
-                                        <a class="dropdown-item" href="{{ url_for('community.community_edit', community_id=community.id) }}">
-                                            {{ _('Settings') }}
-                                        </a>
-                                    </li>
-                                {% endif -%}
-                            </ul>
-                        </div>
+                                <li>
+                                    <a class="dropdown-item" href="/community/{{ community.link() }}/moderate">
+                                        {{ _('Moderate') }}
+                                    </a>
+                                </li>
+                            {% endif -%}
+                            {% if is_owner or is_admin -%}
+                                <li>
+                                    <a class="dropdown-item" href="{{ url_for('community.community_edit', community_id=community.id) }}">
+                                        {{ _('Settings') }}
+                                    </a>
+                                </li>
+                            {% endif -%}
+                        </ul>
                     </div>
                 </div>
             </div>
@@ -243,7 +239,7 @@
 {% endif %}
 
 {% if topic %}
-<div class="d-block">
+<div class="d-block mb-2 mt-2">
     <div class="row">
         <div class="col-6 pe-1">
             <div class="d-block d-xl-none">
@@ -361,79 +357,75 @@
         </div>
         <div class="col-6 ps-1">
             <div class="mobile_create_post">
-                <div class="row">
-                    <div class="col-auto ps-1">
-                        <a class="btn btn-outline-primary w-100 text-nowrap"
-                            href="{{ url_for('topic.topic_create_post', topic_name=topic.machine_name) }}"
-                            rel="nofollow noindex">
-                            {{ _('Create post') }}
-                        </a>
-                    </div>
-                    <div class="col-auto pe-1">
-                        <div class="dropdown">
-                            <button class="btn btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
-                                {{ _('Options') }}
-                            </button>
-                            <ul class="dropdown-menu">
-                                <form class="px-3 py-1">
-                                    <div class="mb-3">
-                                        <label for="layout" class="form-label">
-                                            {{ _('Layout') }}
-                                        </label>
-                                        <select class="form-control form-select" id="layout" name="layout">
-                                            <option value="list" {{ 'selected' if post_layout == '' or post_layout == 'list' }}>
-                                                {{ _('List') }}
-                                            </option>
-                                            <option value="masonry" {{ 'selected' if post_layout == 'masonry' }}>
-                                                {{ _('Tile') }}
-                                            </option>
-                                            <option value="masonry_wide" {{ 'selected' if post_layout == 'masonry_wide' }}>
-                                                {{ _('Wide tile') }}
-                                            </option>
-                                        </select>
-                                    </div>
-                                    <div class="mb-3">
-                                        <label for="type" class="form-label">
-                                            {{ _('Content type') }}
-                                        </label>
-                                        <select class="form-control form-select" id="type" name="content_type">
-                                            <option value="posts" {{ 'selected' if content_type == '' or content_type == 'posts' }}>
-                                                {{ _('Posts') }}
-                                            </option>
-                                            <option value="comments" {{ 'selected' if content_type == 'comments' }}>
-                                                {{ _('Comments') }}
-                                            </option>
-                                            {% if has_events -%}
-                                            <option value="events" {{ 'selected' if content_type == 'events' }}>
-                                                {{ _('Events') }}
-                                            </option>
-                                            {% endif -%}
-                                        </select>
-                                    </div>
-                                    <button type="submit" class="btn btn-primary text-nowrap">
-                                        {{ _('Apply filters') }}
-                                    </button>
-                                </form>
-                                <div class="dropdown-divider"></div>
-                                <li class="px-3 py-1">
-                                    <a class="btn btn-outline-primary w-100 text-nowrap"
-                                        href="{{ url_for('topic.topic_create_post', topic_name=topic.machine_name) }}"
-                                        rel="nofollow noindex">
-                                        {{ _('Create post') }}
-                                    </a>
-                                </li>
-                                <li>
-                                    <a class="dropdown-item" href="{{ url_for('feed.feed_new', topic_id=topic.id) }}" rel="nofollow noindex">
-                                        {{ _('Create feed') }}
-                                    </a>
-                                </li>
-                                <li>
-                                    <a class="dropdown-item" href="#topic_communities">
-                                        {{ _('Communities') }}
-                                    </a>
-                                </li>
-                            </ul>
-                        </div>
+                <div class="d-flex justify-content-end gap-2 flex-nowrap">
+                    <a class="btn btn-outline-primary w-100 text-nowrap"
+                        href="{{ url_for('topic.topic_create_post', topic_name=topic.machine_name) }}"
+                        rel="nofollow noindex">
+                        {{ _('Create post') }}
+                    </a>
+                    <div class="dropdown">
+                        <button class="btn btn-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                            {{ _('Options') }}
+                        </button>
+                        <ul class="dropdown-menu">
+                            <form class="px-3 py-1">
+                                <div class="mb-3">
+                                    <label for="layout" class="form-label">
+                                        {{ _('Layout') }}
+                                    </label>
+                                    <select class="form-control form-select" id="layout" name="layout">
+                                        <option value="list" {{ 'selected' if post_layout == '' or post_layout == 'list' }}>
+                                            {{ _('List') }}
+                                        </option>
+                                        <option value="masonry" {{ 'selected' if post_layout == 'masonry' }}>
+                                            {{ _('Tile') }}
+                                        </option>
+                                        <option value="masonry_wide" {{ 'selected' if post_layout == 'masonry_wide' }}>
+                                            {{ _('Wide tile') }}
+                                        </option>
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="type" class="form-label">
+                                        {{ _('Content type') }}
+                                    </label>
+                                    <select class="form-control form-select" id="type" name="content_type">
+                                        <option value="posts" {{ 'selected' if content_type == '' or content_type == 'posts' }}>
+                                            {{ _('Posts') }}
+                                        </option>
+                                        <option value="comments" {{ 'selected' if content_type == 'comments' }}>
+                                            {{ _('Comments') }}
+                                        </option>
+                                        {% if has_events -%}
+                                        <option value="events" {{ 'selected' if content_type == 'events' }}>
+                                            {{ _('Events') }}
+                                        </option>
+                                        {% endif -%}
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary text-nowrap">
+                                    {{ _('Apply filters') }}
+                                </button>
+                            </form>
+                            <div class="dropdown-divider"></div>
+                            <li class="px-3 py-1">
+                                <a class="btn btn-outline-primary w-100 text-nowrap"
+                                    href="{{ url_for('topic.topic_create_post', topic_name=topic.machine_name) }}"
+                                    rel="nofollow noindex">
+                                    {{ _('Create post') }}
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" href="{{ url_for('feed.feed_new', topic_id=topic.id) }}" rel="nofollow noindex">
+                                    {{ _('Create feed') }}
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item" href="#topic_communities">
+                                    {{ _('Communities') }}
+                                </a>
+                            </li>
+                        </ul>
                     </div>
                 </div>
             </div>
