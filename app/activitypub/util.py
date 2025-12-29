@@ -311,7 +311,7 @@ def post_to_page_misskey(post: Post):
             post.community.public_url(),
             "https://www.w3.org/ns/activitystreams#Public"
         ],
-        #"name": post.title,
+        "name": post.title,
         "cc": [],
         "content": plain,
         "summary": post.title,
