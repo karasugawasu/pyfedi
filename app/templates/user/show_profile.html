@@ -295,15 +295,24 @@
                      <h2>{{ _('Manage') }}</h2>
                 </div>
                 <div class="card-body">
-                    <div class="row">
-                        <div class="col-4">
-                            <a class="w-100 btn btn-primary btn-sm" href="/u/{{ user.link() }}/profile">{{ _('Profile') }}</a>
+                    <div class="row g-2">
+                        <div class="col-12">
+                            <a class="w-100 btn btn-outline-primary btn-sm text-nowrap"
+                            href="/u/{{ user.link() }}/profile">
+                            {{ _('Profile') }}
+                            </a>
                         </div>
-                        <div class="col-4">
-                            <a class="w-100 btn btn-primary btn-sm" href="/user/settings">{{ _('Settings') }}</a>
+                        <div class="col-12">
+                            <a class="w-100 btn btn-outline-primary btn-sm text-nowrap"
+                            href="/user/settings">
+                            {{ _('Settings') }}
+                            </a>
                         </div>
-                        <div class="col-4">
-                            <a class="w-100 btn btn-primary btn-sm" href="/user/files">{{ _('Files') }}</a>
+                        <div class="col-12">
+                            <a class="w-100 btn btn-outline-primary btn-sm text-nowrap"
+                            href="/user/files">
+                            {{ _('Files') }}
+                            </a>
                         </div>
                     </div>
                 </div>
