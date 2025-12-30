@@ -1978,7 +1978,7 @@ def post_ap(post_id):
                 post_data = []
             resp = jsonify(post_data)
             resp.content_type = 'application/activity+json'
-            resp.headers.set('Cache-Control', 'public, max-age=0, must-revalidate')
+            resp.headers.set('Cache-Control', 'public, max-age=15')
             resp.headers.set('Vary', 'Accept, User-Agent')
             if post.slug:
                 resp.headers.set('Link',
