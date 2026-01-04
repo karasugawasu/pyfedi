@@ -3208,25 +3208,43 @@ def update_post_from_activity(post: Post, request_json: dict):
                     post.title = attachment['name']
                 if new_url:
                     break
-        # tagにlinkが含まれてたら上書き
+        # tagにlinkが含まれてたらURL削除
         if post.microblog:
             tags = request_json.get('object', {}).get('tag', [])
             if any(
                 tag and tag.get('type') == 'Hashtag' and 'link' in tag.get('name', '').lower()
                 for tag in tags
             ):
-                if 'name' in request_json['object']['attachment'][0]:
-                    alt_text = request_json['object']['attachment'][0]['name']
-                post.body_html += f'''
-                <br>
-                <a href="{new_url}" data-caption="">
-                    <img alt="{alt_text}" loading="lazy" src="{new_url}">
-                </a>
-                '''
-                post.body += f'''
-                ![{alt_text}]({new_url})
-                '''
                 new_url = None
+        # Mastodon,Misskeyの画像を全部本文に表示する
+        if post.microblog:
+            attachments = request_json.get('object', {}).get('attachment', [])
+            docs = []
+            imgs_html = []
+            for a in attachments:
+                if not a:
+                    continue
+                if a.get('type') != 'Document':
+                    continue
+                url = a.get('url')
+                if not url:
+                    continue
+                docs.append(a)
+            for a in docs[:16]:
+                url = a.get('url')
+                if not url:
+                    continue
+                alt_safe = a.get('name') or ""
+
+                imgs_html.append(
+                    f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}">'
+                )
+            if imgs_html:
+                post.body_html += (
+                    '\n<hr>\n<div class="mb_img_grid">\n'
+                    + "\n".join(imgs_html)
+                    + "\n</div>\n"
+                )
         # Lastly, check for image posts. Mbin sends link posts with both image and link and we want to ignore the image in that case.
         if not new_url:
             for attachment in request_json['object']['attachment']:

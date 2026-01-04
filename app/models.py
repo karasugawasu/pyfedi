@@ -1774,24 +1774,44 @@ class Post(db.Model):
                         post.title = attachment['name']
                     if post.url:
                         break
-            # tagにlinkが含まれてたら上書き
+            # tagにlinkが含まれてたらURL削除
             if post.microblog:
                 tags = request_json.get('object', {}).get('tag', [])
                 if any(
                     tag and tag.get('type') == 'Hashtag' and 'link' in tag.get('name', '').lower()
                     for tag in tags
                 ):
-                    
-                    post.body_html += f'''
-                    <br>
-                    <a href="{post.url}" data-caption="">
-                        <img alt="{alt_text}" loading="lazy" src="{post.url}">
-                    </a>
-                    '''
-                    post.body += f'''
-                    ![{alt_text}]({post.url})
-                    '''
                     post.url = None
+            # Mastodon,Misskeyの画像を全部本文に表示する
+            if post.microblog:
+                attachments = request_json.get('object', {}).get('attachment', [])
+                docs = []
+                imgs_html = []
+                for a in attachments:
+                    if not a:
+                        continue
+                    if a.get('type') != 'Document':
+                        continue
+                    url = a.get('url')
+                    if not url:
+                        continue
+                    docs.append(a)
+                for a in docs[:16]:
+                    url = a.get('url')
+                    if not url:
+                        continue
+                    alt_safe = a.get('name') or ""
+
+                    imgs_html.append(
+                        f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}">'
+                    )
+                if imgs_html:
+                    post.body_html += (
+                        '\n<hr>\n<div class="mb_img_grid">\n'
+                        + "\n".join(imgs_html)
+                        + "\n</div>\n"
+                    )
+
             # Lastly, check for image posts. Mbin sends link posts with both image and link and we want to ignore the image in that case.
             if not post.url:
                 for attachment in request_json['object']['attachment']:
