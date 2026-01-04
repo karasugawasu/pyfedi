@@ -70,14 +70,13 @@ def show_post(post_id: int):
         community: Community = post.community
 
         if community.banned or post.deleted:
-            if current_user.is_anonymous or not (current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff())):
-                abort(404)
+            if post.deleted_by == post.user_id:
+                flash(_('This post has been deleted by the author.'), 'warning')
             else:
-                if post.deleted_by == post.user_id:
-                    flash(_('This post has been deleted by the author and is only visible to staff and admins.'),
-                          'warning')
-                else:
+                if current_user.is_authenticated and (community.is_moderator() or current_user.is_admin_or_staff()):
                     flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
+                else:
+                    abort(404)
         
         if current_user.is_anonymous:
             if current_app.config['CONTENT_WARNING']:
@@ -138,7 +137,7 @@ def show_post(post_id: int):
             if not post.community.is_moderator() and not post.community.is_owner() and not current_user.is_staff() and not current_user.is_admin():
                 form.distinguished.render_kw = {'disabled': True}
 
-        if current_user.is_authenticated and current_user.verified and form.validate_on_submit():
+        if current_user.is_authenticated and current_user.verified and form.validate_on_submit() and not post.deleted:
             try:
                 reply = make_reply(form, post, None, SRC_WEB)
             except Exception as ex:
@@ -899,10 +898,6 @@ def post_options(post_id: int):
     if post.deleted:
         if current_user.is_anonymous:
             abort(404)
-        if (not post.community.is_moderator() and
-                not current_user.is_admin() and
-                (post.deleted_by is not None and post.deleted_by != current_user.id)):
-            abort(401)
 
     existing_bookmark = []
     if current_user.is_authenticated:

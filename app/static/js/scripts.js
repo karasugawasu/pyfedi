@@ -62,7 +62,8 @@ document.addEventListener("DOMContentLoaded", function () {
         setupScrollToComment,
         setupTranslateAll,
         setupEmojiAutoSubmit,
-        setupReactionDialog
+        setupReactionDialog,
+        setupScrollChat,
     ];
     
     // Run critical setups immediately
@@ -126,28 +127,30 @@ document.addEventListener("DOMContentLoaded", function () {
 
 
 function setupUserPopup() {
-    document.querySelectorAll('.render_username .author_link').forEach(anchor => {
-        if (!anchor.dataset.userPopupSetup) {
-            let timeoutId;
+    if(window.matchMedia("(pointer: fine)").matches) {
+        document.querySelectorAll('.render_username .author_link').forEach(anchor => {
+            if (!anchor.dataset.userPopupSetup) {
+                let timeoutId;
 
-            anchor.addEventListener('mouseover', function() {
-                timeoutId = setTimeout(function () {
-                    anchor.nextElementSibling.classList.remove('d-none');
-                }, 1000);
-            });
+                anchor.addEventListener('mouseover', function() {
+                    timeoutId = setTimeout(function () {
+                        anchor.nextElementSibling.classList.remove('d-none');
+                    }, 1000);
+                });
 
-            anchor.addEventListener('mouseout', function() {
-                clearTimeout(timeoutId);
+                anchor.addEventListener('mouseout', function() {
+                    clearTimeout(timeoutId);
 
-                let userPreview = anchor.closest('.render_username').querySelector('.user_preview');
-                if (userPreview) {
-                    userPreview.classList.add('d-none');
-                }
-            });
-            
-            anchor.dataset.userPopupSetup = 'true';
-        }
-    });
+                    let userPreview = anchor.closest('.render_username').querySelector('.user_preview');
+                    if (userPreview) {
+                        userPreview.classList.add('d-none');
+                    }
+                });
+
+                anchor.dataset.userPopupSetup = 'true';
+            }
+        });
+    }
 }
 function setupPostTeaserHandler() {
     document.querySelectorAll('.post_teaser_clickable').forEach(div => {
@@ -2320,4 +2323,17 @@ function setupReactionDialog() {
             }
         });
     }
+}
+
+
+
+function setupScrollChat() {
+    var scrollThese = document.querySelectorAll('.scroll_down');
+    scrollThese.forEach(function(scroll) {
+        scroll.scrollTop = scroll.scrollHeight;
+    });
+}
+
+function stickToBottom(el) {
+    return Math.abs(el.scrollHeight - el.scrollTop - el.clientHeight) < 1;
 }
