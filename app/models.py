@@ -1795,7 +1795,7 @@ class Post(db.Model):
                     url = a.get('url')
                     if not isinstance(url, str) or not url:
                         continue
-                    alt_safe = html_escape(a.get('name') or "", quote=True)
+                    alt_safe = a.get('name') or ""
                     imgs_html.append(
                         f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}">'
                     )
