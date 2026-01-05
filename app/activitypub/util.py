@@ -2488,6 +2488,11 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             elif isinstance(request_json['object']['attachment'], list):
                 attachment_list = request_json['object']['attachment']
             for attachment in attachment_list:
+                if not isinstance(attachment, dict):
+                    continue
+                media_type = attachment.get('mediaType')
+                if isinstance(media_type, str) and media_type.startswith('image/'):
+                    continue
                 url = alt_text = ''
                 if 'href' in attachment:
                     url = attachment['href']
@@ -2499,6 +2504,26 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
                     body = body + f"\n\n![{alt_text}]({url})"
             if attachment_list:
                 body_html = markdown_to_html(body)
+
+        #imageのときは専用で処理する
+        imgs = []
+        for attachment in attachment_list:
+            if not isinstance(attachment, dict):
+                continue
+            media_type = attachment.get('mediaType')
+            if not (isinstance(media_type, str) and media_type.startswith('image/')):
+                continue
+            url = attachment.get('url') or attachment.get('href')
+            if not isinstance(url, str) or not url:
+                continue
+            alt_raw = attachment.get('name')
+            alt = html_escape(alt_raw, quote=True) if isinstance(alt_raw, str) else ""
+            imgs.append((url, alt))
+        if imgs:
+            body_html += "\n<hr>\n<div class='mb_img_grid'>"
+            for url, alt in imgs[:16]:
+                body_html += f'\n<img class="mb_img" alt="{alt}" loading="lazy" src="{url}">'
+            body_html += "\n</div>"
 
         # Check for Mentions of local users
         reply_parent = parent_comment if parent_comment else post
@@ -2847,18 +2872,44 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
             attachment_list.append(request_json['object']['attachment'])
         elif isinstance(request_json['object']['attachment'], list):
             attachment_list = request_json['object']['attachment']
+
         for attachment in attachment_list:
+            if not isinstance(attachment, dict):
+                continue
+            media_type = attachment.get('mediaType')
+            if isinstance(media_type, str) and media_type.startswith('image/'):
+                continue
             url = alt_text = ''
             if 'href' in attachment:
                 url = attachment['href']
             if 'url' in attachment:
                 url = attachment['url']
-            if 'name' in attachment:
+            if 'name' in attachment and isinstance(attachment['name'], str):
                 alt_text = attachment['name']
             if url:
                 reply.body = reply.body + f"\n\n![{alt_text}]({url})"
         if attachment_list:
             reply.body_html = markdown_to_html(reply.body)
+
+    #imageのときは専用で処理する
+    imgs = []
+    for attachment in attachment_list:
+        if not isinstance(attachment, dict):
+            continue
+        media_type = attachment.get('mediaType')
+        if not (isinstance(media_type, str) and media_type.startswith('image/')):
+            continue
+        url = attachment.get('url') or attachment.get('href')
+        if not isinstance(url, str) or not url:
+            continue
+        alt_raw = attachment.get('name')
+        alt = html_escape(alt_raw, quote=True) if isinstance(alt_raw, str) else ""
+        imgs.append((url, alt))
+    if imgs:
+        reply.body_html += "\n<hr>\n<div class='mb_img_grid'>"
+        for url, alt in imgs[:16]:
+            reply.body_html += f'\n<img class="mb_img" alt="{alt}" loading="lazy" src="{url}">'
+        reply.body_html += "\n</div>"
 
     try:
         reply.ap_updated = datetime.fromisoformat(request_json['object']['updated']) if 'updated' in request_json['object'] else utcnow()

@@ -78,6 +78,7 @@ document.addEventListener("DOMContentLoaded", function () {
             requestAnimationFrame(() => {
                 setupLightboxTeaser();
                 setupLightboxPostBody();
+                setupLightboxPostReply();
             });
         }
     });
@@ -364,6 +365,28 @@ function setupLightboxPostBody() {
         });
 
         baguetteBox.run('.post_body', {
+            fullScreen: false,
+            titleTag: true,
+            async: true,
+            preload: 3
+        });
+    }
+
+}
+
+function setupLightboxPostReply() {
+    if(typeof baguetteBox !== 'undefined') {
+        const images = document.querySelectorAll('.comment_body img');
+        images.forEach(function(img) {
+            const parent = img.parentNode;
+            const link = document.createElement('a');
+            link.href = img.src;
+            link.setAttribute('data-caption', img.alt);
+            parent.replaceChild(link, img);
+            link.appendChild(img);
+        });
+
+        baguetteBox.run('.comment_body', {
             fullScreen: false,
             titleTag: true,
             async: true,
