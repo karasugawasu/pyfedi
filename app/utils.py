@@ -758,7 +758,26 @@ def microblog_content_to_title(html: str) -> str:
         if not title:
             title = html_to_text(html)
     else:
-        title = html_to_text(html)
+        # Misskey等: <p>が無いので <br> を改行として扱って、先頭からタイトル行を探す
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # aタグは除外
+        for a_tag in soup.find_all('a'):
+            a_tag.extract()
+
+        # br を改行に変換（<br>, <br/>, <br /> 全部）
+        for br in soup.find_all('br'):
+            br.replace_with('\n')
+
+        # 先頭から「最初の非空行」を採用（最初がaタグで空になっても次行へ）
+        text = soup.get_text(separator='\n')
+        for line in (ln.strip() for ln in text.splitlines()):
+            if line:
+                title = line
+                break
+
+        if not title:
+            title = html_to_text(html)
 
     # pタグで１行検出に変更しているのでこの一連の処理は不要
     # period_index = title.find('.')
