@@ -2481,8 +2481,8 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
         distinguished = request_json['object']['distinguished'] if 'distinguished' in request_json['object'] else False
         #answer = request_json['object']['answer'] if 'answer' in request_json['object'] else False
 
+        attachment_list = []
         if 'attachment' in request_json['object']:
-            attachment_list = []
             if isinstance(request_json['object']['attachment'], dict):
                 attachment_list.append(request_json['object']['attachment'])
             elif isinstance(request_json['object']['attachment'], list):
@@ -2866,8 +2866,8 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
 
     reply.edited_at = utcnow()
 
+    attachment_list = []
     if 'attachment' in request_json['object']:
-        attachment_list = []
         if isinstance(request_json['object']['attachment'], dict):
             attachment_list.append(request_json['object']['attachment'])
         elif isinstance(request_json['object']['attachment'], list):
