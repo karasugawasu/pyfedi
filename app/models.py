@@ -1666,7 +1666,7 @@ class Post(db.Model):
     def new(cls, user: User, community: Community, request_json: dict, announce_id=None):
         from app.activitypub.util import instance_weight, find_language_or_create, find_language, \
             find_hashtag_or_create, \
-            find_licence_or_create, make_image_sizes, notify_about_post, find_flair_or_create
+            find_licence_or_create, make_image_sizes, notify_about_post, find_flair_or_create, find_flair
         from app.utils import allowlist_html, markdown_to_html, html_to_text, microblog_content_to_title, \
             blocked_phrases, \
             is_image_url, is_video_url, domain_from_url, opengraph_parse, shorten_string, fixup_url, \
@@ -1954,10 +1954,17 @@ class Post(db.Model):
             if 'tag' in request_json['object'] and isinstance(request_json['object']['tag'], list):
                 for json_tag in request_json['object']['tag']:
                     if json_tag and json_tag['type'] == 'Hashtag':
-                        if post.microblog or json_tag['name'][1:].lower() != community.name.lower():  # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
-                            hashtag = find_hashtag_or_create(json_tag['name'])
-                            if hashtag:
-                                post.tags.append(hashtag)
+                        if (not post.microblog) and (json_tag['name'][1:].lower() == community.name.lower()): # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
+                            continue
+                        name = json_tag.get('name')
+                        hashtag = find_hashtag_or_create(name)
+                        if hashtag:
+                            post.tags.append(hashtag)
+                        if post.microblog:
+                            flair_name = name[1:] if name.startswith('#') else name
+                            flair = find_flair(flair_name, post.community_id)
+                            if flair and flair not in post.flair:
+                                post.flair.append(flair)
                     if json_tag and json_tag['type'] == 'lemmy:CommunityTag':
                         flair = find_flair_or_create(json_tag, post.community_id)
                         if flair:
