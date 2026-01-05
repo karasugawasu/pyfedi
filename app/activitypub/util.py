@@ -3270,26 +3270,23 @@ def update_post_from_activity(post: Post, request_json: dict):
         # Mastodon,Misskeyの画像を全部本文に表示する
         if post.microblog:
             attachments = request_json.get('object', {}).get('attachment', [])
-            docs = []
             imgs_html = []
-            for a in attachments:
-                if not a:
-                    continue
-                if a.get('type') != 'Document':
-                    continue
-                url = a.get('url')
-                if not url:
-                    continue
-                docs.append(a)
-            for a in docs[:16]:
-                url = a.get('url')
-                if not url:
-                    continue
-                alt_safe = a.get('name') or ""
 
+            for a in attachments:
+                if not isinstance(a, dict):
+                    continue
+                media_type = a.get('mediaType')
+                if not (isinstance(media_type, str) and media_type.startswith('image/')):
+                    continue
+                url = a.get('url')
+                if not isinstance(url, str) or not url:
+                    continue
+                alt_safe = html_escape(a.get('name') or "", quote=True)
                 imgs_html.append(
                     f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}">'
                 )
+                if len(imgs_html) >= 16:
+                    break
             if imgs_html:
                 post.body_html += (
                     '\n<hr>\n<div class="mb_img_grid">\n'
