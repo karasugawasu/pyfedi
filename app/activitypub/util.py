@@ -2516,8 +2516,7 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
             url = attachment.get('url') or attachment.get('href')
             if not isinstance(url, str) or not url:
                 continue
-            alt_raw = attachment.get('name')
-            alt = html_escape(alt_raw, quote=True) if isinstance(alt_raw, str) else ""
+            alt = attachment.get('name') or ""
             imgs.append((url, alt))
         if imgs:
             body_html += "\n<hr>\n<div class='mb_img_grid'>"
@@ -2902,8 +2901,7 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
         url = attachment.get('url') or attachment.get('href')
         if not isinstance(url, str) or not url:
             continue
-        alt_raw = attachment.get('name')
-        alt = html_escape(alt_raw, quote=True) if isinstance(alt_raw, str) else ""
+        alt = attachment.get('name')
         imgs.append((url, alt))
     if imgs:
         reply.body_html += "\n<hr>\n<div class='mb_img_grid'>"
@@ -3281,7 +3279,7 @@ def update_post_from_activity(post: Post, request_json: dict):
                 url = a.get('url')
                 if not isinstance(url, str) or not url:
                     continue
-                alt_safe = html_escape(a.get('name') or "", quote=True)
+                alt_safe = a.get('name') or ""
                 imgs_html.append(
                     f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}">'
                 )
