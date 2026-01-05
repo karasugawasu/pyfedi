@@ -758,6 +758,8 @@ def microblog_content_to_title(html: str) -> str:
                 if line:
                     title = line
                     break
+            if title:
+                break
         if not title:
             title = html_to_text(html)
     else:
