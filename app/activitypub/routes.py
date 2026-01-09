@@ -2202,8 +2202,6 @@ def process_upvote(user, store_ap_json, request_json, announced):
 
 
 def upsert_custom_emojis_from_like(like_obj: dict, instance_id: int) -> int:
-    if instance_id not in trusted_instance_ids():
-        return 0
     tags = like_obj.get("tag") or []
     changed = 0
 
