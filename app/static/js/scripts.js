@@ -354,46 +354,101 @@ function setupLightboxTeaser() {
 }
 
 function setupLightboxPostBody() {
-    if(typeof baguetteBox !== 'undefined') {
-        const images = document.querySelectorAll('.post_body img:not(.mb_img_grid img)');
-        images.forEach(function(img) {
-            const parent = img.parentNode;
-            const link = document.createElement('a');
-            link.href = img.src;
-            link.setAttribute('data-caption', img.alt);
-            parent.replaceChild(link, img);
-            link.appendChild(img);
-        });
+    if (typeof baguetteBox === 'undefined') return;
 
-        baguetteBox.run('.post_body', {
-            fullScreen: false,
-            titleTag: true,
-            async: true,
-            preload: 3
-        });
-    }
+    const popStateListener = () => baguetteBox.hide();
+    const clickToClose = () => baguetteBox.hide();
+    const images = document.querySelectorAll('.post_body img:not(.mb_img_grid img)');
+    images.forEach(function(img) {
+        const parent = img.parentNode;
+        const link = document.createElement('a');
+        link.href = img.src;
+        link.setAttribute('data-caption', img.alt);
+        parent.replaceChild(link, img);
+        link.appendChild(img);
+    });
+
+    baguetteBox.run('.post_body', {
+        fullScreen: false,
+        titleTag: true,
+        async: true,
+        preload: 3,
+        afterShow: function () {
+            history.pushState({ lightbox: true }, document.title, location.pathname + location.search + '#lightbox');
+            window.addEventListener('popstate', popStateListener);
+            for (const el of document.querySelectorAll('#baguetteBox-overlay img')) {
+                el.addEventListener('click', clickToClose);
+            }
+        },
+        afterHide: function () {
+            if (location.hash === '#lightbox') {
+                history.back();
+            }
+            for (const el of document.querySelectorAll('#baguetteBox-overlay img')) {
+                el.removeEventListener('click', clickToClose);
+            }
+            window.removeEventListener('popstate', popStateListener);
+        },
+    });
 }
 
 function setupLightboxPostReply() {
-    if(typeof baguetteBox !== 'undefined') {
-        baguetteBox.run('.comment_body', {
+    if (typeof baguetteBox === 'undefined') return;
+
+    const popStateListener = () => baguetteBox.hide();
+    const clickToClose = () => baguetteBox.hide();
+    baguetteBox.run('.comment_body', {
             fullScreen: false,
             titleTag: true,
             async: true,
-            preload: 3
-        });
-    }
+            preload: 3,
+        afterShow: function () {
+            history.pushState({ lightbox: true }, document.title, location.pathname + location.search + '#lightbox');
+            window.addEventListener('popstate', popStateListener);
+            for (const el of document.querySelectorAll('#baguetteBox-overlay img')) {
+                el.addEventListener('click', clickToClose);
+            }
+        },
+        afterHide: function () {
+            if (location.hash === '#lightbox') {
+                history.back();
+            }
+            for (const el of document.querySelectorAll('#baguetteBox-overlay img')) {
+                el.removeEventListener('click', clickToClose);
+            }
+            window.removeEventListener('popstate', popStateListener);
+        },
+    });
 }
 
 function setupLightboxPostThumbnail() {
-  if (typeof baguetteBox === 'undefined') return;
+    if (typeof baguetteBox === 'undefined') return;
 
-  baguetteBox.run('.header_img', {
-    fullScreen: false,
-    titleTag: true,
-    async: true,
-    preload: 3,
-  });
+    const popStateListener = () => baguetteBox.hide();
+    const clickToClose = () => baguetteBox.hide();
+
+    baguetteBox.run('.header_img', {
+        fullScreen: false,
+        titleTag: true,
+        async: true,
+        preload: 3,
+        afterShow: function () {
+            history.pushState({ lightbox: true }, document.title, location.pathname + location.search + '#lightbox');
+            window.addEventListener('popstate', popStateListener);
+            for (const el of document.querySelectorAll('#baguetteBox-overlay img')) {
+                el.addEventListener('click', clickToClose);
+            }
+        },
+        afterHide: function () {
+            if (location.hash === '#lightbox') {
+                history.back();
+            }
+            for (const el of document.querySelectorAll('#baguetteBox-overlay img')) {
+                el.removeEventListener('click', clickToClose);
+            }
+            window.removeEventListener('popstate', popStateListener);
+        },
+    });
 }
 
 // fires after all resources have loaded, including stylesheets and js files
