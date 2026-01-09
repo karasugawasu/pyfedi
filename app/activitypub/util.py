@@ -3062,15 +3062,14 @@ def update_post_from_activity(post: Post, request_json: dict):
                 if (not post.microblog) and (json_tag['name'][1:].lower() == post.community.name.lower()): # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
                     continue
                 name = json_tag.get('name')
-                if not isinstance(name, str):
-                    continue
                 if post.microblog:
                     if name.lower() in ('#link', '#text'):
                         continue
                     flair_name = name[1:] if name.startswith('#') else name
                     flair = find_flair(flair_name, post.community_id)
-                    if flair and flair not in post.flair:
-                        post.flair.append(flair)
+                    if flair:
+                        if flair not in post.flair:
+                            post.flair.append(flair)
                         continue
                 hashtag = find_hashtag_or_create(name)
                 if hashtag:
