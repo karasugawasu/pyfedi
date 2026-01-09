@@ -36,7 +36,7 @@ from app.utils import gibberish, get_setting, community_membership, ap_datetime,
     community_moderators, html_to_text, add_to_modlog, instance_banned, get_redis_connection, \
     feed_membership, get_task_session, patch_db_session, \
     blocked_phrases, orjson_response, moderating_communities, joined_communities, moderating_communities_ids, \
-    moderating_communities_ids_all_users, publish_sse_event, trusted_instance_ids
+    moderating_communities_ids_all_users, publish_sse_event
 
 @bp.route('/testredis')
 def testredis_get():
