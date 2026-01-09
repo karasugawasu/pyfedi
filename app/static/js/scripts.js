@@ -355,7 +355,7 @@ function setupLightboxTeaser() {
 
 function setupLightboxPostBody() {
     if(typeof baguetteBox !== 'undefined') {
-        const images = document.querySelectorAll('.post_body img');
+        const images = document.querySelectorAll('.post_body img:not(.mb_img_grid img)');
         images.forEach(function(img) {
             const parent = img.parentNode;
             const link = document.createElement('a');
@@ -372,21 +372,10 @@ function setupLightboxPostBody() {
             preload: 3
         });
     }
-
 }
 
 function setupLightboxPostReply() {
     if(typeof baguetteBox !== 'undefined') {
-        const images = document.querySelectorAll('.comment_body img');
-        images.forEach(function(img) {
-            const parent = img.parentNode;
-            const link = document.createElement('a');
-            link.href = img.src;
-            link.setAttribute('data-caption', img.alt);
-            parent.replaceChild(link, img);
-            link.appendChild(img);
-        });
-
         baguetteBox.run('.comment_body', {
             fullScreen: false,
             titleTag: true,
@@ -394,29 +383,17 @@ function setupLightboxPostReply() {
             preload: 3
         });
     }
-
 }
 
 function setupLightboxPostThumbnail() {
-    if(typeof baguetteBox !== 'undefined') {
-        const images = document.querySelectorAll('.header_img img');
-        images.forEach(function(img) {
-            const parent = img.parentNode;
-            const link = document.createElement('a');
-            link.href = img.src;
-            link.setAttribute('data-caption', img.alt);
-            parent.replaceChild(link, img);
-            link.appendChild(img);
-        });
+  if (typeof baguetteBox === 'undefined') return;
 
-        baguetteBox.run('.header_img', {
-            fullScreen: false,
-            titleTag: true,
-            async: true,
-            preload: 3
-        });
-    }
-
+  baguetteBox.run('.header_img', {
+    fullScreen: false,
+    titleTag: true,
+    async: true,
+    preload: 3,
+  });
 }
 
 // fires after all resources have loaded, including stylesheets and js files

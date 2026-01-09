@@ -2521,7 +2521,7 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
         if imgs:
             body_html += "\n<hr>\n<div class='mb_img_grid'>"
             for url, alt in imgs[:16]:
-                body_html += f'\n<img class="mb_img" alt="{alt}" loading="lazy" src="{url}">'
+                body_html += f'\n<a href="{url}" target="_blank" rel="nofollow ugc" aria-label="Open Image"><img class="mb_img" alt="{alt}" loading="lazy" src="{url}"></a>'
             body_html += "\n</div>"
 
         # Check for Mentions of local users
@@ -2906,7 +2906,7 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
     if imgs:
         reply.body_html += "\n<hr>\n<div class='mb_img_grid'>"
         for url, alt in imgs[:16]:
-            reply.body_html += f'\n<img class="mb_img" alt="{alt}" loading="lazy" src="{url}">'
+            reply.body_html += f'\n<a href="{url}" target="_blank" rel="nofollow ugc" aria-label="Open Image"><img class="mb_img" alt="{alt}" loading="lazy" src="{url}"></a>'
         reply.body_html += "\n</div>"
 
     try:
@@ -3291,7 +3291,7 @@ def update_post_from_activity(post: Post, request_json: dict):
                     continue
                 alt_safe = a.get('name') or ""
                 imgs_html.append(
-                    f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}">'
+                    f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}"><img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}"></a>'
                 )
                 if len(imgs_html) >= 16:
                     break
