@@ -8742,6 +8742,9 @@ msgstr "定期寄付をキャンセルしました"
 msgid "Your donation has been cancelled."
 msgstr "寄付がキャンセルされました。"
 
+msgid "submitted"
+msgstr "投稿済み"
+
 #~ msgid "Allow search engines to index this profile"
 #~ msgstr "Suchmaschinen erlauben, dieses Profil zu indizieren"
 
@@ -9075,3 +9078,4 @@ msgstr "寄付がキャンセルされました。"
 
 #~ msgid "Yes - thumbnails only"
 #~ msgstr "適用：サムネイルで表示"
+
