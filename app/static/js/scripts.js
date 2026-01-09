@@ -79,6 +79,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 setupLightboxTeaser();
                 setupLightboxPostBody();
                 setupLightboxPostReply();
+                setupLightboxPostThumbnail();
             });
         }
     });
@@ -387,6 +388,28 @@ function setupLightboxPostReply() {
         });
 
         baguetteBox.run('.comment_body', {
+            fullScreen: false,
+            titleTag: true,
+            async: true,
+            preload: 3
+        });
+    }
+
+}
+
+function setupLightboxPostThumbnail() {
+    if(typeof baguetteBox !== 'undefined') {
+        const images = document.querySelectorAll('.header_img img');
+        images.forEach(function(img) {
+            const parent = img.parentNode;
+            const link = document.createElement('a');
+            link.href = img.src;
+            link.setAttribute('data-caption', img.alt);
+            parent.replaceChild(link, img);
+            link.appendChild(img);
+        });
+
+        baguetteBox.run('.header_img', {
             fullScreen: false,
             titleTag: true,
             async: true,
