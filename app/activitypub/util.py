@@ -3291,7 +3291,7 @@ def update_post_from_activity(post: Post, request_json: dict):
                     continue
                 alt_safe = a.get('name') or ""
                 imgs_html.append(
-                    f'<img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}"><img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}"></a>'
+                    f'<a href="{url}" target="_blank" rel="nofollow ugc" aria-label="Open Image"><img class="mb_img" alt="{alt_safe}" loading="lazy" src="{url}"></a>'
                 )
                 if len(imgs_html) >= 16:
                     break
