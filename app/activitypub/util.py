@@ -3065,6 +3065,8 @@ def update_post_from_activity(post: Post, request_json: dict):
                 if not isinstance(name, str):
                     continue
                 if post.microblog:
+                    if name.lower() in ('#link', '#text'):
+                        continue
                     flair_name = name[1:] if name.startswith('#') else name
                     flair = find_flair(flair_name, post.community_id)
                     if flair and flair not in post.flair:
@@ -3323,7 +3325,14 @@ def update_post_from_activity(post: Post, request_json: dict):
                 if not any(cls in ['mention', 'hashtag'] for cls in class_attr):
                     new_url = a_tag.get('href')
                     break
-
+    # tagにtextが含まれてたらリンクタイプにしない
+    if post.microblog:
+        tags = request_json.get('object', {}).get('tag', [])
+        if any(
+            tag and tag.get('type') == 'Hashtag' and 'text' in tag.get('name', '').lower()
+            for tag in tags
+        ):
+            new_url = None
     if new_url:
         new_domain = domain_from_url(new_url)
         if new_domain.banned:

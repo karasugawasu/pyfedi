@@ -1833,7 +1833,14 @@ class Post(db.Model):
                     if not any(cls in ['mention', 'hashtag'] for cls in class_attr):
                         post.url = a_tag.get('href')
                         break
-
+        # tagにtextが含まれてたらリンクタイプにしない
+        if post.microblog:
+            tags = request_json.get('object', {}).get('tag', [])
+            if any(
+                tag and tag.get('type') == 'Hashtag' and 'text' in tag.get('name', '').lower()
+                for tag in tags
+            ):
+                post.url = None
         if post.url:
             thumbnail_url, embed_url = fixup_url(post.url)
             post.url = embed_url
@@ -1960,6 +1967,8 @@ class Post(db.Model):
                         if not isinstance(name, str):
                             continue
                         if post.microblog:
+                            if name.lower() in ('#link', '#text'):
+                                continue
                             flair_name = name[1:] if name.startswith('#') else name
                             flair = find_flair(flair_name, post.community_id)
                             if flair and flair not in post.flair:
