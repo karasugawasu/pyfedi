@@ -1957,14 +1957,17 @@ class Post(db.Model):
                         if (not post.microblog) and (json_tag['name'][1:].lower() == community.name.lower()): # Lemmy adds the community slug as a hashtag on every post in the community, which we want to ignore
                             continue
                         name = json_tag.get('name')
-                        hashtag = find_hashtag_or_create(name)
-                        if hashtag:
-                            post.tags.append(hashtag)
+                        if not isinstance(name, str):
+                            continue
                         if post.microblog:
                             flair_name = name[1:] if name.startswith('#') else name
                             flair = find_flair(flair_name, post.community_id)
                             if flair and flair not in post.flair:
                                 post.flair.append(flair)
+                                continue
+                        hashtag = find_hashtag_or_create(name)
+                        if hashtag:
+                            post.tags.append(hashtag)
                     if json_tag and json_tag['type'] == 'lemmy:CommunityTag':
                         flair = find_flair_or_create(json_tag, post.community_id)
                         if flair:
