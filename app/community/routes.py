@@ -1096,7 +1096,9 @@ def add_post(actor, type=None):
     post = None
 
     if form.language_id.data not in community.language_ids() and len(community.language_ids()) > 0:
-        flash(_('This community prefers posts in %(language_names)s', language_names=', '.join(community.language_names())), 'warning')
+        language_names = ', '.join(community.language_names())
+        if not (len(community.language_ids()) == 1 and community.language_ids()[0] == 1) and language_names:   # language id 1 is always "Undetermined"
+            flash(_('This community prefers posts in %(language_names)s', language_names=language_names), 'warning')
 
     return render_template('community/add_post.html', title=_('Add post to community'), form=form,
                            post_type=post_type, community=community, post=post, hide_community_actions=True,
@@ -2558,7 +2560,7 @@ def rate(actor: str):
             try:
                 rate_community(community.id, form.rating.data, SRC_WEB)
             except Exception as e:
-                if str(e) == 'community_members_only' or str(e) == 'wait_one_day':
+                if str(e) == 'community members only' or str(e) == 'wait one day':
                     return redirect(url_for('community.rate_moderation_denied'))
                 else:
                     raise e

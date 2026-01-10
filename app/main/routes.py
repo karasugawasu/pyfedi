@@ -190,7 +190,7 @@ def home_page(sort, view_filter):
                            enable_mod_filter=enable_mod_filter,
                            has_topics=num_topics() > 0
                            ))
-
+    resp.headers.set('Vary', 'Accept, Cookie, Accept-Language')
     if current_user.is_anonymous:
         resp.headers.set('Cache-Control', 'public, max-age=60')
     else:
@@ -579,6 +579,12 @@ def replay_inbox():
 @bp.route('/honey')
 @bp.route('/honey/<whatever>')
 def honey_pot(whatever=None):
+    if current_user.is_authenticated:
+        return ''
+    else:
+        do_not_track = ['image', 'audio', 'video']
+        if request.headers.get('Sec-Fetch-Dest', '') in do_not_track or request.headers.get('Accept', '').startswith('image/'):
+            return ''
     from app import redis_client
     from time import time
     ip = ip_address()

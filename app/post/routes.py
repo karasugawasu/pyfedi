@@ -8,7 +8,7 @@ from flask import redirect, url_for, flash, current_app, abort, request, g, make
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 from furl import furl
-from sqlalchemy import text, desc, Integer
+from sqlalchemy import text, desc, Integer, case
 from sqlalchemy.orm.exc import NoResultFound
 from ics import Calendar, DisplayAlarm
 import ics
@@ -70,14 +70,13 @@ def show_post(post_id: int):
         community: Community = post.community
 
         if community.banned or post.deleted:
-            if current_user.is_anonymous or not (current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff())):
-                abort(404)
+            if post.deleted_by == post.user_id:
+                flash(_('This post has been deleted by the author.'), 'warning')
             else:
-                if post.deleted_by == post.user_id:
-                    flash(_('This post has been deleted by the author and is only visible to staff and admins.'),
-                          'warning')
-                else:
+                if current_user.is_authenticated and (community.is_moderator() or current_user.is_admin_or_staff()):
                     flash(_('This post has been deleted and is only visible to staff and admins.'), 'warning')
+                else:
+                    abort(404)
         
         if current_user.is_anonymous:
             if current_app.config['CONTENT_WARNING']:
@@ -138,7 +137,7 @@ def show_post(post_id: int):
             if not post.community.is_moderator() and not post.community.is_owner() and not current_user.is_staff() and not current_user.is_admin():
                 form.distinguished.render_kw = {'disabled': True}
 
-        if current_user.is_authenticated and current_user.verified and form.validate_on_submit():
+        if current_user.is_authenticated and current_user.verified and form.validate_on_submit() and not post.deleted:
             try:
                 reply = make_reply(form, post, None, SRC_WEB)
             except Exception as ex:
@@ -570,7 +569,15 @@ def comment_emoji_reaction(comment_id, vote_direction, federate):
 @validation_required
 @approval_required
 def comment_emoji_list(comment_id):
-    emojis = Emoji.query.order_by(Emoji.token).all()
+    # order emoji by: instance_id=1 first, then trusted instances, then all others
+    emojis = Emoji.query.outerjoin(Instance, Emoji.instance_id == Instance.id).order_by(
+        case(
+            (Emoji.instance_id == 1, 0),
+            (Instance.trusted == True, 1),
+            else_=2
+        ),
+        Emoji.token
+    ).all()
     emoji_list = [{'id': e.id, 'url': e.url, 'token': e.token, 'category': e.category, 'aliases': e.aliases} for e in emojis]
     return render_template('post/emoji_list.html', comment_id=comment_id, emojis=emoji_list, nonce=g.get('nonce', ''))
 
@@ -891,10 +898,6 @@ def post_options(post_id: int):
     if post.deleted:
         if current_user.is_anonymous:
             abort(404)
-        if (not post.community.is_moderator() and
-                not current_user.is_admin() and
-                (post.deleted_by is not None and post.deleted_by != current_user.id)):
-            abort(401)
 
     existing_bookmark = []
     if current_user.is_authenticated:

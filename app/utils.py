@@ -335,6 +335,61 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
     else:
         fn_string = gibberish(6)
 
+    code_placeholder = gibberish(6)
+
+    # substitute out the <code> snippets so that they don't inadvertently get formatted
+    code_snippets, clean_html = stash_code_html(html, code_placeholder)
+
+    # avoid returning empty anchors
+    re_empty_anchor = re.compile(r'<a href="(.*?)" rel="nofollow ugc" target="_blank"><\/a>')
+    clean_html = re_empty_anchor.sub(r'<a href="\1" rel="nofollow ugc" target="_blank">\1</a>', clean_html)
+
+    # replace lemmy's spoiler markdown left in HTML
+    clean_html = clean_html.replace('<h2>:::</h2>',
+                                    '<p>:::</p>')  # this is needed for lemmy.world/c/hardware's sidebar, for some reason.
+    re_spoiler = re.compile(r':{3}\s*?spoiler\s+?(\S.+?)(?:\n|</p>)(.+?)(?:\n|<p>):{3}', re.S)
+    clean_html = re_spoiler.sub(r'<details><summary>\1</summary><p>\2</p></details>', clean_html)
+
+    # replace strikethough markdown left in HTML
+    re_strikethough = re.compile(r'~~(.*)~~')
+    clean_html = re_strikethough.sub(r'<s>\1</s>', clean_html)
+
+    # replace subscript markdown left in HTML
+    re_subscript = re.compile(r'~([^~\r\n\t\f\v ]+)~')
+    clean_html = re_subscript.sub(r'<sub>\1</sub>', clean_html)
+
+    # replace superscript markdown left in HTML
+    re_superscript = re.compile(r'\^([^\^\r\n\t\f\v ]+)\^')
+    clean_html = re_superscript.sub(r'<sup>\1</sup>', clean_html)
+
+    # replace <img src> for mp4 with <video> - treat them like a GIF (autoplay, but initially muted)
+    re_embedded_mp4 = re.compile(r'<img .*?src="(https://.*?\.mp4)".*?/>')
+    clean_html = re_embedded_mp4.sub(
+        r'<video class="responsive-video" controls preload="auto" autoplay muted loop playsinline disablepictureinpicture><source src="\1" type="video/mp4"></video>',
+        clean_html)
+
+    # replace <img src> for webm with <video> - treat them like a GIF (autoplay, but initially muted)
+    re_embedded_webm = re.compile(r'<img .*?src="(https://.*?\.webm)".*?/>')
+    clean_html = re_embedded_webm.sub(
+        r'<video class="responsive-video" controls preload="auto" autoplay muted loop playsinline disablepictureinpicture><source src="\1" type="video/webm"></video>',
+        clean_html)
+
+    # replace <img src> for mp3 with <audio>
+    re_embedded_mp3 = re.compile(r'<img .*?src="(https://.*?\.mp3)".*?/>')
+    clean_html = re_embedded_mp3.sub(r'<audio controls><source src="\1" type="audio/mp3"></audio>', clean_html)
+
+    # replace the 'static' for images hotlinked to fandom sites with 'vignette'
+    re_fandom_hotlink = re.compile(r'<img alt="(.*?)" loading="lazy" src="https://static.wikia.nocookie.net')
+    clean_html = re_fandom_hotlink.sub(r'<img alt="\1" loading="lazy" src="https://vignette.wikia.nocookie.net',
+                                       clean_html)
+
+    # replace ruby markdown like {漢字|かんじ}
+    re_ruby = re.compile(r'\{(.+?)\|(.+?)\}')
+    clean_html = re_ruby.sub(r'<ruby>\1<rp>(</rp><rt>\2</rt><rp>)</rp></ruby>', clean_html)
+
+    # bring back the <code> snippets
+    clean_html = pop_code(code_snippets, clean_html, code_placeholder)
+
     # Pre-escape angle brackets that aren't valid HTML tags before BeautifulSoup parsing
     # We need to distinguish between:
     # 1. Valid HTML tags (allowed or disallowed) - let BeautifulSoup handle them
@@ -346,7 +401,7 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
             tag_name = tag_content[1:].split()[0]
         else:
             tag_name = tag_content.split()[0]
-        
+
         # Check if this looks like a valid HTML tag (allowed or not)
         # Valid HTML tags have specific patterns
         html_tags = ['a', 'abbr', 'acronym', 'address', 'area', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'big',
@@ -360,15 +415,15 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
                      'source', 'span', 'strike', 'strong', 'style', 'sub', 'summary', 'sup', 'svg', 'table', 'tbody',
                      'tg-spoiler', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track',
                      'tt', 'u', 'ul', 'var', 'video', 'wbr']
-        
+
         if tag_name in html_tags:
             # This is a valid HTML tag - let BeautifulSoup handle it (it will remove if not allowed)
             return match.group(0)
         else:
             # This doesn't look like a valid HTML tag - escape it
             return f"&lt;{match.group(1)}&gt;"
-    
-    html = re.sub(r'<([^<>]+?)>', escape_non_html_brackets, html)
+
+    html = re.sub(r'<([^<>]+?)>', escape_non_html_brackets, clean_html)
 
     # Parse the HTML using BeautifulSoup
     soup = BeautifulSoup(html, 'html.parser')
@@ -417,67 +472,13 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
             if tag.name == 'table':
                 tag.attrs['class'] = 'table'
 
-    clean_html = str(soup)
-
-    # substitute out the <code> snippets so that they don't inadvertently get formatted
-    code_snippets, clean_html = stash_code_html(clean_html)
-
-    # avoid returning empty anchors
-    re_empty_anchor = re.compile(r'<a href="(.*?)" rel="nofollow ugc" target="_blank"><\/a>')
-    clean_html = re_empty_anchor.sub(r'<a href="\1" rel="nofollow ugc" target="_blank">\1</a>', clean_html)
-
-    # replace lemmy's spoiler markdown left in HTML
-    clean_html = clean_html.replace('<h2>:::</h2>', '<p>:::</p>')   # this is needed for lemmy.world/c/hardware's sidebar, for some reason.
-    re_spoiler = re.compile(r':{3}\s*?spoiler\s+?(\S.+?)(?:\n|</p>)(.+?)(?:\n|<p>):{3}', re.S)
-    clean_html = re_spoiler.sub(r'<details><summary>\1</summary><p>\2</p></details>', clean_html)
-
-    # replace strikethough markdown left in HTML
-    re_strikethough = re.compile(r'~~(.*)~~')
-    clean_html = re_strikethough.sub(r'<s>\1</s>', clean_html)
-
-    # replace subscript markdown left in HTML
-    re_subscript = re.compile(r'~([^~\r\n\t\f\v ]+)~')
-    clean_html = re_subscript.sub(r'<sub>\1</sub>', clean_html)
-
-    # replace superscript markdown left in HTML
-    re_superscript = re.compile(r'\^([^\^\r\n\t\f\v ]+)\^')
-    clean_html = re_superscript.sub(r'<sup>\1</sup>', clean_html)
-
-    # replace <img src> for mp4 with <video> - treat them like a GIF (autoplay, but initially muted)
-    re_embedded_mp4 = re.compile(r'<img .*?src="(https://.*?\.mp4)".*?/>')
-    clean_html = re_embedded_mp4.sub(
-        r'<video class="responsive-video" controls preload="auto" autoplay muted loop playsinline disablepictureinpicture><source src="\1" type="video/mp4"></video>',
-        clean_html)
-
-    # replace <img src> for webm with <video> - treat them like a GIF (autoplay, but initially muted)
-    re_embedded_webm = re.compile(r'<img .*?src="(https://.*?\.webm)".*?/>')
-    clean_html = re_embedded_webm.sub(
-        r'<video class="responsive-video" controls preload="auto" autoplay muted loop playsinline disablepictureinpicture><source src="\1" type="video/webm"></video>',
-        clean_html)
-
-    # replace <img src> for mp3 with <audio>
-    re_embedded_mp3 = re.compile(r'<img .*?src="(https://.*?\.mp3)".*?/>')
-    clean_html = re_embedded_mp3.sub(r'<audio controls><source src="\1" type="audio/mp3"></audio>', clean_html)
-
-    # replace the 'static' for images hotlinked to fandom sites with 'vignette'
-    re_fandom_hotlink = re.compile(r'<img alt="(.*?)" loading="lazy" src="https://static.wikia.nocookie.net')
-    clean_html = re_fandom_hotlink.sub(r'<img alt="\1" loading="lazy" src="https://vignette.wikia.nocookie.net',
-                                       clean_html)
-
-    # replace ruby markdown like {漢字|かんじ}
-    re_ruby = re.compile(r'\{(.+?)\|(.+?)\}')
-    clean_html = re_ruby.sub(r'<ruby>\1<rp>(</rp><rt>\2</rt><rp>)</rp></ruby>', clean_html)
-
-    # bring back the <code> snippets
-    clean_html = pop_code(code_snippets, clean_html)
-
-    return clean_html
+    return str(soup)
 
 
 def escape_non_html_angle_brackets(text: str) -> str:
-    
+    placeholder = gibberish(6)
     # Step 1: Extract inline and block code, replacing with placeholders
-    code_snippets, text = stash_code_md(text)
+    code_snippets, text = stash_code_md(text, placeholder)
 
     # Step 2: Escape <...> unless they look like valid HTML tags
     def escape_tag(match):
@@ -487,10 +488,10 @@ def escape_non_html_angle_brackets(text: str) -> str:
             tag_name = tag_content[1:].split()[0]
         else:
             tag_name = tag_content.split()[0]
-        emoticons = ['3', # heart
-                     '\\3', # broken heart
-                     '|:‑)', # santa claus *<|:‑)
-                     ':‑|' # dumb, dunce-like
+        emoticons = ['3',  # heart
+                     '\\3',  # broken heart
+                     '|:‑)',  # santa claus *<|:‑)
+                     ':‑|'  # dumb, dunce-like
                      ]
         if tag_name in allowed_tags or re.match(LINK_PATTERN, tag_content) or tag_content in emoticons:
             return match.group(0)
@@ -500,9 +501,10 @@ def escape_non_html_angle_brackets(text: str) -> str:
     text = re.sub(r'<([^<>]+?)>', escape_tag, text)
 
     # Step 3: Restore code blocks
-    text = pop_code(code_snippets=code_snippets, text=text)
+    text = pop_code(code_snippets=code_snippets, text=text, placeholder=placeholder)
 
     return text
+
 
 def handle_double_bolds(text: str) -> str:
     """
@@ -510,8 +512,10 @@ def handle_double_bolds(text: str) -> str:
     same sentence.
     """
 
+    placeholder = gibberish(6)
+
     # Step 1: Extract inline and block code, replacing with placeholders
-    code_snippets, text = stash_code_md(text)
+    code_snippets, text = stash_code_md(text, placeholder)
 
     # Step 2: Wrap **bold** sections with <strong></strong>
     # Regex is slightly modified from markdown2 source code
@@ -519,14 +523,14 @@ def handle_double_bolds(text: str) -> str:
     text = re_bold.sub(r"<strong>\2</strong>", text)
 
     # Step 3: Restore code blocks
-    text = pop_code(code_snippets=code_snippets, text=text)
+    text = pop_code(code_snippets=code_snippets, text=text, placeholder=placeholder)
 
     return text
 
 
 def escape_img(raw_html: str) -> str:
     """Prevents embedding images for places where an image would break formatting."""
-    
+
     re_img = re.compile(r"<img.+?>")
     raw_html = re_img.sub(r"<code><image placeholder></code>", raw_html)
 
@@ -537,17 +541,19 @@ def handle_lemmy_autocomplete(text: str) -> str:
     """
     Handles markdown formatted links that are in the format that lemmy autocompletes users/communities to and replaces
     them with instance-agnostic links.
-    
+
     Lemmy autocomplete format:
         [!news@lemmy.world](https://lemmy.world/c/news)
     Convert this to:
         !news@lemmy.world
-    
+
     ...which will be later converted to an instance-local link
     """
 
+    placeholder = gibberish(6)
+
     # Step 1: Extract inline and block code, replacing with placeholders
-    code_snippets, text = stash_code_md(text)
+    code_snippets, text = stash_code_md(text, placeholder)
 
     # Step 2: ID all the markdown-formatted links and check the part in [] if it matches comm/person/feed formats
     def sub_non_formatted_actor(match):
@@ -565,7 +571,7 @@ def handle_lemmy_autocomplete(text: str) -> str:
     text = re.sub(re_link, sub_non_formatted_actor, text)
 
     # Step 3: Restore code blocks
-    text = pop_code(code_snippets=code_snippets, text=text)
+    text = pop_code(code_snippets=code_snippets, text=text, placeholder=placeholder)
 
     return text
 
@@ -725,21 +731,24 @@ def community_link_to_href(link: str, server_name_override: str | None = None) -
     else:
         server_name = current_app.config['SERVER_NAME']
 
+    code_placeholder = gibberish(6)
+    link_placeholder = gibberish(6)
+
     # Stash the <code> portions so they are not formatted
-    code_snippets, link = stash_code_html(link)
+    code_snippets, link = stash_code_html(link, code_placeholder)
 
     # Stash the existing links so they are not formatted
-    link_snippets, link = stash_link_html(link)
+    link_snippets, link = stash_link_html(link, link_placeholder)
 
     pattern = COMMUNITY_PATTERN
     server = r'<a href="https://' + server_name + r'/community/lookup/'
     link = re.sub(pattern, server + r'\g<1>/\g<2>">' + r'!\g<1>@\g<2></a>', link)
 
     # Bring back the links
-    link = pop_link(link_snippets=link_snippets, text=link)
+    link = pop_link(link_snippets=link_snippets, text=link, placeholder=link_placeholder)
 
     # Bring back the <code> portions
-    link = pop_code(code_snippets=code_snippets, text=link)
+    link = pop_code(code_snippets=code_snippets, text=link, placeholder=code_placeholder)
 
     return link
 
@@ -750,21 +759,24 @@ def feed_link_to_href(link: str, server_name_override: str | None = None) -> str
     else:
         server_name = current_app.config['SERVER_NAME']
 
+    code_placeholder = gibberish(6)
+    link_placeholder = gibberish(6)
+
     # Stash the <code> portions so they are not formatted
-    code_snippets, link = stash_code_html(link)
+    code_snippets, link = stash_code_html(link, code_placeholder)
 
     # Stash the existing links so they are not formatted
-    link_snippets, link = stash_link_html(link)
+    link_snippets, link = stash_link_html(link, link_placeholder)
 
     pattern = FEED_PATTERN
     server = r'<a href="https://' + server_name + r'/feed/lookup/'
     link = re.sub(pattern, server + r'\g<1>/\g<2>">' + r'~\g<1>@\g<2></a>', link)
 
     # Bring back the links
-    link = pop_link(link_snippets=link_snippets, text=link)
+    link = pop_link(link_snippets=link_snippets, text=link, placeholder=link_placeholder)
 
     # Bring back the <code> portions
-    link = pop_code(code_snippets=code_snippets, text=link)
+    link = pop_code(code_snippets=code_snippets, text=link, placeholder=code_placeholder)
 
     return link
 
@@ -774,12 +786,15 @@ def person_link_to_href(link: str, server_name_override: str | None = None) -> s
         server_name = server_name_override
     else:
         server_name = current_app.config['SERVER_NAME']
-    
+
+    code_placeholder = gibberish(6)
+    link_placeholder = gibberish(6)
+
     # Stash the <code> portions so they are not formatted
-    code_snippets, link = stash_code_html(link)
+    code_snippets, link = stash_code_html(link, code_placeholder)
 
     # Stash the existing links so they are not formatted
-    link_snippets, link = stash_link_html(link)
+    link_snippets, link = stash_link_html(link, link_placeholder)
 
     # Substitute @user@instance.tld with <a> tags, but ignore if it has a preceding / or [ character
     pattern = PERSON_PATTERN
@@ -788,33 +803,33 @@ def person_link_to_href(link: str, server_name_override: str | None = None) -> s
     link = re.sub(pattern, replacement, link)
 
     # Bring back the links
-    link = pop_link(link_snippets=link_snippets, text=link)
-    
+    link = pop_link(link_snippets=link_snippets, text=link, placeholder=link_placeholder)
+
     # Bring back the <code> portions
-    link = pop_code(code_snippets=code_snippets, text=link)
-    
+    link = pop_code(code_snippets=code_snippets, text=link, placeholder=code_placeholder)
+
     return link
 
 
-def stash_code_html(text: str) -> tuple[list, str]:
+def stash_code_html(text: str, placeholder: str) -> tuple[list, str]:
     code_snippets = []
 
     def store_code(match):
         code_snippets.append(match.group(0))
-        return f"__CODE_PLACEHOLDER_{len(code_snippets) - 1}__"
-    
+        return f"{placeholder}{len(code_snippets) - 1}__"
+
     text = re.sub(r'<code>[\s\S]*?<\/code>', store_code, text)
 
     return (code_snippets, text)
 
 
-def stash_code_md(text: str) -> tuple[list, str]:
+def stash_code_md(text: str, placeholder: str) -> tuple[list, str]:
     code_snippets = []
 
     def store_code(match):
         code_snippets.append(match.group(0))
-        return f"__CODE_PLACEHOLDER_{len(code_snippets) - 1}__"
-    
+        return f"{placeholder}{len(code_snippets) - 1}__"
+
     # Fenced code blocks (```...```)
     text = re.sub(r'```[\s\S]*?```', store_code, text)
     # Inline code (`...`)
@@ -823,29 +838,29 @@ def stash_code_md(text: str) -> tuple[list, str]:
     return (code_snippets, text)
 
 
-def pop_code(code_snippets: list, text: str) -> str:
+def pop_code(code_snippets: list, text: str, placeholder: str) -> str:
     for i, code in enumerate(code_snippets):
-        text = text.replace(f"__CODE_PLACEHOLDER_{i}__", code)
-    
+        text = text.replace(f"{placeholder}{i}__", code)
+
     return text
 
 
-def stash_link_html(text: str) -> tuple[list, str]:
+def stash_link_html(text: str, placeholder: str) -> tuple[list, str]:
     link_snippets = []
 
     def store_link(match):
         link_snippets.append(match.group(0))
-        return f"__LINK_PLACEHOLDER_{len(link_snippets) - 1}__"
-    
+        return f"{placeholder}{len(link_snippets) - 1}__"
+
     text = re.sub(r'<a href=[\s\S]*?<\/a>', store_link, text)
 
     return (link_snippets, text)
 
 
-def pop_link(link_snippets: list, text: str) -> str:
+def pop_link(link_snippets: list, text: str, placeholder: str) -> str:
     for i, link in enumerate(link_snippets):
-        text = text.replace(f"__LINK_PLACEHOLDER_{i}__", link)
-    
+        text = text.replace(f"{placeholder}{i}__", link)
+
     return text
 
 
@@ -1929,7 +1944,7 @@ def url_to_thumbnail_file(filename) -> File:
                 medium_image_format = current_app.config['MEDIA_IMAGE_MEDIUM_FORMAT']
                 medium_image_quality = current_app.config['MEDIA_IMAGE_MEDIUM_QUALITY']
 
-                final_ext = file_extension
+                final_ext = file_extension.lower()
 
                 if medium_image_format == 'AVIF':
                     import pillow_avif  # NOQA
