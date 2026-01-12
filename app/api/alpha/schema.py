@@ -454,8 +454,6 @@ class CommunityAggregates(DefaultSchema):
     active_weekly = fields.Integer()
     active_monthly = fields.Integer()
     active_6monthly = fields.Integer()
-    average_rating = fields.Float(allow_none=True)
-    total_ratings = fields.Integer(allow_none=True)
 
 
 class CommunityView(DefaultSchema):
@@ -658,8 +656,6 @@ class GetCommunityResponse(DefaultSchema):
     community_view = fields.Nested(CommunityView, required=True)
     discussion_languages = fields.List(fields.Integer(), required=True)
     moderators = fields.List(fields.Nested(CommunityModeratorView), required=True)
-    can_rate = fields.Boolean()
-    my_rating = fields.Integer(allow_none=True)
     site = fields.Nested(Site)
 
 
@@ -733,11 +729,6 @@ class ListCommunitiesResponse(DefaultSchema):
 class FollowCommunityRequest(DefaultSchema):
     community_id = fields.Integer(required=True)
     follow = fields.Boolean(required=True)
-
-
-class RateCommunityRequest(DefaultSchema):
-    community_id = fields.Integer(required=True)
-    rating = fields.Integer(required=True, allow_none=True, metadata={"description": "Providing a null value removes your rating"})
 
 
 class BlockCommunityRequest(DefaultSchema):
@@ -986,6 +977,22 @@ class UserSetNoteRequest(DefaultSchema):
     person_id = fields.Integer(required=True)
     note = fields.String(required=True, allow_none=True, validate=validate.Length(max=50),
                          metadata={"description": "Pass a value of null to remove existing note"})
+
+
+class UserBanRequest(DefaultSchema):
+    person_id = fields.Integer(required=True)
+    ban_ip_address = fields.Boolean(required=True, allow_none=True)
+    purge_content = fields.Boolean(required=True, allow_none=True)
+    reason = fields.String(required=True, allow_none=True, validate=validate.Length(max=50),
+                           metadata={"description": "Note to add to modlog"})
+
+
+class UserUnbanRequest(DefaultSchema):
+    person_id = fields.Integer(required=True)
+
+
+class UserBanResponse(DefaultSchema):
+    person_view = fields.Nested(PersonView)
 
 
 class UserSetNoteResponse(UserSetFlairResponse):

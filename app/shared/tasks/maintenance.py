@@ -18,7 +18,7 @@ from app.models import Notification, SendQueue, CommunityBan, CommunityMember, U
 from app.post.routes import post_delete_post
 from app.utils import get_task_session, download_defeds, instance_banned, get_request_instance, get_request, \
     shorten_string, patch_db_session, archive_post, get_setting, set_setting, communities_banned_from_all_users, \
-    banned_instances, blocked_or_banned_instances
+    banned_instances, blocked_or_banned_instances, get_emoji_replacements
 
 
 @celery.task
@@ -141,7 +141,7 @@ def remove_old_community_content():
                 ).filter(Post.posted_at < cut_off).all()
 
                 for post in old_posts:
-                    post_delete_post(community, post, post.user_id, reason=None, federate_deletion=False)
+                    post_delete_post(community, post, 1, reason=None, federate_deletion=False)  # posts are deleted by user ID 1 (super admin) so that delete_old_soft_deleted_content() hard-deletes it.
 
         session.commit()
     except Exception:
@@ -215,7 +215,7 @@ def delete_old_soft_deleted_content():
                 from app import redis_client
                 cutoff = utcnow() - timedelta(days=7)
 
-                # Delete old posts
+                # Delete old posts only when no replies, mod-deleted or forced by community retention policy (deleted_by = 1)
                 post_ids = list(
                     session.execute(
                         text("""SELECT id FROM post p WHERE p.deleted = true AND p.posted_at < :cutoff AND NOT EXISTS (
@@ -612,7 +612,7 @@ def monitor_healthy_instances():
                                 ).delete()
 
                         # refresh custom emoji
-                        if instance.trusted:
+                        if not instance_banned(instance.domain):
                             for emoji in instance_data['custom_emojis']:
                                 token = emoji['custom_emoji']['shortcode']
                                 aliases = [keyword['keyword'] for keyword in emoji['keywords']]
@@ -629,6 +629,7 @@ def monitor_healthy_instances():
                                                       aliases=' '.join(aliases))
                                     session.add(new_emoji)
                                 session.commit()
+                    cache.delete_memoized(get_emoji_replacements)
                 except Exception:
                     session.rollback()
                     instance.failures += 1

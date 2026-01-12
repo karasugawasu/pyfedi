@@ -56,7 +56,7 @@ from captcha.image import ImageCaptcha
 from app.models import Settings, Domain, Instance, BannedInstances, User, Community, DomainBlock, IpBan, \
     Site, Post, utcnow, Filter, CommunityMember, InstanceBlock, CommunityBan, Topic, UserBlock, Language, \
     File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair, CommunityJoinRequest, Notification, UserNote, \
-    PostReply, PostReplyBookmark, AllowedInstances, InstanceBan, Tag
+    PostReply, PostReplyBookmark, AllowedInstances, InstanceBan, Tag, Emoji
 
 
 # Flask's render_template function, with support for themes added
@@ -66,16 +66,6 @@ def render_template(template_name: str, **context) -> Response:
         content = flask.render_template(f'themes/{theme}/{template_name}', **context)
     else:
         content = flask.render_template(template_name, **context)
-
-    # Add nonces to all script tags that don't have them (for CSP with strict-dynamic)
-    if hasattr(g, 'nonce') and g.nonce:
-        import re
-        # Find all <script tags with src= that don't have nonce=
-        content = re.sub(
-            r'<script\s+([^>]*?)src=(["\'][^"\']*["\'])(?![^>]*nonce=)',
-            rf'<script \1src=\2 nonce="{g.nonce}"',
-            content
-        )
 
     # Browser caching using ETags and Cache-Control
     resp = make_response(content)
@@ -254,7 +244,7 @@ def is_local_image_url(url):
 
 def is_video_url(url: str) -> bool:
     common_video_extensions = ['.mp4', '.webm']
-    mime_type = mime_type_using_head(url)
+    mime_type = mime_type_using_head(url) if url.startswith('http') else None
     if mime_type:
         mime_type_parts = mime_type.split('/')
         return f'.{mime_type_parts[1]}' in common_video_extensions
@@ -334,7 +324,7 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
     else:
         fn_string = gibberish(6)
 
-    code_placeholder = gibberish(6)
+    code_placeholder = gibberish(10)
 
     # substitute out the <code> snippets so that they don't inadvertently get formatted
     code_snippets, clean_html = stash_code_html(html, code_placeholder)
@@ -386,6 +376,19 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
     re_ruby = re.compile(r'\{(.+?)\|(.+?)\}')
     clean_html = re_ruby.sub(r'<ruby>\1<rp>(</rp><rt>\2</rt><rp>)</rp></ruby>', clean_html)
 
+    # replace :emoji: with images
+    emoji_replacements = get_emoji_replacements() if test_env is False else None
+    if emoji_replacements:
+        pattern = re.compile(
+            "|".join(re.escape(k) for k in emoji_replacements),
+            re.IGNORECASE
+        )
+
+        clean_html = pattern.sub(
+            lambda m: "<img width=30 height=30 src='" + emoji_replacements[m.group(0).lower()] + "'>",
+            clean_html
+        )
+
     # bring back the <code> snippets
     clean_html = pop_code(code_snippets, clean_html, code_placeholder)
 
@@ -395,12 +398,14 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
     # 2. Invalid/non-HTML content in angle brackets - escape them
     def escape_non_html_brackets(match):
         tag_content = match.group(1).strip().lower()
+        if tag_content == '':
+            return f"&lt;{match.group(1)}&gt;"
         # Handle closing tags by removing the leading slash before extracting tag name
         if tag_content.startswith('/'):
             tag_name = tag_content[1:].split()[0]
         else:
             tag_name = tag_content.split()[0]
-
+        
         # Check if this looks like a valid HTML tag (allowed or not)
         # Valid HTML tags have specific patterns
         html_tags = ['a', 'abbr', 'acronym', 'address', 'area', 'article', 'aside', 'audio', 'b', 'bdi', 'bdo', 'big',
@@ -414,14 +419,14 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
                      'source', 'span', 'strike', 'strong', 'style', 'sub', 'summary', 'sup', 'svg', 'table', 'tbody',
                      'tg-spoiler', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track',
                      'tt', 'u', 'ul', 'var', 'video', 'wbr']
-
+        
         if tag_name in html_tags:
             # This is a valid HTML tag - let BeautifulSoup handle it (it will remove if not allowed)
             return match.group(0)
         else:
             # This doesn't look like a valid HTML tag - escape it
             return f"&lt;{match.group(1)}&gt;"
-
+    
     html = re.sub(r'<([^<>]+?)>', escape_non_html_brackets, clean_html)
 
     # Parse the HTML using BeautifulSoup
@@ -741,15 +746,31 @@ def html_to_text(html) -> str:
     return soup.get_text()
 
 
+@cache.memoize(timeout=5000)
+def get_emoji_replacements():
+    return {e.token: e.url for e in db.session.query(Emoji)}
+
+
 def mastodon_extra_field_link(extra_field: str) -> str:
     soup = BeautifulSoup(extra_field, 'html.parser')
     for tag in soup.find_all('a'):
         return tag['href']
 
 
-def microblog_content_to_title(html: str) -> str:
+def microblog_content_to_title(html: str) -> Tuple[str, str]:
     title = ''
-    if '<p>' in html:
+    link = ''
+    if '<h1>' in html.lower():
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup.find_all('h1'):
+            text = tag.get_text(separator=" ")
+            if len(text) >= 5:
+                title = text
+                a = tag.find('a', href=True)
+                if a:
+                    link = a['href']
+                break
+    elif '<p>' in html:
         soup = BeautifulSoup(html, 'html.parser')
         p_tags = soup.find_all('p')
         for p_tag in p_tags:
@@ -807,7 +828,7 @@ def microblog_content_to_title(html: str) -> str:
                 break
         title = title[:i] + ' ...' if i > 0 else ''
 
-    return title.strip()
+    return title.strip(), link
 
 
 def first_paragraph(html):
@@ -832,8 +853,8 @@ def community_link_to_href(link: str, server_name_override: str | None = None) -
     else:
         server_name = current_app.config['SERVER_NAME']
 
-    code_placeholder = gibberish(6)
-    link_placeholder = gibberish(6)
+    code_placeholder = gibberish(10)
+    link_placeholder = gibberish(10)
 
     # Stash the <code> portions so they are not formatted
     code_snippets, link = stash_code_html(link, code_placeholder)
@@ -860,8 +881,8 @@ def feed_link_to_href(link: str, server_name_override: str | None = None) -> str
     else:
         server_name = current_app.config['SERVER_NAME']
 
-    code_placeholder = gibberish(6)
-    link_placeholder = gibberish(6)
+    code_placeholder = gibberish(10)
+    link_placeholder = gibberish(10)
 
     # Stash the <code> portions so they are not formatted
     code_snippets, link = stash_code_html(link, code_placeholder)
@@ -888,9 +909,9 @@ def person_link_to_href(link: str, server_name_override: str | None = None) -> s
     else:
         server_name = current_app.config['SERVER_NAME']
 
-    code_placeholder = gibberish(6)
-    link_placeholder = gibberish(6)
-
+    code_placeholder = gibberish(10)
+    link_placeholder = gibberish(10)
+    
     # Stash the <code> portions so they are not formatted
     code_snippets, link = stash_code_html(link, code_placeholder)
 
@@ -905,10 +926,10 @@ def person_link_to_href(link: str, server_name_override: str | None = None) -> s
 
     # Bring back the links
     link = pop_link(link_snippets=link_snippets, text=link, placeholder=link_placeholder)
-
+    
     # Bring back the <code> portions
     link = pop_code(code_snippets=code_snippets, text=link, placeholder=code_placeholder)
-
+    
     return link
 
 
@@ -918,7 +939,7 @@ def stash_code_html(text: str, placeholder: str) -> tuple[list, str]:
     def store_code(match):
         code_snippets.append(match.group(0))
         return f"{placeholder}{len(code_snippets) - 1}__"
-
+    
     text = re.sub(r'<code>[\s\S]*?<\/code>', store_code, text)
 
     return (code_snippets, text)
@@ -930,7 +951,7 @@ def stash_code_md(text: str, placeholder: str) -> tuple[list, str]:
     def store_code(match):
         code_snippets.append(match.group(0))
         return f"{placeholder}{len(code_snippets) - 1}__"
-
+    
     # Fenced code blocks (```...```)
     text = re.sub(r'```[\s\S]*?```', store_code, text)
     # Inline code (`...`)
@@ -942,7 +963,7 @@ def stash_code_md(text: str, placeholder: str) -> tuple[list, str]:
 def pop_code(code_snippets: list, text: str, placeholder: str) -> str:
     for i, code in enumerate(code_snippets):
         text = text.replace(f"{placeholder}{i}__", code)
-
+    
     return text
 
 
@@ -952,7 +973,7 @@ def stash_link_html(text: str, placeholder: str) -> tuple[list, str]:
     def store_link(match):
         link_snippets.append(match.group(0))
         return f"{placeholder}{len(link_snippets) - 1}__"
-
+    
     text = re.sub(r'<a href=[\s\S]*?<\/a>', store_link, text)
 
     return (link_snippets, text)
@@ -961,7 +982,7 @@ def stash_link_html(text: str, placeholder: str) -> tuple[list, str]:
 def pop_link(link_snippets: list, text: str, placeholder: str) -> str:
     for i, link in enumerate(link_snippets):
         text = text.replace(f"{placeholder}{i}__", link)
-
+    
     return text
 
 
@@ -1159,7 +1180,7 @@ def blocked_referrers() -> List[str]:
 
 def block_honey_pot():
     # Return 403 for any IP address that has visited /honey/* too many times. See honey_pot()
-    if current_user.is_anonymous:
+    if current_user.is_anonymous and g.site.honeypot:
         from app import redis_client
         if redis_client.exists(f"ban:{ip_address()}"):
             abort(403)
@@ -1642,6 +1663,19 @@ def can_create_post_reply(user, content: Community) -> bool:
     return True
 
 
+def can_upload_video():
+    upload_access = get_setting('allow_video_file_uploads', 'no')
+    if upload_access == 'no':
+        return False
+    elif upload_access == 'user 1' and current_user.get_id() != 1:
+        return False
+    elif upload_access == 'admins' and not current_user.is_admin_or_staff():
+        return False
+    elif upload_access == 'users' and not current_user.is_authenticated():
+        return False
+    return True
+
+
 def reply_already_exists(user_id, post_id, parent_id, body) -> bool:
     if parent_id is None:
         num_matching_replies = db.session.execute(text(
@@ -1707,7 +1741,7 @@ def awaken_dormant_instance(instance):
             db.session.commit()
 
 
-def shorten_number(number):
+def shorten_number(number) -> str:
     if number < 1000:
         return str(number)
     elif number < 1000000:
