@@ -12,12 +12,10 @@
   </select>
 </div>
 <div class="d-none d-xl-block view_filter btn-group mt-1 mb-2">
-  {% if not current_user.is_anonymous -%}
-    {% if enable_mod_filter -%}
-      <a href="/home/{{ sort }}/moderating" class="btn {{ 'btn-primary' if view_filter == 'moderating' else 'btn-outline-secondary' }}" rel="nofollow noindex" title="{{ _('Posts from communities you moderate') }}">
-        {{ _('Moderating') }}
-    </a>{% endif -%}
-    <a href="/home/{{ sort }}/subscribed" class="btn {{ 'btn-primary' if view_filter == 'subscribed' else 'btn-outline-secondary' }}" rel="nofollow noindex" title="{{ _('Posts from joined communities') }}">
+  <button id="viewFilterDropdown" type="button" class="btn dropdown-toggle px-2 py-2 {{ 'btn-primary' if view_filter in ['subscribed','moderating','local','popular','all'] else 'btn-outline-secondary' }}" data-bs-toggle="dropdown" aria-expanded="false">
+    {%- if view_filter == 'moderating' -%}
+      {{ _('Moderating') }}
+    {%- elif view_filter == 'subscribed' -%}
       {{ _('Subscribed') }}
     {%- elif view_filter == 'local' -%}
       {{ _('Local') }}
