@@ -358,7 +358,7 @@ function setupLightboxPostBody() {
 
     const popStateListener = () => baguetteBox.hide();
     const clickToClose = () => baguetteBox.hide();
-    const images = document.querySelectorAll('.post_body img:not(.mb_img_grid img)');
+    const images = document.querySelectorAll('.post_body img:not(.mb_img_grid img, img.emoji)');
     images.forEach(function(img) {
         const parent = img.parentNode;
         const link = document.createElement('a');
@@ -373,6 +373,7 @@ function setupLightboxPostBody() {
         titleTag: true,
         async: true,
         preload: 3,
+        ignoreClass: 'emoji',
         afterShow: function () {
             history.pushState({ lightbox: true }, document.title, location.pathname + location.search + '#lightbox');
             window.addEventListener('popstate', popStateListener);
@@ -402,6 +403,7 @@ function setupLightboxPostReply() {
             titleTag: true,
             async: true,
             preload: 3,
+            ignoreClass: 'emoji',
         afterShow: function () {
             history.pushState({ lightbox: true }, document.title, location.pathname + location.search + '#lightbox');
             window.addEventListener('popstate', popStateListener);
