@@ -1841,7 +1841,7 @@ class Post(db.Model):
                 if post.body and 'cross-posted from: https://' in post.body:
                     lines = []
                     for line in post.body.split('\n'):
-                        if not line.strip().startswith('cross-posted from: https://'):
+                        if not 'cross-posted from:  https://' in line.strip():
                             lines.append(line)
                     post.body = '\n'.join(lines)
                     post.body_html = markdown_to_html(post.body)
@@ -2524,6 +2524,7 @@ class Post(db.Model):
     def move_to(self, community: Community):
         self.community_id = community.id
         self.instance_id = community.instance_id
+        self.flair.clear()
         db.session.execute(text('UPDATE post_reply SET community_id = :community_id, instance_id = :instance_id WHERE post_id = :post_id'),
                            {'community_id': community.id, 'instance_id': community.instance_id, 'post_id': self.id})
 
@@ -2850,6 +2851,32 @@ class PostReply(db.Model):
         else:
             parent = PostReply.query.get(self.parent_id)
             return parent.author.public_url()
+
+    def tags_for_activitypub(self):
+        return_value = []
+        # include emojis used in body text
+        if self.body and ':' in self.body:
+            from app.utils import guess_mime_type
+            EMOJI_RE = re.compile(r':([a-z0-9_+-]{1,20}):', re.IGNORECASE)
+            tokens = {
+                f':{m.group(1).lower()}:'
+                for m in EMOJI_RE.finditer(self.body)
+            }
+
+            if tokens:
+                emojis = db.session.query(Emoji).filter(Emoji.token.in_(tokens)).order_by(Emoji.instance_id).all()
+                for emoji in emojis:
+                    return_value.append({
+                        'type': 'Emoji',
+                        'name': emoji.token,
+                        'icon': {
+                            'type': 'Image',
+                            'mediaType': guess_mime_type(emoji.url),  # or store this in DB
+                            'url': emoji.url,
+                        },
+                    })
+
+        return return_value
 
     def delete_dependencies(self):
         """

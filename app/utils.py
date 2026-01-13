@@ -385,7 +385,7 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
         )
 
         clean_html = pattern.sub(
-            lambda m: "<img class='emoji' width=30 height=30 src='" + emoji_replacements[m.group(0).lower()] + "'>",
+            lambda m: "<img class='emoji' referrerpolicy='no-referrer' width=30 height=30 src='" + emoji_replacements[m.group(0).lower()] + "'>",
             clean_html
         )
 
