@@ -233,7 +233,7 @@ def post_to_page_microblog(post: Post):
         "name": post.title,
         "cc": [],
         "content": '',
-        "summary": f'{first_paragraph(post.body_html)}...',
+        "summary": f'{first_paragraph(post.body_html)}',
         "mediaType": "text/html",
         "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
         "attachment": [],
