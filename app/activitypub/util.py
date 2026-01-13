@@ -36,7 +36,7 @@ from app.utils import get_request, allowlist_html, get_setting, ap_datetime, mar
     moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse, mastodon_extra_field_link, \
     blocked_users, piefed_markdown_to_lemmy_markdown, store_files_in_s3, guess_mime_type, get_recipient_language, \
     patch_db_session, to_srgb, communities_banned_from_all_users, blocked_communities, blocked_or_banned_instances, \
-    instance_community_ids, banned_instances
+    instance_community_ids, banned_instances, first_paragraph
 
 from bs4 import BeautifulSoup
 
@@ -232,7 +232,7 @@ def post_to_page_microblog(post: Post):
         ],
         "name": post.title,
         "cc": [],
-        "content": '',
+        "content": first_paragraph(post.body_html),
         "summary": '',
         "mediaType": "text/html",
         "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
@@ -252,6 +252,8 @@ def post_to_page_microblog(post: Post):
     }
     # if post.language_id:
     #     activity_data['contentMap'] = {post.language_code(): activity_data['content']}
+    if post.nsfw or post.nsfl:
+        activity_data["summary"] = post.title
     if post.edited_at is not None:
         activity_data["updated"] = ap_datetime(post.edited_at)
     if (post.type == POST_TYPE_LINK or post.type == POST_TYPE_VIDEO or post.type == POST_TYPE_EVENT) and post.url is not None:
@@ -263,11 +265,10 @@ def post_to_page_microblog(post: Post):
                                             'url': post.image.source_url,
                                             'name': post.image.alt_text}]
     if post.type == POST_TYPE_POLL:
-        plain = html_strip_tags(post.body_html)
         poll = Poll.query.filter_by(post_id=post.id).first()
         activity_data['type'] = 'Question'
         del activity_data['name']
-        activity_data['content'] = f"{plain}"
+        activity_data['content'] = f"{post.body_html if post.body_html else ''}"
         activity_data['contentMap'] = {post.language_code(): activity_data['content']}
         mode = 'oneOf' if poll.mode == 'single' else 'anyOf'
         choices = []
@@ -305,7 +306,7 @@ def post_to_page_microblog(post: Post):
     return activity_data
 
 def post_to_page_misskey(post: Post):
-    plain = html_strip_tags(post.body_html)
+    # plain = html_strip_tags(post.body_html)
     activity_data = {
         "type": "Page",
         "id": post.ap_id,
@@ -317,9 +318,9 @@ def post_to_page_misskey(post: Post):
         ],
         "name": post.title,
         "cc": [],
-        "content": plain,
+        "content": post.body_html,
         "summary": post.title,
-        "mediaType": "text/plain",
+        "mediaType": "text/html",
         "source": {"content": post.body if post.body else '', "mediaType": "text/markdown"},
         "attachment": [],
         "commentsEnabled": post.comments_enabled,
@@ -351,7 +352,7 @@ def post_to_page_misskey(post: Post):
         poll = Poll.query.filter_by(post_id=post.id).first()
         activity_data['type'] = 'Question'
         del activity_data['name']
-        activity_data['content'] = f"{plain}"
+        activity_data['content'] = f"{post.body_html}"
         mode = 'oneOf' if poll.mode == 'single' else 'anyOf'
         choices = []
         for choice in PollChoice.query.filter_by(post_id=post.id).order_by(PollChoice.sort_order).all():
