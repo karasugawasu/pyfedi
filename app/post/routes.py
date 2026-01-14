@@ -4,7 +4,7 @@ from collections import namedtuple, defaultdict
 from datetime import datetime, timedelta
 from random import randint
 
-from flask import redirect, url_for, flash, current_app, abort, request, g, make_response, jsonify
+from flask import redirect, url_for, flash, current_app, abort, request, g, make_response, jsonify, Response
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 from furl import furl
@@ -15,6 +15,7 @@ import ics
 from markupsafe import escape
 from slugify import slugify
 from wtforms.fields import Label
+import requests
 
 from app import db, constants, cache, limiter, get_locale
 from app.activitypub.signature import default_context, send_post_request
@@ -2337,3 +2338,15 @@ def post_share_mastodon(post_id):
 
     form.domain.data = request.cookies.get('mastodon_share', 'mastodon.social')
     return render_template('generic_form.html', form=form, title=_('Share on Mastodon'))
+
+@bp.route("/mastodon-embed.js")
+def mastodon_embed_js():
+    upstream = "https://md.korako.me/embed.js"
+    r = requests.get(upstream, timeout=10)
+    r.raise_for_status()
+
+    resp = Response(r.content, mimetype="application/javascript; charset=utf-8")
+    resp.headers["Cache-Control"] = (
+        "public, max-age=86400, stale-while-revalidate=604800"
+    )
+    return resp
