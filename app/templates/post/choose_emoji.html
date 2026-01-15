@@ -13,16 +13,18 @@
           {{ form.csrf_token() }}
           <ul class="list-group emoji-picker">
             {% for emoji in emojis -%}
-              <li class="list-group-item">
-                  <input class="form-check-input" type="radio" name="emoji" value="{{ emoji.token }}" id="emoji-{{ emoji.id }}">
-                  <label class="form-check-label" for="emoji-{{ emoji.id }}">
-                    <span class="emoji" title="{{ emoji.token if emoji.url.startswith('https://') else emoji.aliases }}">{% if emoji.url.startswith('https://') %}
-                                            <img src="{{ emoji.url }}" width="30" alt="{{ emoji.token }}">
-                                        {% else %}
-                                            {{ emoji.token }}
-                                        {% endif %}</span>
-                  </label>
-              </li>
+              {%- if emoji.instance_id == 1 -%}
+                <li class="list-group-item">
+                    <input class="form-check-input" type="radio" name="emoji" value="{{ emoji.token }}" id="emoji-{{ emoji.id }}">
+                    <label class="form-check-label" for="emoji-{{ emoji.id }}">
+                        <span class="emoji" title="{{ emoji.token if emoji.url.startswith('https://') else emoji.aliases }}">{% if emoji.url.startswith('https://') %}
+                                                <img src="{{ emoji.url }}" width="30" alt="{{ emoji.token }}">
+                                            {% else %}
+                                                {{ emoji.token }}
+                                            {% endif %}</span>
+                    </label>
+                </li>
+              {% endif -%}
             {% endfor -%}
           </ul>
           <noscript>

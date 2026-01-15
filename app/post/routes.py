@@ -580,7 +580,7 @@ def comment_emoji_list(comment_id):
         ),
         Emoji.token
     ).all()
-    emoji_list = [{'id': e.id, 'url': e.url, 'token': e.token, 'category': e.category, 'aliases': e.aliases} for e in emojis]
+    emoji_list = [{'id': e.id, 'url': e.url, 'token': e.token, 'category': e.category, 'aliases': e.aliases, 'instance_id': e.instance_id} for e in emojis]
     return render_template('post/emoji_list.html', comment_id=comment_id, emojis=emoji_list, nonce=g.get('nonce', ''))
 
 
