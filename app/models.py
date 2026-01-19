@@ -1894,6 +1894,10 @@ class Post(db.Model):
                 if opengraph and (opengraph.get('og:image', '') != '' or opengraph.get('og:image:url', '') != ''):
                     filename = opengraph.get('og:image') or opengraph.get('og:image:url')
                     if not filename.startswith('/'):
+                        # 長すぎるURLは保存しない（DB制約回避）
+                        MAX_URL = 1024
+                        if filename and len(filename) > MAX_URL:
+                            filename = None
                         file = File(source_url=filename, alt_text=shorten_string(opengraph.get('og:title'), 295))
                         post.image = file
                         db.session.add(file)

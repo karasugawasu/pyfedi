@@ -2161,10 +2161,14 @@ def url_to_thumbnail_file(filename) -> File:
                 # For local storage, use the temp file paths as final URLs
                 thumbnail_170_url = temp_file_path
                 thumbnail_512_url = temp_file_path_512 if not file_extension == ".svg" else temp_file_path
+
+            source_url = filename
+            if source_url and len(source_url) > 1024:
+                source_url = None
             return File(file_path=thumbnail_512_url, thumbnail_width=thumbnail_width, width=thumbnail_512_width,
                         height=thumbnail_512_height,
                         thumbnail_height=thumbnail_height, thumbnail_path=thumbnail_170_url,
-                        source_url=filename)
+                        source_url=source_url)
 
 
 # By no means is this a complete list, but it is very easy to search for the ones you need later.
