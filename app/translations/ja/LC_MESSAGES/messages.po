@@ -1914,7 +1914,7 @@ msgstr "リンク"
 #: app/community/forms.py:105 app/templates/community/add_post.html:14
 #: app/templates/search/start.html:44
 msgid "Discussion"
-msgstr "投稿"
+msgstr "文章"
 
 #: app/community/forms.py:106 app/community/forms.py:268
 #: app/community/forms.py:319 app/templates/community/add_post.html:15
