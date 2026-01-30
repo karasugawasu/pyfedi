@@ -842,6 +842,7 @@ function titleToURL(title) {
 
 var timeTrackingInterval;
 var currentlyVisible = true;
+var timeToStopShownAlready = false;
 
 function setupTimeTracking() {
     // Check for Page Visibility API support
@@ -891,7 +892,8 @@ function setupTimeTracking() {
           const maxHoursPerDay = getCookie('max_hours_per_day');
           if (maxHoursPerDay) {
               const maxSecondsPerDay = parseFloat(maxHoursPerDay) * 3600;
-              if (dailyTimeSpent >= maxSecondsPerDay) {
+              if (dailyTimeSpent >= maxSecondsPerDay && !timeToStopShownAlready) {
+                  timeToStopShownAlready = true;
                   alert("Time to stop for the day");
               }
           }

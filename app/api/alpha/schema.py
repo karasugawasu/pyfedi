@@ -304,7 +304,7 @@ class SearchRequest(DefaultSchema):
     })
     community_name = fields.String()
     community_id = fields.Integer()
-    minimun_upvotes = fields.Integer()
+    minimum_upvotes = fields.Integer()
     nsfw = fields.String(validate=validate.OneOf(search_nsfw))
 
 
@@ -657,6 +657,11 @@ class GetCommunityResponse(DefaultSchema):
     discussion_languages = fields.List(fields.Integer(), required=True)
     moderators = fields.List(fields.Nested(CommunityModeratorView), required=True)
     site = fields.Nested(Site)
+
+
+class GetFeedRequest(DefaultSchema):
+    id = fields.Integer()
+    name = fields.String()
 
 
 class GetSuggestCompletionRequest(DefaultSchema):

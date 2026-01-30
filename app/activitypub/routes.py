@@ -548,8 +548,15 @@ def shared_inbox():
     try:
         request_json = request.get_json(force=True)
     except werkzeug.exceptions.BadRequest as e:
-        log_incoming_ap('', APLOG_NOTYPE, APLOG_FAILURE, None, 'Unable to parse json body: ' + e.description)
-        return '', 200
+        log_incoming_ap('', APLOG_NOTYPE, APLOG_FAILURE, None, 'Unable to parse json body: ' + e.description +  str(request.user_agent))
+        return '', 400
+    except BlockingIOError:
+        log_incoming_ap('', APLOG_NOTYPE, APLOG_FAILURE, None, 'Client disconnected while sending JSON body ' + str(request.user_agent))
+        return '', 400
+
+    if request_json is None:
+        log_incoming_ap('', APLOG_NOTYPE, APLOG_FAILURE, None, 'Empty JSON body ' + str(request.user_agent))
+        return "", 400
 
     pause_federation = redis_client.get('pause_federation')
     if pause_federation == '1': # temporary pause as this instance is overloaded
@@ -2358,8 +2365,8 @@ def process_chat(user, store_ap_json, core_activity, session):
         return False
         
     recipient = find_actor_or_create_cached(recipient_ap_id)
-    recipient = session.query(User).get(recipient.id)   # for some reason find_actor_or_create_cached was giving me a user from the wrong DB session, causing an exception later on.
     if recipient and recipient.is_local():
+        recipient = session.query(User).get(recipient.id)  # for some reason find_actor_or_create_cached was giving me a user from the wrong DB session, causing an exception later on.
         if sender.created_very_recently():
             log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender is too new')
             return True

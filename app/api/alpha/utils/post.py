@@ -232,11 +232,11 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
             if nsfw == '' and user.hide_nsfw == 1:
                 posts = posts.filter(Post.nsfw == False)
             else:
-                if nsfw == 'exclude':
+                if nsfw == 'Exclude':
                     posts = posts.filter(Post.nsfw == False)
-                elif nsfw == 'only':
+                elif nsfw == 'Only':
                     posts = posts.filter(Post.nsfw == True)
-                elif nsfw == 'include':
+                elif nsfw == 'Include':
                     pass
             if user.hide_gen_ai == 1:
                 posts = posts.filter(Post.ai_generated == False)
@@ -258,11 +258,11 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         if len(filtered_out_community_ids):
             posts = posts.filter(Post.community_id.not_in(filtered_out_community_ids))
     else:
-        if nsfw == 'exclude':
+        if nsfw == 'Exclude':
             posts = posts.filter(Post.nsfw == False)
-        elif nsfw == 'only':
+        elif nsfw == 'Only':
             posts = posts.filter(Post.nsfw == True)
-        elif nsfw == 'include':
+        elif nsfw == 'Include':
             pass
 
     if minimum_upvotes:
