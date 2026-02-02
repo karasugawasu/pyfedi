@@ -21,7 +21,7 @@ from app.email import send_verification_email
 from app.ldap_utils import sync_user_to_ldap, login_with_ldap
 from app.models import IpBan, Notification, Site, User, UserRegistration, utcnow, Role
 from app.utils import banned_ip_addresses, blocked_referrers, finalize_user_setup, get_request, get_setting, gibberish, \
-    ip_address, markdown_to_html, render_template, user_cookie_banned, user_ip_banned, role_access
+    ip_address, markdown_to_html, render_template, user_cookie_banned, user_ip_banned, role_access, actor_contains_blocked_words
 
 
 # Return a random string of 6 letter/digits.
@@ -153,8 +153,9 @@ def process_registration_form(form):
     if is_invalid_email_or_username(form, disallowed_usernames):
         return redirect(url_for("auth.register"))
 
-    if contains_banned_username_patterns(form.user_name.data):
-        return redirect_with_session_cookie("auth.please_wait")
+    if actor_contains_blocked_words(form.user_name.data):
+        flash(_("Sorry, this username pattern is not allowed."), "error")
+        return redirect(url_for("auth.register"))
 
     if is_restricted_by_referrer():
         return redirect_with_session_cookie("auth.please_wait")
@@ -178,13 +179,6 @@ def is_invalid_email_or_username(form, disallowed_usernames):
         flash(_("Sorry, you cannot use that user name"), "error")
         return True
 
-    return False
-
-
-def contains_banned_username_patterns(username):
-    if "88" in username:
-        flash(_("Sorry, this username pattern is not allowed."), "error")
-        return True
     return False
 
 
@@ -376,21 +370,26 @@ def redirect_next_page():
 def process_login(form: LoginForm):
     ip = ip_address()
     country = get_country(ip)
+    username = form.user_name.data.strip()
+    password = form.password.data.strip()
+
+    # attempt authentication with LDAP first (if enabled), then fall back to local
+    user = None
+    ldap_sync = True
 
     if current_app.config['LDAP_READ_ENABLE']:
-        user = validate_user_ldap_login(form.user_name.data.strip(), form.password.data.strip(), ip)
-        if user is None:
-            return redirect(url_for("auth.login"))
-        ldap_sync = False
-    else:
-        ldap_sync = True
-        user = find_user(form.user_name.data.strip())
+        user = validate_user_ldap_login(username, password, ip)
+        if user is not None:  # LDAP authentication succeeded
+            ldap_sync = False  # setting it to false avoids writing to LDAP later on
 
+    if user is None:
+        # Either LDAP is disabled or LDAP auth failed - try local authentication
+        user = find_user(username)
         if not user:
             flash(_("No account exists with that user name."), "error")
             return redirect(url_for("auth.login"))
 
-        if not validate_user_login(user, form.password.data.strip(), ip):
+        if not validate_user_login(user, password, ip):
             return redirect(url_for("auth.login"))
 
     if requires_email_verification(user):
@@ -409,7 +408,7 @@ def find_user(user_name):
     if not user:
         user = User.query.filter_by(email=username, ap_id=None, deleted=False).first()
     if not user:
-        ap_id = f"https://{current_app.config['SERVER_NAME']}/u/{username.lower()}"
+        ap_id = f"{current_app.config['SERVER_URL']}/u/{username.lower()}"
         user = User.query.filter(User.ap_profile_id.ilike(ap_id), User.deleted.is_(False)).first()
 
     return user

@@ -991,10 +991,10 @@ div.navbar {
   }
 }
 
-form > .mb-3 {
+form .mb-3 {
   margin-bottom: 1.1rem;
 }
-form > .mb-3.required > label:after {
+form .mb-3.required > label:after {
   content: "*";
   color: red;
   margin-left: 2px;
@@ -1263,6 +1263,18 @@ ul.form-multicheck-columns li {
 
 .post_list {
   clear: both;
+}
+.post_list .instance_sticky {
+  border-bottom: solid 2px var(--bs-success-border-subtle);
+}
+.post_list .instance_sticky > .post_teaser {
+  border-bottom: none !important;
+}
+.post_list .instance_sticky .post_teaser_title_a::before {
+  font-family: "Feather" !important;
+  content: "\e9d5";
+  color: var(--bs-success);
+  margin-right: 0.25em;
 }
 .post_list .post_teaser {
   border-bottom: solid 2px #ddd;

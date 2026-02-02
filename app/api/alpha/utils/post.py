@@ -5,7 +5,7 @@ from sqlalchemy import desc, text, and_, exists, asc
 from sqlakeyset import get_page
 from sqlalchemy.exc import IntegrityError
 
-from app import db, plugins
+from app import db, plugins, cache
 from app.api.alpha.views import post_view, post_report_view, reply_view, community_view, user_view, flair_view
 from app.constants import *
 from app.feed.routes import get_all_child_feed_ids
@@ -18,7 +18,7 @@ from app.post.util import post_replies, get_comment_branch, tags_to_string, flai
 from app.topic.routes import get_all_child_topic_ids
 from app.utils import authorise_api_user, blocked_users, blocked_communities, blocked_or_banned_instances, recently_upvoted_posts, \
     site_language_id, filtered_out_communities, joined_or_modding_communities, \
-    user_filters_home, user_filters_posts, in_sorted_list, \
+    user_filters_home, user_filters_posts, in_sorted_list, instance_sticky_posts, instance_sticky_post_ids, \
     communities_banned_from_all_users, moderating_communities_ids_all_users, blocked_domains, SqlKeysetPagination
 from app.shared.tasks import task_selector
 
@@ -41,6 +41,9 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
 
     query = data['q'] if 'q' in data else ''
 
+    if limit > current_app.config["PAGE_LENGTH"]:
+        limit = current_app.config["PAGE_LENGTH"]
+
     if auth:
         user_id = authorise_api_user(auth)
 
@@ -60,6 +63,25 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
 
     if community_id or community_name:
         search_by_community = True
+        # check private community access
+        if community_id:
+            community = Community.query.get(community_id)
+        else:
+            # parse community_name to get the community
+            if '@' not in community_name:
+                community_name_lookup = f"{community_name}@{current_app.config['SERVER_NAME']}"
+            else:
+                community_name_lookup = community_name
+            name, ap_domain = community_name_lookup.split('@')
+            community = Community.query.filter_by(name=name, ap_domain=ap_domain).first()
+
+        if community and community.private:
+            # community is private, check if user is a member
+            if not user_id:
+                raise Exception('Private community - authentication required')
+            else:
+                if not community.is_member(user):
+                    raise Exception('Private community - membership required')
     else:
         search_by_community = False
 
@@ -81,6 +103,9 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     # Post.community_id.not_in(blocked_community_ids)       # exclude posts in blocked communities
     # Post.instance_id.not_in(blocked_instance_ids)         # exclude posts by users on blocked instances
     # Community.instance_id.not_in(blocked_instance_ids)    # exclude posts in communities on blocked instances
+
+    # Depending on filters, determine whether instance stickies should be listed first or not
+    segregate_instance_stickies = True
 
     if type == "Local":
         posts = Post.query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
@@ -118,6 +143,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
             Community.instance_id.not_in(blocked_instance_ids))
     else:  # type == "All"
         if community_name:
+            segregate_instance_stickies = False
             if not '@' in community_name:
                 community_name = f"{community_name}@{current_app.config['SERVER_NAME']}"
             name, ap_domain = community_name.split('@')
@@ -133,6 +159,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                                                               blocked_instance_ids))
             content_filters = user_filters_posts(user_id) if user_id else {}
         elif community_id:
+            segregate_instance_stickies = False
             posts = Post.query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
                                       Post.user_id.not_in(blocked_person_ids),
                                       Post.community_id.not_in(blocked_community_ids),
@@ -143,6 +170,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                                                               blocked_instance_ids))
             content_filters = user_filters_posts(user_id) if user_id else {}
         elif feed_id:
+            segregate_instance_stickies = False
             feed = Feed.query.get(feed_id)
             if feed.show_posts_in_children:  # include posts from child feeds
                 feed_ids = get_all_child_feed_ids(feed)
@@ -167,6 +195,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                                                               blocked_instance_ids))
             content_filters = user_filters_posts(user_id) if user_id else {}
         elif topic_id:
+            segregate_instance_stickies = False
             topic = Topic.query.get(topic_id)
             if topic.show_posts_in_children:  # include posts from child feeds
                 topic_ids = get_all_child_topic_ids(topic)
@@ -191,6 +220,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                                                               blocked_instance_ids))
             content_filters = user_filters_posts(user_id) if user_id else {}
         elif person_id:
+            segregate_instance_stickies = False
             posts = Post.query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
                                       Post.community_id.not_in(blocked_community_ids),
                                       Post.domain_id.not_in(blocked_domain_ids),
@@ -209,16 +239,19 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
             content_filters = user_filters_home(user_id) if user_id else {}
 
     if query:
+        segregate_instance_stickies = False
         if search_type == 'Url':
             posts = posts.filter(Post.url.ilike(f"%{query}%"))
         else:
-            posts = posts.search(query, sort=sort == 'Relevance')
+            posts = posts.search(query, sort=sort == 'Relevance').filter(Post.indexable == True)
 
     if user_id:
         if liked_only:
+            segregate_instance_stickies = False
             upvoted_post_ids = recently_upvoted_posts(user_id)
             posts = posts.filter(Post.id.in_(upvoted_post_ids), Post.user_id != user_id)
         elif saved_only:
+            segregate_instance_stickies = False
             bookmarked_post_ids = tuple(db.session.execute(text('SELECT post_id FROM "post_bookmark" WHERE user_id = :user_id'),
                                                      {"user_id": user_id}).scalars())
             posts = posts.filter(Post.id.in_(bookmarked_post_ids))
@@ -270,6 +303,9 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     
     if search_by_community and not ignore_sticky:
         posts = posts.order_by(desc(Post.sticky))
+    
+    if segregate_instance_stickies and not ignore_sticky:
+        posts = posts.order_by(desc(Post.instance_sticky))
 
     if sort == "Hot":
         posts = posts.order_by(desc(Post.ranking)).order_by(desc(Post.posted_at))
@@ -395,6 +431,27 @@ def get_post_list2(auth, data, user_id=None, search_type='Posts') -> dict:
     topic_id = int(data['topic_id']) if 'topic_id' in data else None
     community_name = data['community_name'] if 'community_name' in data else None
     person_id = int(data['person_id']) if 'person_id' in data else None
+
+    if community_id or community_name:
+        # check private community access
+        if community_id:
+            community = Community.query.get(community_id)
+        else:
+            # parse community_name to get the community
+            if '@' not in community_name:
+                community_name_lookup = f"{community_name}@{current_app.config['SERVER_NAME']}"
+            else:
+                community_name_lookup = community_name
+            name, ap_domain = community_name_lookup.split('@')
+            community = Community.query.filter_by(name=name, ap_domain=ap_domain).first()
+
+        if community and community.private:
+            # community is private, check if user is a member
+            if not user_id:
+                raise Exception('Private community - authentication required')
+            else:
+                if not community.is_member(user):
+                    raise Exception('Private community - membership required')
 
     if user_id and user_id != person_id:
         blocked_person_ids = blocked_users(user_id)
@@ -688,6 +745,9 @@ def get_post_replies(auth, data):
     limit = int(data['limit']) if 'limit' in data else 20
     post_id = data['post_id'] if 'post_id' in data else None
     parent_id = data['parent_id'] if 'parent_id' in data else None
+
+    if limit > current_app.config["PAGE_LENGTH"]:
+        limit = current_app.config["PAGE_LENGTH"]
 
     if auth:
         user_details = authorise_api_user(auth, return_type='dict')
@@ -1056,8 +1116,23 @@ def post_post_hide(auth, data):
 def post_post_feature(auth, data):
     post_id = data['post_id']
     featured = data['featured']
+    feature_type = data['feature_type'] if 'feature_type' in data else 'Community'
 
-    user_id, post = sticky_post(post_id, featured, SRC_API, auth)
+    if feature_type == "Community":
+        user_id, post = sticky_post(post_id, featured, SRC_API, auth)
+    elif feature_type == "Local":
+        user = authorise_api_user(auth, 'model')
+        user_id = user.id
+        post = Post.query.get(post_id)
+        
+        if user.is_admin():
+            post.instance_sticky = featured
+
+            cache.delete_memoized(instance_sticky_posts)
+            cache.delete_memoized(instance_sticky_post_ids)
+            db.session.commit()
+        else:
+            raise Exception('Only admin users can feature a post locally')
 
     post_json = post_view(post=post, variant=4, user_id=user_id)
     return post_json
@@ -1099,6 +1174,9 @@ def get_post_like_list(auth, data):
     post_id = data['post_id']
     page = data['page'] if 'page' in data else 1
     limit = data['limit'] if 'limit' in data else 50
+
+    if limit > current_app.config["PAGE_LENGTH"]:
+        limit = current_app.config["PAGE_LENGTH"]
 
     user = authorise_api_user(auth, return_type='model')
     post = Post.query.get(post_id)

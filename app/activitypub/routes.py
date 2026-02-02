@@ -18,7 +18,8 @@ from app.activitypub.util import users_total, active_half_year, active_month, lo
     process_report, ensure_domains_match, resolve_remote_post, refresh_community_profile, \
     comment_model_to_json, restore_post_or_comment, ban_user, unban_user, \
     log_incoming_ap, find_community, site_ban_remove_data, community_ban_remove_data, verify_object_from_source, \
-    post_replies_for_ap, is_vote, find_instance_id, resolve_remote_post_from_search
+    post_replies_for_ap, is_vote, find_instance_id, resolve_remote_post_from_search, proactively_delete_content, \
+    process_quote_boost
 from app.community.routes import show_community
 from app.community.util import send_to_remote_instance, send_to_remote_instance_fast
 from app.constants import *
@@ -36,7 +37,7 @@ from app.utils import gibberish, get_setting, community_membership, ap_datetime,
     community_moderators, html_to_text, add_to_modlog, instance_banned, get_redis_connection, \
     feed_membership, get_task_session, patch_db_session, \
     blocked_phrases, orjson_response, moderating_communities, joined_communities, moderating_communities_ids, \
-    moderating_communities_ids_all_users, publish_sse_event
+    moderating_communities_ids_all_users, publish_sse_event, blocked_users
 
 @bp.route('/testredis')
 def testredis_get():
@@ -68,17 +69,17 @@ def webfinger():
         if actor == current_app.config['SERVER_NAME']:
             webfinger_data = {
                 "subject": f"acct:{actor}@{current_app.config['SERVER_NAME']}",
-                "aliases": [f"{current_app.config['HTTP_PROTOCOL']}://{current_app.config['SERVER_NAME']}/actor"],
+                "aliases": [f"{current_app.config['SERVER_URL']}/actor"],
                 "links": [
                     {
                         "rel": "http://webfinger.net/rel/profile-page",
                         "type": "text/html",
-                        "href": f"{current_app.config['HTTP_PROTOCOL']}://{current_app.config['SERVER_NAME']}/about"
+                        "href": f"{current_app.config['SERVER_URL']}/about"
                     },
                     {
                         "rel": "self",
                         "type": "application/activity+json",
-                        "href": f"{current_app.config['HTTP_PROTOCOL']}://{current_app.config['SERVER_NAME']}/actor",
+                        "href": f"{current_app.config['SERVER_URL']}/actor",
                     }
                 ]
             }
@@ -97,8 +98,8 @@ def webfinger():
                                                                                                      banned=False,
                                                                                                      ap_id=None).first()
             if object is None:
-                profile_id = f"https://{current_app.config['SERVER_NAME']}/c/{actor.strip().lower()}"
-                object = Community.query.filter_by(ap_profile_id=profile_id, ap_id=None).first()
+                profile_id = f"{current_app.config['SERVER_URL']}/c/{actor.strip().lower()}"
+                object = Community.query.filter_by(ap_profile_id=profile_id, ap_id=None, local_only=False).first()
                 type = 'Group'
                 if object is None:
                     object = Feed.query.filter_by(name=actor.strip(), ap_id=None).first()
@@ -132,7 +133,7 @@ def webfinger():
         if isinstance(object, User):
             webfinger_data['links'].append({
               "rel": "https://w3id.org/fep/3b86/Create",
-              "template": f"https://{current_app.config['SERVER_NAME']}/share?url=" + '{object}'
+              "template": f"{current_app.config['SERVER_URL']}/share?url=" + '{object}'
             })
         resp = jsonify(webfinger_data)
         resp.headers.add_header('Access-Control-Allow-Origin', '*')
@@ -147,9 +148,9 @@ def webfinger():
 @cache.cached(timeout=600)
 def nodeinfo():
     nodeinfo_data = {"links": [{"rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
-                                "href": f"https://{current_app.config['SERVER_NAME']}/nodeinfo/2.0"},
+                                "href": f"{current_app.config['SERVER_URL']}/nodeinfo/2.0"},
                                {"rel": "http://nodeinfo.diaspora.software/ns/schema/2.1",
-                                "href": f"https://{current_app.config['SERVER_NAME']}/nodeinfo/2.1"},
+                                "href": f"{current_app.config['SERVER_URL']}/nodeinfo/2.1"},
                                ]}
     return jsonify(nodeinfo_data)
 
@@ -338,14 +339,14 @@ def user_profile(actor):
         else:
             user: User = User.query.filter(or_(User.user_name == actor)).filter_by(ap_id=None).first()
             if user is None:
-                user = User.query.filter_by(ap_profile_id=f'https://{current_app.config["SERVER_NAME"]}/u/{actor.lower()}', ap_id=None).first()
+                user = User.query.filter_by(ap_profile_id=f'{current_app.config["SERVER_URL"]}/u/{actor.lower()}', ap_id=None).first()
     else:
         if '@' in actor:
             user: User = User.query.filter_by(ap_id=actor.lower()).first()
         else:
             user: User = User.query.filter(or_(User.user_name == actor)).filter_by(ap_id=None).first()
             if user is None:
-                user = User.query.filter_by(ap_profile_id=f'https://{current_app.config["SERVER_NAME"]}/u/{actor.lower()}', ap_id=None).first()
+                user = User.query.filter_by(ap_profile_id=f'{current_app.config["SERVER_URL"]}/u/{actor.lower()}', ap_id=None).first()
 
     if user is not None:
         if request.method == 'HEAD':
@@ -356,7 +357,6 @@ def user_profile(actor):
             else:
                 return ''
         if is_activitypub_request():
-            server = current_app.config['SERVER_NAME']
             actor_data = {"@context": default_context(),
                           "type": "Person" if not user.bot else "Service",
                           "id": user.public_url(),
@@ -374,7 +374,7 @@ def user_profile(actor):
                               "publicKeyPem": user.public_key
                           },
                           "endpoints": {
-                              "sharedInbox": f"https://{server}/inbox"
+                              "sharedInbox": f"{current_app.config['SERVER_URL']}/inbox"
                           },
                           "published": ap_datetime(user.created),
                           }
@@ -389,7 +389,7 @@ def user_profile(actor):
                 else:
                     actor_data["icon"] = {
                         "type": "Image",
-                        "url": f"https://{current_app.config['SERVER_NAME']}{user.avatar_image()}"
+                        "url": f"{current_app.config['SERVER_URL']}{user.avatar_image()}"
                     }
             if user.cover_id is not None:
                 cover_image = user.cover_image()
@@ -401,7 +401,7 @@ def user_profile(actor):
                 else:
                     actor_data["image"] = {
                         "type": "Image",
-                        "url": f"https://{current_app.config['SERVER_NAME']}{user.cover_image()}"
+                        "url": f"{current_app.config['SERVER_URL']}{user.cover_image()}"
                     }
             if user.about_html:
                 actor_data['summary'] = user.about_html
@@ -432,7 +432,7 @@ def user_outbox(actor):
     outbox = {
         "@context": default_context(),
         'type': 'OrderedCollection',
-        'id': f"https://{current_app.config['SERVER_NAME']}/u/{actor}/outbox",
+        'id': f"{current_app.config['SERVER_URL']}/u/{actor}/outbox",
         'orderedItems': [],
         'totalItems': 0
     }
@@ -454,10 +454,12 @@ def community_profile(actor):
             abort(400)
         community: Community = Community.query.filter_by(ap_id=actor.lower(), banned=False).first()
     else:
-        profile_id = f"https://{current_app.config['SERVER_NAME']}/c/{actor.lower()}"
+        profile_id = f"{current_app.config['SERVER_URL']}/c/{actor.lower()}"
         community: Community = Community.query.filter_by(ap_profile_id=profile_id, ap_id=None).first()
     if community is not None:
         if is_activitypub_request():
+            if community.local_only or community.private:
+                abort(403)
             server = current_app.config['SERVER_NAME']
             actor_data = {"@context": default_context(),
                           "type": "Group",
@@ -485,7 +487,7 @@ def community_profile(actor):
                               "publicKeyPem": community.public_key
                           },
                           "endpoints": {
-                              "sharedInbox": f"https://{server}/inbox"
+                              "sharedInbox": f"{current_app.config['SERVER_URL']}/inbox"
                           },
                           "published": ap_datetime(community.created_at),
                           "updated": ap_datetime(community.last_active),
@@ -505,7 +507,7 @@ def community_profile(actor):
                 else:
                     actor_data["icon"] = {
                         "type": "Image",
-                        "url": f"https://{current_app.config['SERVER_NAME']}{community.icon_image()}"
+                        "url": f"{current_app.config['SERVER_URL']}{community.icon_image()}"
                     }
             if community.image_id is not None:
                 header_image = community.header_image()
@@ -517,7 +519,7 @@ def community_profile(actor):
                 else:
                     actor_data["image"] = {
                         "type": "Image",
-                        "url": f"https://{current_app.config['SERVER_NAME']}{community.header_image()}"
+                        "url": f"{current_app.config['SERVER_URL']}{community.header_image()}"
                     }
             resp = jsonify(actor_data)
             resp.content_type = 'application/activity+json'
@@ -878,7 +880,7 @@ def process_inbox_request(request_json, store_ap_json):
                                       "object": {"actor": user.public_url(), "to": None, "object": community.public_url(),
                                                  "type": "Follow", "id": follow_id},
                                       "type": "Reject",
-                                      "id": f"https://{current_app.config['SERVER_NAME']}/activities/reject/" + gibberish(32)}
+                                      "id": f"{current_app.config['SERVER_URL']}/activities/reject/" + gibberish(32)}
                             send_post_request(user.ap_inbox_url, reject, community.private_key, f"{community.public_url()}#main-key")
                         else:
                             existing_member = session.query(CommunityMember).filter_by(user_id=user.id, community_id=community.id).first()
@@ -895,7 +897,7 @@ def process_inbox_request(request_json, store_ap_json):
                                           "object": {"actor": user.public_url(), "to": None,
                                                      "object": community.public_url(), "type": "Follow", "id": follow_id},
                                           "type": "Accept",
-                                          "id": f"https://{current_app.config['SERVER_NAME']}/activities/accept/" + gibberish(32)}
+                                          "id": f"{current_app.config['SERVER_URL']}/activities/accept/" + gibberish(32)}
                                 send_post_request(user.ap_inbox_url, accept, community.private_key, f"{community.public_url()}#main-key")
                                 log_incoming_ap(id, APLOG_FOLLOW, APLOG_SUCCESS, saved_json)
                         return
@@ -914,7 +916,7 @@ def process_inbox_request(request_json, store_ap_json):
                                       "object": {"actor": user.public_url(), "to": None, "object": feed.public_url(),
                                                  "type": "Follow", "id": follow_id},
                                       "type": "Reject",
-                                      "id": f"https://{current_app.config['SERVER_NAME']}/activities/reject/" + gibberish(32)}
+                                      "id": f"{current_app.config['SERVER_URL']}/activities/reject/" + gibberish(32)}
                             send_post_request(user.ap_inbox_url, reject, feed.private_key, f"{feed.public_url()}#main-key")
                         else:
                             if feed_membership(user, feed) != SUBSCRIPTION_MEMBER:
@@ -929,7 +931,7 @@ def process_inbox_request(request_json, store_ap_json):
                                           "object": {"actor": user.public_url(), "to": None, "object": feed.public_url(),
                                                      "type": "Follow", "id": follow_id},
                                           "type": "Accept",
-                                          "id": f"https://{current_app.config['SERVER_NAME']}/activities/accept/" + gibberish(32)}
+                                          "id": f"{current_app.config['SERVER_URL']}/activities/accept/" + gibberish(32)}
                                 send_post_request(user.ap_inbox_url, accept, feed.private_key,
                                                   f"{feed.public_url()}#main-key")
                                 log_incoming_ap(id, APLOG_FOLLOW, APLOG_SUCCESS, saved_json)
@@ -956,7 +958,7 @@ def process_inbox_request(request_json, store_ap_json):
                                       "object": {"actor": remote_user.public_url(), "to": None,
                                                  "object": local_user.public_url(), "type": "Follow", "id": follow_id},
                                       "type": "Accept",
-                                      "id": f"https://{current_app.config['SERVER_NAME']}/activities/accept/" + gibberish(32)}
+                                      "id": f"{current_app.config['SERVER_URL']}/activities/accept/" + gibberish(32)}
                             send_post_request(remote_user.ap_inbox_url, accept, local_user.private_key,
                                               f"{local_user.public_url()}#main-key")
                             log_incoming_ap(id, APLOG_FOLLOW, APLOG_SUCCESS, saved_json)
@@ -1359,13 +1361,13 @@ def process_inbox_request(request_json, store_ap_json):
                                         # Undo the Follow
                                         if not community_to_remove.is_local():  # this is a remote community, so activitypub is needed
                                             if not community_to_remove.instance.gone_forever:
-                                                follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{gibberish(15)}"
+                                                follow_id = f"{current_app.config['SERVER_URL']}/activities/follow/{gibberish(15)}"
                                                 if community_to_remove.instance.domain == 'ovo.st':
                                                     join_request = session.query(CommunityJoinRequest).filter_by(user_id=fm_user.id,
                                                                                                         community_id=community_to_remove.id).first()
                                                     if join_request:
-                                                        follow_id = f"https://{current_app.config['SERVER_NAME']}/activities/follow/{join_request.uuid}"
-                                                undo_id = f"https://{current_app.config['SERVER_NAME']}/activities/undo/" + gibberish(15)
+                                                        follow_id = f"{current_app.config['SERVER_URL']}/activities/follow/{join_request.uuid}"
+                                                undo_id = f"{current_app.config['SERVER_URL']}/activities/undo/" + gibberish(15)
                                                 follow = {'actor': fm_user.public_url(),
                                                           'to': [community_to_remove.public_url()],
                                                           'object': community_to_remove.public_url(), 'type': 'Follow',
@@ -1437,7 +1439,7 @@ def process_inbox_request(request_json, store_ap_json):
                     post = Post.get_by_ap_id(core_activity['object'])
                     if post is None and origin_community and target_community:
                         # retrieve post from remote instance
-                        post = resolve_remote_post_from_search(core_activity['object'])
+                        post = resolve_remote_post_from_search(core_activity['object'].replace('/context', ''))
                     if origin_community and target_community and post:
                         if user.id == post.user_id or origin_community.is_moderator(user) or (origin_community.instance_id == user.instance_id and origin_community.is_instance_admin(user)):
                             post.move_to(target_community)
@@ -1726,6 +1728,12 @@ def process_inbox_request(request_json, store_ap_json):
                         return
 
                     log_incoming_ap(id, APLOG_MONITOR, APLOG_PROCESSING, request_json, 'Unmatched activity')
+
+                if core_activity['type'] == 'QuoteRequest':
+                    post_ap = core_activity['object']
+                    their_post_ap = core_activity['instrument']['id']
+                    process_quote_boost(core_activity, post_ap, their_post_ap)
+                    log_incoming_ap(id, APLOG_QUOTEBOOST, APLOG_SUCCESS, saved_json)
         except Exception:
             session.rollback()
             raise
@@ -1788,7 +1796,7 @@ def announce_activity_to_followers(community: Community, creator: User, activity
             f"{community.public_url()}/followers"
         ],
         "type": "Announce",
-        "id": f"https://{current_app.config['SERVER_NAME']}/activities/announce/{gibberish(15)}"
+        "id": f"{current_app.config['SERVER_URL']}/activities/announce/{gibberish(15)}"
     }
 
     if is_flag:
@@ -1844,7 +1852,7 @@ def community_outbox(actor):
         community_data = {
             "@context": default_context(),
             "type": "OrderedCollection",
-            "id": f"https://{current_app.config['SERVER_NAME']}/c/{actor}/outbox",
+            "id": f"{current_app.config['SERVER_URL']}/c/{actor}/outbox",
             "totalItems": len(posts),
             "orderedItems": []
         }
@@ -1867,7 +1875,7 @@ def community_featured(actor):
         community_data = {
             "@context": default_context(),
             "type": "OrderedCollection",
-            "id": f"https://{current_app.config['SERVER_NAME']}/c/{actor}/featured",
+            "id": f"{current_app.config['SERVER_URL']}/c/{actor}/featured",
             "totalItems": len(posts),
             "orderedItems": []
         }
@@ -1890,7 +1898,7 @@ def community_moderators_route(actor):
         community_data = {
             "@context": default_context(),
             "type": "OrderedCollection",
-            "id": f"https://{current_app.config['SERVER_NAME']}/c/{actor}/moderators",
+            "id": f"{current_app.config['SERVER_URL']}/c/{actor}/moderators",
             "totalItems": len(moderators),
             "orderedItems": []
         }
@@ -1913,7 +1921,7 @@ def community_followers(actor):
     if community is not None:
         result = {
             "@context": default_context(),
-            "id": f'https://{current_app.config["SERVER_NAME"]}/c/{actor}/followers',
+            "id": f'{current_app.config["SERVER_URL"]}/c/{actor}/followers',
             "type": "Collection",
             "totalItems": community_members(community.id),
             "items": []
@@ -1961,6 +1969,8 @@ def user_followers(actor):
 def comment_ap(comment_id):
     reply = PostReply.query.get_or_404(comment_id)
     if is_activitypub_request():
+        if reply.community.local_only or reply.community.private:
+            abort(403)
         reply_data = comment_model_to_json(reply) if request.method == 'GET' else []
         resp = jsonify(reply_data)
         resp.content_type = 'application/activity+json'
@@ -1991,6 +2001,8 @@ def post_ap(post_id):
     if (request.method == 'GET' or request.method == 'HEAD') and is_activitypub_request():
         post: Post = Post.query.get_or_404(post_id)
         if post.is_local():
+            if post.community.local_only or post.community.private:
+                abort(403)
             if request.method == 'GET':
                 if is_microblog_fetch():
                     post_data = post_to_page_microblog(post)
@@ -2055,7 +2067,7 @@ def post_ap_context(post_id):
         else:
             replies_collection = {}
         replies_collection['@context'] = default_context()
-        replies_collection['id'] = f'https://{current_app.config["SERVER_NAME"]}/post/{post_id}/context'
+        replies_collection['id'] = f'{post.public_url()}/context'
         replies_collection['name'] = post.title
         replies_collection['attributedTo'] = post.community.profile_id()
         replies_collection['audience'] = post.community.profile_id()
@@ -2073,7 +2085,7 @@ def post_ap_context(post_id):
 @cache.cached(timeout=600)
 def activities_json(type, id):
     activity = ActivityPubLog.query.filter_by(
-        activity_id=f"https://{current_app.config['SERVER_NAME']}/activities/{type}/{id}").first()
+        activity_id=f"{current_app.config['SERVER_URL']}/activities/{type}/{id}").first()
     if activity:
         if activity.activity_json is not None:
             activity_json = json.loads(activity.activity_json)
@@ -2148,11 +2160,16 @@ def process_new_content(user, community, store_ap_json, request_json, announced)
                         if not announced:
                             announce_activity_to_followers(community, user, request_json)
                         return
+                    else:  # The post was not allowed - send a 'Delete' to remove it from the remote instance
+                        if community.is_local():
+                            proactively_delete_content(community, ap_id)
                 except TypeError:
                     current_app.logger.error('TypeError: ' + str(request_json))
                     log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'TypeError. See log file.')
                     return
             else:
+                if community.is_local():
+                    proactively_delete_content(community, ap_id)
                 log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'User cannot create post in Community')
                 return
     else:  # Creating a reply / comment
@@ -2162,10 +2179,11 @@ def process_new_content(user, community, store_ap_json, request_json, announced)
                 log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'Create processed after Update')
                 return
             if user.id == reply.user_id or reply.community.is_moderator(user):
-                update_post_reply_from_activity(reply, activity_json)
-                log_incoming_ap(id, APLOG_UPDATE, APLOG_SUCCESS, saved_json)
-                if not announced:
-                    announce_activity_to_followers(reply.community, reply.author, request_json)
+                if can_create_post_reply(user, community):
+                    update_post_reply_from_activity(reply, activity_json)
+                    log_incoming_ap(id, APLOG_UPDATE, APLOG_SUCCESS, saved_json)
+                    if not announced:
+                        announce_activity_to_followers(reply.community, reply.author, request_json)
                 return
             else:
                 log_incoming_ap(id, APLOG_UPDATE, APLOG_FAILURE, saved_json, 'Edit attempt denied')
@@ -2185,12 +2203,19 @@ def process_new_content(user, community, store_ap_json, request_json, announced)
 
                         if not announced:
                             announce_activity_to_followers(community, user, request_json)
+                    else:  # The reply was not allowed - send a 'Delete' to remove it from the remote instance
+                        if community.is_local():
+                            proactively_delete_content(community, ap_id)
                     return
                 except TypeError:
                     current_app.logger.error('TypeError: ' + str(request_json))
                     log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'TypeError. See log file.')
                     return
             else:
+                # The reply was not allowed - send a 'Delete' to remove it from the remote instance
+                if community.is_local():
+                    proactively_delete_content(community, ap_id)
+
                 log_incoming_ap(id, APLOG_CREATE, APLOG_FAILURE, saved_json, 'User cannot create reply in Community')
                 return
 
@@ -2212,7 +2237,7 @@ def process_upvote(user, store_ap_json, request_json, announced):
         return
 
     if can_upvote(user, liked.community) and not instance_banned(user.instance.domain):
-        if isinstance(liked, (Post, PostReply)):
+        if isinstance(liked, (Post, PostReply)) and user.id not in blocked_users(liked.author.id):
             try:
                 upsert_custom_emojis_from_like(like_obj, user.instance_id)
                 db.session.commit()
@@ -2269,11 +2294,13 @@ def process_downvote(user, store_ap_json, request_json, announced):
         log_incoming_ap(id, APLOG_DISLIKE, APLOG_FAILURE, saved_json, 'Unfound object ' + ap_id)
         return
     if can_downvote(user, liked.community) and not instance_banned(user.instance.domain):
-        if isinstance(liked, (Post, PostReply)):
+        if isinstance(liked, (Post, PostReply)) and user.id not in blocked_users(liked.author.id):
             liked.vote(user, 'downvote', None)
             log_incoming_ap(id, APLOG_DISLIKE, APLOG_SUCCESS, saved_json)
             if not announced:
                 announce_activity_to_followers(liked.community, user, request_json, can_batch=True)
+        else:
+            log_incoming_ap(id, APLOG_DISLIKE, APLOG_IGNORED, saved_json, 'Cannot downvote this')
     else:
         log_incoming_ap(id, APLOG_DISLIKE, APLOG_IGNORED, saved_json, 'Cannot downvote this')
 
@@ -2491,7 +2518,7 @@ def feed_profile(actor, feed_owner=None):
                               "publicKeyPem": feed.public_key
                           },
                           "endpoints": {
-                              "sharedInbox": f"https://{server}/inbox"
+                              "sharedInbox": f"{current_app.config['SERVER_URL']}/inbox"
                           },
                           "published": ap_datetime(feed.created_at),
                           "updated": ap_datetime(feed.last_edit),
@@ -2509,7 +2536,7 @@ def feed_profile(actor, feed_owner=None):
                 else:
                     actor_data["icon"] = {
                         "type": "Image",
-                        "url": f"https://{current_app.config['SERVER_NAME']}{feed.icon_image()}"
+                        "url": f"{current_app.config['SERVER_URL']}{feed.icon_image()}"
                     }
             if feed.image_id is not None:
                 header_image = feed.header_image()
@@ -2521,7 +2548,7 @@ def feed_profile(actor, feed_owner=None):
                 else:
                     actor_data["image"] = {
                         "type": "Image",
-                        "url": f"https://{current_app.config['SERVER_NAME']}{feed.header_image()}"
+                        "url": f"{current_app.config['SERVER_URL']}{feed.header_image()}"
                     }
             actor_data['childFeeds'] = []
             for child_feed in feed.children.all():
@@ -2600,6 +2627,8 @@ def feed_following(actor):
     items = []
     for fi in feed_items:
         c = Community.query.get(fi.community_id)
+        if c.local_only or c.private:
+            continue
         items.append(c.public_url())
     result = {
         "@context": default_context(),
@@ -2629,7 +2658,7 @@ def feed_moderators_route(actor):
         moderators_data = {
             "@context": default_context(),
             "type": "OrderedCollection",
-            "id": f"https://{current_app.config['SERVER_NAME']}/f/{actor}/moderators",
+            "id": f"{current_app.config['SERVER_URL']}/f/{actor}/moderators",
             "totalItems": len(moderators),
             "orderedItems": []
         }
@@ -2651,7 +2680,7 @@ def feed_followers(actor):
         if feed is not None:
             result = {
                 "@context": default_context(),
-                "id": f'https://{current_app.config["SERVER_NAME"]}/f/{actor}/followers',
+                "id": f'{current_app.config["SERVER_URL"]}/f/{actor}/followers',
                 "type": "Collection",
                 "totalItems": db.session.query(FeedMember).filter_by(feed_id=feed.id).count(),
                 "items": []
@@ -2671,3 +2700,39 @@ def activitypub_external_interaction():
         community = find_actor_or_create_cached(uri, community_only=True)
         if community:
             return redirect(f'/community/{community.link()}/subscribe')
+
+
+@bp.route('/quote_boost_auth')
+def quote_boost_auth():
+    import urllib.parse
+    if request.args.get('stamp') is None:
+        return abort(404)
+    stamp = request.args.get('stamp')
+    local_post_id = stamp[:stamp.index(';')]
+    remote_post_id = stamp[stamp.index(';')+1:]
+    response_payload = {
+        '@context': [
+            'https://www.w3.org/ns/activitystreams',
+            {
+                'gts': 'https://gotosocial.org/ns#',
+                'QuoteAuthorization': {
+                    '@id': 'https://w3id.org/fep/044f#QuoteAuthorization',
+                    '@type': '@id',
+                },
+                'interactingObject': {
+                    '@id': 'gts:interactingObject',
+                },
+                'interactionTarget': {
+                    '@id': 'gts:interactionTarget',
+                },
+            },
+        ],
+        'id': current_app.config['SERVER_URL'] + '/quote_boost_auth?stamp=' + urllib.parse.quote(local_post_id, safe='') + ';' + urllib.parse.quote(remote_post_id, safe=''),
+        'type': 'QuoteAuthorization',
+        'attributedTo': current_app.config['SERVER_URL'],
+        'interactionTarget': local_post_id,
+        'interactingObject': remote_post_id,
+    }
+    response = make_response(response_payload)
+    response.headers['Content-Type'] = 'application/activity+json'
+    return response

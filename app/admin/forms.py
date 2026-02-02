@@ -7,6 +7,8 @@ from wtforms.fields.choices import SelectMultipleField
 from wtforms.validators import ValidationError, DataRequired, Email, EqualTo, Length, Optional
 from flask_babel import _, lazy_gettext as _l
 
+from app.constants import DOWNVOTE_ACCEPT_ALL, DOWNVOTE_ACCEPT_MEMBERS, DOWNVOTE_ACCEPT_INSTANCE, \
+    DOWNVOTE_ACCEPT_TRUSTED, DOWNVOTE_ACCEPT_NONE
 from app.models import Community, User, CmsPage
 
 
@@ -59,14 +61,14 @@ class SiteMiscForm(FlaskForm):
     default_theme = SelectField(_l('Default theme'), coerce=str, render_kw={'class': 'form-select'})
     additional_css = TextAreaField(_l('Additional CSS'))
     additional_js = TextAreaField(_l('Additional JS'))
-    filters = [('subscribed', _l('Subscribed')),
-               ('local', _l('Local')),
+    filters = [('local', _l('Local')),
                ('popular', _l('Popular')),
                ('all', _l('All')),
                ]
     default_filter = SelectField(_l('Default home filter'), choices=filters, validators=[DataRequired()], coerce=str,
                                  render_kw={'class': 'form-select'})
     cache_remote_images_locally = BooleanField(_l('Cache remote images locally'))
+    enable_report_em_dash_replies = BooleanField(_l('Report comments containing an em dash (—) from newly created users - likely spam / AI.'))
     log_activitypub_json = BooleanField(_l('Log ActivityPub JSON for debugging'))
     public_modlog = BooleanField(_l('Show moderation actions publicly'))
     private_instance = BooleanField(_l('Private instance - require login to browse'))
@@ -139,6 +141,15 @@ class EditCommunityForm(FlaskForm):
     local_only = BooleanField(_l('Only accept posts from current instance'))
     restricted_to_mods = BooleanField(_l('Only moderators can post'))
     new_mods_wanted = BooleanField(_l('New moderators wanted'))
+    downvote_accept_modes = [(DOWNVOTE_ACCEPT_ALL, _l('Everyone')),
+                             (DOWNVOTE_ACCEPT_NONE, _l('Nobody')),
+                             (DOWNVOTE_ACCEPT_MEMBERS, _l('Community members')),
+                             (DOWNVOTE_ACCEPT_INSTANCE, _l('This instance')),
+                             (DOWNVOTE_ACCEPT_TRUSTED, _l('Trusted instances')),
+
+                             ]
+    downvote_accept_mode = SelectField(_l('Accept downvotes from'), coerce=int, choices=downvote_accept_modes,
+                                       validators=[Optional()], render_kw={'class': 'form-select'})
     show_popular = BooleanField(_l('Posts can be popular'))
     show_all = BooleanField(_l('Posts show in All list'))
     low_quality = BooleanField(_l("Low quality / toxic - upvotes in here don't add to reputation"))
@@ -196,6 +207,7 @@ class EditInstanceForm(FlaskForm):
     trusted = BooleanField(_l('Trusted'))
     hide = BooleanField(_l('Hide from instance chooser'))
     posting_warning = TextAreaField(_l('Posting warning'))
+    admin_note = TextAreaField(_l('Notes about this instance (only visible to other admins)'))
     inbox = StringField(_l('Inbox'))
     submit = SubmitField(_l('Save'))
 
