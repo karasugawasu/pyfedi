@@ -1988,9 +1988,9 @@ def post_ap2(post_id):
     return redirect(url_for('activitypub.post_ap', post_id=post_id))
 
 
-def is_microblog_fetch():
-    ua = (request.user_agent.string or "")
-    return ("Mastodon/" in ua) or ("Fedibird/" in ua)
+# def is_microblog_fetch():
+#     ua = (request.user_agent.string or "")
+#     return ("Mastodon/" in ua) or ("Fedibird/" in ua)
 
 def is_misskey_fetch():
     ua = (request.user_agent.string or "")
@@ -2004,9 +2004,9 @@ def post_ap(post_id):
             if post.community.local_only or post.community.private:
                 abort(403)
             if request.method == 'GET':
-                if is_microblog_fetch():
-                    post_data = post_to_page_microblog(post)
-                elif is_misskey_fetch():
+                # if is_microblog_fetch():
+                #     post_data = post_to_page_microblog(post)
+                if is_misskey_fetch():
                     post_data = post_to_page_misskey(post)
                 else:
                     post_data = post_to_page(post)
