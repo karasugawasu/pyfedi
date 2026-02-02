@@ -224,7 +224,7 @@ def post_to_page_microblog(post: Post):
     activity_data = {
         "type": "Page",
         "id": post.ap_id,
-        "context": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/context',
+        "context": f"{current_app.config['SERVER_URL']}/post/{post.id}/context",
         "attributedTo": post.author.ap_public_url,
         "to": [
             post.community.public_url(),
@@ -244,10 +244,15 @@ def post_to_page_microblog(post: Post):
         "stickied": post.sticky,
         "audience": post.community.public_url(),
         "tag": post.tags_for_activitypub(),
-        "replies": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/replies',
+        "replies": f'{current_app.config["SERVER_URL"]}/post/{post.id}/replies',
         "language": {
             "identifier": post.language_code(),
             "name": post.language_name()
+        },
+        'interactionPolicy': {
+            'canQuote': {
+                'automaticApproval': ['https://www.w3.org/ns/activitystreams#Public']
+            }
         },
     }
     # if post.language_id:
@@ -308,7 +313,7 @@ def post_to_page_misskey(post: Post):
     activity_data = {
         "type": "Page",
         "id": post.ap_id,
-        "context": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/context',
+        "context": f"{current_app.config['SERVER_URL']}/post/{post.id}/context",
         "attributedTo": post.author.ap_public_url,
         "to": [
             post.community.public_url(),
@@ -328,10 +333,15 @@ def post_to_page_misskey(post: Post):
         "stickied": post.sticky,
         "audience": post.community.public_url(),
         "tag": post.tags_for_activitypub(),
-        "replies": f'https://{current_app.config["SERVER_NAME"]}/post/{post.id}/replies',
+        "replies": f'{current_app.config["SERVER_URL"]}/post/{post.id}/replies',
         "language": {
             "identifier": post.language_code(),
             "name": post.language_name()
+        },
+        'interactionPolicy': {
+            'canQuote': {
+                'automaticApproval': ['https://www.w3.org/ns/activitystreams#Public']
+            }
         },
     }
     if post.language_id:
