@@ -24,24 +24,9 @@
                             </span>
                         {% endif -%}
                     </h1>
-                    <div class="mb-2">
-                        {% if post.has_been_reported() -%}
-                        <a href="{{ url_for('community.community_moderate', actor=post.community.link()) }}"><span class="red fe fe-report" title="{{ _('Reported. Check post for issues.') }}"></span></a>
-                        {% endif -%}
-                        {% if post.type != POST_TYPE_EVENT -%}
-                            <small>{{ _('submitted') }} <time datetime="{{ arrow.get(post.posted_at).format('YYYY-MM-DD HH:mm:ss ZZ') }}" title="{{ arrow.get(post.posted_at).format('YYYY-MM-DD HH:mm:ss ZZ') }}">{{ arrow.get(post.posted_at).humanize(locale=locale) }}</time> by
-                                {% if not post.deleted or post.community.is_moderator() or post.community.is_owner() or current_user.get_id() in admin_ids -%}
-                                    {{ render_username(post.author, htmx_redirect_back_to=request.path, user_notes=user_notes, current_user=current_user, admin_ids=admin_ids, low_bandwidth=low_bandwidth) }}
-                                {% else -%}
-                                    [{{ _('deleted') }}]
-                                {% endif -%}
-                            {% if user_flair and post.author.id in user_flair %}<span class="user_flair">{{ user_flair[post.author.id] }}</span>{% endif %}
-                            {% if post.edited_at -%} edited <time datetime="{{ arrow.get(post.posted_at).format('YYYY-MM-DD HH:mm:ss ZZ') }}" title="{{ arrow.get(post.posted_at).format('YYYY-MM-DD HH:mm:ss ZZ') }}">{{ arrow.get(post.edited_at).humanize(locale=locale) }}</time>{% endif -%}</small>
-                        {% endif -%}
-                    </div>
                 </div>
                 {% if post.type == POST_TYPE_LINK and post.image_id and not (post.url and 'youtube.com' in post.url) and not post.deleted -%}
-                    <div class="post_header_thumb abababa flex-shrink-0">
+                    <div class="post_header_thumb flex-shrink-0">
                         <a href="{{ post.url }}" target="_blank" rel="nofollow ugc" class="post_thumb_link" aria-label="Open link">
                             <img
                                 src="{{ post.image.thumbnail_url() }}"
@@ -74,11 +59,13 @@
                     </div>
                 {% endif -%}
             </div>
+        </div>
         <div class="mb-2">
             {% if post.has_been_reported() -%}
             <a href="{{ url_for('community.community_moderate', actor=post.community.link()) }}"><span class="red fe fe-report" title="{{ _('Reported. Check post for issues.') }}"></span></a>
             {% endif -%}
             {% if post.type != POST_TYPE_EVENT -%}
+                <small>{{ _('submitted') }} <time datetime="{{ arrow.get(post.posted_at).format('YYYY-MM-DD HH:mm:ss ZZ') }}" title="{{ arrow.get(post.posted_at).format('YYYY-MM-DD HH:mm:ss ZZ') }}">{{ arrow.get(post.posted_at).humanize(locale=locale) }}</time> by
                     {% if not post.deleted or post.community.is_moderator() or post.community.is_owner() or current_user.get_id() in admin_ids -%}
                         {{ render_username(post.author, htmx_redirect_back_to=request.path, user_notes=user_notes, current_user=current_user, admin_ids=admin_ids, low_bandwidth=low_bandwidth) }}
                     {% else -%}
