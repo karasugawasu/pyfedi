@@ -443,20 +443,7 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
         instance_domains = []
 
     # Filter tags, leaving only safe ones
-    # スキップ対象タグのリストを明確化
     for tag in soup.find_all():
-        # footnoteに対応
-        class_attr = tag.attrs.get('class', '')
-        if isinstance(class_attr, list):  # class 属性がリストの場合に対応
-            class_attr = ' '.join(class_attr)
-        if (
-            (tag.name == 'sup' and 'footnote-ref' in class_attr) or
-            (tag.name == 'a' and 'footnoteBackLink' in class_attr) or
-            (tag.name == 'div' and 'footnotes' in class_attr) or
-            (tag.name == 'a' and tag.find_parent('sup', class_='footnote-ref'))
-        ):
-            continue
-
         # If the tag is not in the allowed_tags list, remove it and its contents
         if tag.name not in allowed_tags:
             tag.extract()
@@ -511,7 +498,6 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
             else:
                 if "style" in tag.attrs:
                     del tag["style"]
-
     return str(soup)
 
 def sanitize_text_align(style_value: str) -> str | None:
