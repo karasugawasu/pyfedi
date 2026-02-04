@@ -295,7 +295,7 @@ allowed_tags = ['p', 'strong', 'a', 'ul', 'ol', 'li', 'em', 'blockquote', 'cite'
                 'h6', 'pre', 'div',
                 'code', 'img', 'details', 'summary', 'table', 'tr', 'td', 'th', 'tbody', 'thead', 'hr', 'span', 'small',
                 'sub', 'sup',
-                's', 'tg-spoiler', 'ruby', 'rt', 'rp']
+                's', 'tg-spoiler', 'ruby', 'rt', 'rp', 'input']
 
 
 LINK_PATTERN = re.compile(
@@ -462,7 +462,7 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
             tag.extract()
         else:
             # Filter and sanitize attributes
-            allowed_attrs = ['href', 'src', 'alt', 'class', 'id', 'title', 'type', 'disabled', 'checked']
+            allowed_attrs = ['href', 'src', 'alt', 'class', 'id', 'title', 'type', 'disabled', 'checked', 'style']
             # Add image-specific attributes for enhanced-images markdown extra
             if tag.name == 'img':
                 allowed_attrs.extend(['width', 'height', 'align', 'title', 'data-enhanced-img'])
@@ -501,8 +501,30 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
                 if tag.attrs.get('type') != 'checkbox':
                     tag.extract()
 
+            if tag.name in ("td", "th"):
+                if "style" in tag.attrs:
+                    align = sanitize_text_align(tag["style"])
+                    if align:
+                        tag["style"] = align
+                    else:
+                        del tag["style"]
+            else:
+                if "style" in tag.attrs:
+                    del tag["style"]
+
     return str(soup)
 
+def sanitize_text_align(style_value: str) -> str | None:
+    for part in style_value.split(";"):
+        if ":" not in part:
+            continue
+        prop, val = part.split(":", 1)
+        prop = prop.strip().lower()
+        val = val.strip().lower()
+
+        if prop == "text-align" and val in ("left", "center", "right"):
+            return f"text-align:{val}"
+    return None
 
 def escape_non_html_angle_brackets(text: str) -> str:
     placeholder = gibberish(10)
@@ -663,6 +685,7 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
         if not allow_img:
             raw_html = escape_img(raw_html)
 
+        print(raw_html)
         return allowlist_html(raw_html, a_target=a_target if anchors_new_tab else '', test_env=test_env)
     else:
         return ''
