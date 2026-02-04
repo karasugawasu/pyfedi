@@ -804,6 +804,7 @@ div.navbar {
 }
 .navbar-brand img {
   margin-right: 20px;
+  margin-top: -1px;
 }
 
 .navbar-light .navbar-nav .nav-link {
@@ -1031,6 +1032,10 @@ form .mb-3.required > label:after {
 }
 .card .card-body > p > img, .card .card-body > p > a > img {
   max-width: 100%;
+}
+.card .card-body .list-group-item {
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .card.mt-5 {
@@ -2719,6 +2724,10 @@ form h5 {
 .post_flair_body {
   padding-left: 0;
 }
+.hide_flair .post_flair {
+  display: none;
+}
+
 #image_preview {
   max-width: 200px;
   display: none;

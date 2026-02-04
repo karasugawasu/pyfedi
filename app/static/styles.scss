@@ -139,6 +139,7 @@ div.navbar {
   line-height: 46px;
   img {
     margin-right: 20px;
+    margin-top: -1px;
   }
 }
 
@@ -410,6 +411,11 @@ form {
 
   .card-body > p > img, .card-body > p > a > img {
     max-width: 100%;
+  }
+
+  .card-body .list-group-item {
+    padding-left: 0;
+    padding-right: 0;
   }
 }
 
@@ -2316,6 +2322,12 @@ form {
   padding-left: 0;
   .post_flair {
 
+  }
+}
+
+.hide_flair {
+  .post_flair {
+    display: none;
   }
 }
 
