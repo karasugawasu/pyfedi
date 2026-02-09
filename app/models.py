@@ -3579,6 +3579,42 @@ class Site(db.Model):
         return db.session.query(User).filter_by(deleted=False, banned=False).join(user_role).filter(
                                       user_role.c.role_id == ROLE_STAFF).order_by(User.id).all()
 
+    def active_now(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '5 minutes' AND ap_id is null AND verified is true AND banned is false AND deleted is false")).scalar()
+
+    def active_daily(self):
+        from app.activitypub.util import active_day
+        return active_day()
+
+    def active_weekly(self):
+        from app.activitypub.util import active_week
+        return active_week()
+
+    def active_monthly(self):
+        from app.activitypub.util import active_month
+        return active_month()
+
+    def active_6monthly(self):
+        from app.activitypub.util import active_half_year
+        return active_half_year()
+
+    def all_active_6monthly(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '6 months' AND banned is false AND deleted is false")).scalar()
+
+    def all_active_monthly(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '1 month' AND banned is false AND deleted is false")).scalar()
+
+    def all_active_weekly(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '1 week' AND banned is false AND deleted is false")).scalar()
+
+    def all_active_daily(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '1 day' AND banned is false AND deleted is false")).scalar()
+
 
 # class IngressQueue(db.Model):
 #    id = db.Column(db.Integer, primary_key=True)
