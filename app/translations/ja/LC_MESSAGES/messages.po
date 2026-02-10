@@ -9948,3 +9948,9 @@ msgstr "投稿済み"
 
 msgid "submitted"
 msgstr "投稿済み"
+
+msgid "This server"
+msgstr "このインスタンス"
+
+msgid "Whole network"
+msgstr "ネットワーク全体"
