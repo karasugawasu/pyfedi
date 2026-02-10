@@ -4,7 +4,7 @@ from flask_babel import _
 from flask_login import current_user
 from furl import furl
 from psycopg2 import IntegrityError
-from sqlalchemy import desc, or_, text
+from sqlalchemy import desc, or_, text, func
 
 from app import db, cache, celery, limiter
 from app.activitypub import bp
@@ -37,7 +37,7 @@ from app.utils import gibberish, get_setting, community_membership, ap_datetime,
     community_moderators, html_to_text, add_to_modlog, instance_banned, get_redis_connection, \
     feed_membership, get_task_session, patch_db_session, \
     blocked_phrases, orjson_response, moderating_communities, joined_communities, moderating_communities_ids, \
-    moderating_communities_ids_all_users, publish_sse_event, blocked_users
+    moderating_communities_ids_all_users, publish_sse_event, blocked_users, block_honey_pot
 
 @bp.route('/testredis')
 def testredis_get():
@@ -54,7 +54,7 @@ def testredis_get():
 def webfinger():
     if request.args.get('resource'):
         feed = False
-        query = request.args.get('resource')  # acct:alice@tada.club
+        query = request.args.get('resource', '')  # acct:alice@tada.club
         if 'acct:' in query:
             actor = query.split(':')[1].split('@')[0]  # alice
             if actor.startswith('~'):
@@ -94,7 +94,7 @@ def webfinger():
             # look for the User first, then the Community, then the Feed that matches
             type = 'Person'
             object = User.query.filter(
-                or_(User.user_name == actor.strip(), User.alt_user_name == actor.strip())).filter_by(deleted=False,
+                or_(func.lower(User.user_name) == actor.strip().lower(), func.lower(User.alt_user_name) == actor.strip().lower())).filter_by(deleted=False,
                                                                                                      banned=False,
                                                                                                      ap_id=None).first()
             if object is None:
@@ -112,7 +112,7 @@ def webfinger():
             return ''
 
         webfinger_data = {
-            "subject": f"acct:{actor}@{current_app.config['SERVER_NAME']}",
+            "subject": f"acct:{actor.strip().lower()}@{current_app.config['SERVER_NAME']}",
             "aliases": [object.public_url()],
             "links": [
                 {
@@ -134,6 +134,11 @@ def webfinger():
             webfinger_data['links'].append({
               "rel": "https://w3id.org/fep/3b86/Create",
               "template": f"{current_app.config['SERVER_URL']}/share?url=" + '{object}'
+            })
+        elif isinstance(object, Community):
+            webfinger_data['links'].append({
+                "rel": "https://w3id.org/fep/3b86/Follow",
+                "template": "{object}/subscribe"
             })
         resp = jsonify(webfinger_data)
         resp.headers.add_header('Access-Control-Allow-Origin', '*')
@@ -542,6 +547,12 @@ def community_profile(actor):
             return redirect(url_for("community.add_local"))
         else:
             abort(404)
+
+
+@bp.route('/c/<actor>/subscribe', methods=['GET'])
+def community_profile_subscribe(actor):
+    # For use by FEP 3b86, activity intents. See webfinger()
+    return redirect(url_for('community.subscribe', actor=actor))
 
 
 @bp.route('/inbox', methods=['POST'])
@@ -2014,7 +2025,11 @@ def post_ap(post_id):
         else:
             return redirect(post.ap_id, code=301)
     else:
-        return show_post(post_id)
+        block_honey_pot()
+        return show_post(post_id,
+                         low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1',
+                         sort=request.args.get('sort', 'hot' if current_user.is_anonymous else current_user.default_comment_sort or 'hot'),
+                         autoplay=request.args.get('autoplay', False))
 
 
 @bp.route('/c/<community_name>/p/<int:post_id>/<slug>', methods=['GET', 'HEAD', 'POST'])

@@ -360,7 +360,7 @@ class File(db.Model):
             if self.file_path.startswith('http'):
                 return self.file_path
             file_path = self.file_path[4:] if self.file_path.startswith('app/') else self.file_path
-            return f"/{file_path}"
+            return f"{current_app.config['SERVER_URL']}/{file_path}"
         else:
             return ''
 
@@ -370,7 +370,7 @@ class File(db.Model):
         if self.file_path.startswith('http'):
             return self.file_path
         file_path = self.file_path[4:] if self.file_path.startswith('app/') else self.file_path
-        return f"/{file_path}"
+        return f"{current_app.config['SERVER_URL']}/{file_path}"
 
     def thumbnail_url(self):
         if self.thumbnail_path is None:
@@ -381,7 +381,7 @@ class File(db.Model):
         if self.thumbnail_path.startswith('http'):
             return self.thumbnail_path
         thumbnail_path = self.thumbnail_path[4:] if self.thumbnail_path.startswith('app/') else self.thumbnail_path
-        return f"/{thumbnail_path}"
+        return f"{current_app.config['SERVER_URL']}/{thumbnail_path}"   # image paths must include fqdn (not just starting with /) because apps need to make a request from outside
 
     def delete_from_disk(self, purge_cdn=True):
         purge_from_cache = []
@@ -847,7 +847,7 @@ class Community(db.Model):
         if version == 1:
             for flair in self.flair:
                 result.append({'type': 'lemmy:CommunityTag',
-                            'id': f'{current_app.config["SERVER_NAME"]}://{current_app.config["SERVER_NAME"]}/c/{self.link()}/tag/{flair.id}',
+                            'id': f'{current_app.config["SERVER_URL"]}/c/{self.link()}/tag/{flair.id}',
                             'display_name': flair.flair,
                             'text_color': flair.text_color,
                             'background_color': flair.background_color,
@@ -2379,14 +2379,14 @@ class Post(db.Model):
         return_value = []
         for flair in self.flair:
             return_value.append({'type': 'lemmy:CommunityTag',
-                                 'id': f'{current_app.config["SERVER_NAME"]}://{current_app.config["SERVER_NAME"]}/c/{self.community.link()}/tag/{flair.id}',
+                                 'id': f'{current_app.config["SERVER_URL"]}/c/{self.community.link()}/tag/{flair.id}',
                                  'display_name': flair.flair,
                                  'text_color': flair.text_color,
                                  'background_color': flair.background_color,
                                  'blur_images': flair.blur_images})
         for tag in self.tags:
             return_value.append({'type': 'Hashtag',
-                                 'href': f'{current_app.config["SERVER_NAME"]}://{current_app.config["SERVER_NAME"]}/tag/{tag.name}',
+                                 'href': f'{current_app.config["SERVER_URL"]}/tag/{tag.name}',
                                  'name': f'#{tag.name}'})
 
         # include emojis used in body text
@@ -2546,7 +2546,7 @@ class Post(db.Model):
                 self.update_reaction_cache()
 
             # Calculate new ranking values
-            self.ranking = self.post_ranking(self.score, self.created_at)
+            self.ranking = self.post_ranking(self.score + self.reply_count, self.created_at)
             self.ranking_scaled = int(self.ranking + self.community.scale_by())
 
             db.session.commit()
@@ -2786,6 +2786,9 @@ class PostReply(db.Model):
                 total = (session.query(db.func.sum(Post.reply_count)).filter(Post.id.in_(ids)).scalar()) or 0
                 session.query(Post).filter(Post.id.in_(ids)).update({"reply_count_cross_posted": total}, synchronize_session=False)
 
+                session.commit()
+            else:
+                post.reply_count_cross_posted = post.reply_count
                 session.commit()
 
         # LLM Detection
@@ -3646,6 +3649,42 @@ class Site(db.Model):
     def staff() -> List[User]:
         return db.session.query(User).filter_by(deleted=False, banned=False).join(user_role).filter(
                                       user_role.c.role_id == ROLE_STAFF).order_by(User.id).all()
+
+    def active_now(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '5 minutes' AND ap_id is null AND verified is true AND banned is false AND deleted is false")).scalar()
+
+    def active_daily(self):
+        from app.activitypub.util import active_day
+        return active_day()
+
+    def active_weekly(self):
+        from app.activitypub.util import active_week
+        return active_week()
+
+    def active_monthly(self):
+        from app.activitypub.util import active_month
+        return active_month()
+
+    def active_6monthly(self):
+        from app.activitypub.util import active_half_year
+        return active_half_year()
+
+    def all_active_6monthly(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '6 months' AND banned is false AND deleted is false")).scalar()
+
+    def all_active_monthly(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '1 month' AND banned is false AND deleted is false")).scalar()
+
+    def all_active_weekly(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '1 week' AND banned is false AND deleted is false")).scalar()
+
+    def all_active_daily(self):
+        return db.session.execute(text(
+            "SELECT COUNT(id) as c FROM \"user\" WHERE last_seen >= CURRENT_DATE - INTERVAL '1 day' AND banned is false AND deleted is false")).scalar()
 
 
 # class IngressQueue(db.Model):
