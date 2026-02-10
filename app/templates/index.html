@@ -126,8 +126,8 @@
                 </p>
                 {% endif -%}
                 {% cache 60*5, g.locale %}
-                    {% set active_monthly = g.site.active_monthly() -%}
-                    {% if active_monthly > 100 -%}
+                    <!-- {% set active_monthly = g.site.active_monthly() -%}
+                    {% if active_monthly > 0 -%} -->
                         <hr>
                         <h4>{{ _('This server') }}</h4>
                         <div>
@@ -143,7 +143,7 @@
                             <span class="badge text-bg-secondary" title="{{ _('Active users in the past month') }}">{{ humanize_number(g.site.all_active_monthly()) }} {{ _('Monthly Users') }}</span>
                             <span class="badge text-bg-secondary" title="{{ _('Active users in the past 6 months') }}">{{ humanize_number(g.site.all_active_6monthly()) }} {{ _('Users / 6 Months') }}</span>
                         </div>
-                    {% endif -%}
+                    <!-- {% endif -%} -->
                 {% endcache -%}
             </div>
         </div>
