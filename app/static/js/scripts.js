@@ -2562,7 +2562,7 @@ const checkmark = (size = "16", color = "#26a269") => {
 
 function setupCodeBlockCopy() {
   // add buttons to each code block
-  document.querySelectorAll("code").forEach(code => {
+  document.querySelectorAll("pre > code").forEach(code => {
     // check if there is already a copy button - this setup function could be called by the mutation handler
     if(code.getElementsByTagName("button").length > 0) {
         return;
