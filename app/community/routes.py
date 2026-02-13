@@ -32,7 +32,7 @@ from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, POST_TYPE_LIN
     SUBSCRIPTION_PENDING, SUBSCRIPTION_MODERATOR, REPORT_STATE_NEW, REPORT_STATE_ESCALATED, REPORT_STATE_RESOLVED, \
     REPORT_STATE_DISCARDED, POST_TYPE_VIDEO, NOTIF_COMMUNITY, NOTIF_POST, POST_TYPE_POLL, MICROBLOG_APPS, SRC_WEB, \
     NOTIF_REPORT, NOTIF_NEW_MOD, NOTIF_BAN, NOTIF_UNBAN, NOTIF_REPORT_ESCALATION, NOTIF_MENTION, POST_STATUS_REVIEWING, \
-    POST_TYPE_EVENT, INVITE_MEMBERS_ONLY, INVITE_MODS_ONLY, INVITE_OWNER_ONLY
+    POST_TYPE_EVENT, INVITE_MEMBERS_ONLY, INVITE_MODS_ONLY, INVITE_OWNER_ONLY, DOWNVOTE_ACCEPT_NONE
 from app.email import send_email
 from app.inoculation import inoculation
 from app.models import User, Community, CommunityMember, CommunityJoinRequest, CommunityBan, Post, Site, \
@@ -134,6 +134,8 @@ def add_local():
             file = save_banner_file(banner_file)
             if file:
                 community.image = file
+        community.post_url_type = 'post_id'
+        community.downvote_accept_mode = DOWNVOTE_ACCEPT_NONE
         db.session.add(community)
         db.session.commit()
         membership = CommunityMember(user_id=current_user.id, community_id=community.id, is_moderator=True,
@@ -1266,7 +1268,7 @@ def community_edit(community_id: int):
             form.default_layout.data = community.default_layout
             form.default_post_type.data = community.default_post_type
             form.downvote_accept_mode.data = community.downvote_accept_mode
-            form.post_url_type.data = community.post_url_type if community.post_url_type else 'friendly'
+            form.post_url_type.data = community.post_url_type if community.post_url_type else 'post_id'
             form.question_answer.data = community.question_answer
         return render_template('community/community_edit.html', title=_('Edit community'), form=form,
                                current_app=current_app, current="edit_settings",
