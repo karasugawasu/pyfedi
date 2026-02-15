@@ -1816,7 +1816,7 @@ class Post(db.Model):
                 rels = set(a.get("rel") or [])
                 if classes & {"mention", "hashtag"}:
                     continue
-                if "tag" in rels:
+                if rels & {"tag"}:
                     continue
                 post.url = a["href"]
                 break
