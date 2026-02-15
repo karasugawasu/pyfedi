@@ -2057,6 +2057,8 @@ def feed_tree_public(search_param=None) -> List[dict]:
 
 @cache.memoize(timeout=600)
 def opengraph_parse(url):
+    if url == '':
+        return None
     if '?' in url:
         url = url.split('?')
         url = url[0]
@@ -2247,7 +2249,7 @@ def parse_page(page_url):
             found_tags["og_description"] = desc["content"]
 
     if "og:description" in found_tags and "description" not in found_tags:
-        found_tags["description"] = found_tags["og_description"]
+        found_tags["description"] = found_tags["og:description"]
 
     if len(found_tags) == 0 or 'og:title' not in found_tags:
         title = soup.find("title")
@@ -2354,6 +2356,13 @@ def fixup_url(url):
         video_id = timestamp = None
         path = parsed_url.path
         query_params = parse_qs(parsed_url.query)
+
+        # Handle YouTube playlists - let them through unmolested
+        if path == '/playlist' and 'list' in query_params:
+            thumbnail_url = ''
+            embed_url = url
+            return thumbnail_url, embed_url
+
         if path:
             if path.startswith('/shorts/') and len(path) > 8:
                 video_id = path[8:]
@@ -4097,3 +4106,10 @@ def debug_checkpoint(name: str):
 
     g._debug_checkpoints.append((name, now))
     return now, delta
+
+
+@cache.memoize(timeout=5)
+def get_site_as_dict() -> dict:
+    # return the Site as a dict so that it can be serialized by flask-caching
+    site = db.session.query(Site).get(1)
+    return { c.name: getattr(site, c.name) for c in site.__table__.columns }
