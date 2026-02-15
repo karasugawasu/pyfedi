@@ -1810,7 +1810,6 @@ class Post(db.Model):
         # MicroBlogかつ画像等なしでURLを含む投稿の場合はリンクタイプにする
         if not post.url and post.microblog:
             soup = BeautifulSoup(post.body_html or "", "html.parser")
-
             for a in soup.find_all("a", href=True):
                 classes = set(a.get("class") or [])
                 rels = set(a.get("rel") or [])
@@ -1818,6 +1817,12 @@ class Post(db.Model):
                     continue
                 if rels & {"tag"}:
                     continue
+                text = a.get_text(strip=True) or ""
+                if text.startswith("#"):
+                    continue
+                # href = a["href"]
+                # if "/tags/" in href or "/tag/" in href:
+                #     continue
                 post.url = a["href"]
                 break
         # tagにtextが含まれてたらリンクタイプにしない
