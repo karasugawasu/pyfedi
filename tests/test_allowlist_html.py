@@ -37,12 +37,7 @@ class TestAllowlistHtml(unittest.TestCase):
     def test_plain_text_urls(self):
         """Test that plain text URLs are converted to links"""
         markdown = "Visit https://example.com for more info."
-<<<<<<< HEAD
-        result = allowlist_html(markdown_to_html(markdown, test_env={'fn_string': 'fn-test'}),
-                                test_env={'fn_string': 'fn-test'})
-=======
         result = allowlist_html(markdown_to_html(markdown, test_env={'fn_string': 'fn-test'}), test_env={'fn_string': 'fn-test'})
->>>>>>> v1.5.0
         self.assertEqual(result,
                          '<p>Visit <a href="https://example.com" rel="nofollow ugc" target="_blank">https://example.com</a> for more info.</p>\n')
 
