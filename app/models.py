@@ -1815,14 +1815,9 @@ class Post(db.Model):
                 rels = set(a.get("rel") or [])
                 if classes & {"mention", "hashtag"}:
                     continue
-                if rels & {"tag"}:
+                href = a["href"]
+                if "/tags/" in href or "/tag/" in href:
                     continue
-                text = a.get_text(strip=True) or ""
-                if text.startswith("#"):
-                    continue
-                # href = a["href"]
-                # if "/tags/" in href or "/tag/" in href:
-                #     continue
                 post.url = a["href"]
                 break
         # tagにtextが含まれてたらリンクタイプにしない
