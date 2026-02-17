@@ -682,8 +682,8 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
 #    c. raw 'https' strings in code blocks are being converted into <a> links for HTML that Lemmy then converts back into []()
 def piefed_markdown_to_lemmy_markdown(piefed_markdown: str):
     # only difference is newlines for soft breaks.
-    re_breaks = re.compile(r'(\S)(\r\n)')
-    lemmy_markdown = re_breaks.sub(r'\1  \2', piefed_markdown)
+    # re_breaks = re.compile(r'(\S)(\r\n)')
+    # lemmy_markdown = re_breaks.sub(r'\1  \2', piefed_markdown)
     return lemmy_markdown
 
 
