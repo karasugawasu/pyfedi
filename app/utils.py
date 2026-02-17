@@ -684,7 +684,7 @@ def piefed_markdown_to_lemmy_markdown(piefed_markdown: str):
     # only difference is newlines for soft breaks.
     # re_breaks = re.compile(r'(\S)(\r\n)')
     # lemmy_markdown = re_breaks.sub(r'\1  \2', piefed_markdown)
-    return lemmy_markdown
+    return piefed_markdown
 
 
 def markdown_to_text(markdown_text) -> str:
