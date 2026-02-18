@@ -699,6 +699,11 @@ def html_to_text(html) -> str:
     soup = BeautifulSoup(html, 'html.parser')
     return soup.get_text()
 
+def html_to_text_title(html) -> str:
+    if html is None or html == '':
+        return ''
+    soup = BeautifulSoup(html, 'html.parser')
+    return soup.get_text(separator=" ")
 
 @cache.memoize(timeout=5000)
 def get_emoji_replacements():
@@ -724,7 +729,7 @@ def microblog_content_to_title(html: str) -> Tuple[str, str]:
                 if a:
                     link = a['href']
                 break
-    elif '<p>' in html:
+    elif '<p>' in html.lower():
         soup = BeautifulSoup(html, 'html.parser')
         p_tags = soup.find_all('p')
         for p_tag in p_tags:
@@ -740,9 +745,9 @@ def microblog_content_to_title(html: str) -> Tuple[str, str]:
             if title:
                 break
         if not title:
-            title = html_to_text(html)
+            title = html_to_text_title(html)
     else:
-        title = html_to_text(html)
+        title = html_to_text_title(html)
 
     # pタグで１行検出に変更しているのでこの一連の処理は不要
     # period_index = title.find('.')
@@ -777,10 +782,14 @@ def microblog_content_to_title(html: str) -> Tuple[str, str]:
         title = '(no title)'
 
     if len(title) > 150:
+        cut = None
         for i in range(149, -1, -1):
             if title[i] == ' ':
+                cut = i
                 break
-        title = title[:i] + ' ...' if i > 0 else ''
+        if cut is None:
+            cut = 150
+        title = title[:cut] + ' ...'
 
     return title.strip(), link
 
