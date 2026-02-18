@@ -535,8 +535,9 @@ def escape_non_html_angle_brackets(text: str) -> str:
             return match.group(0)
         else:
             return f"&lt;{match.group(1)}&gt;"
-
-    text = re.sub(r'<([^<>]+?)>', escape_tag, text)
+    
+    bracket_regex = re.compile(r'<([^<>\n]+?)>', re.M)
+    text = re.sub(bracket_regex, escape_tag, text)
 
     # Step 3: Restore code blocks
     text = pop_code(code_snippets=code_snippets, text=text, placeholder=placeholder)
@@ -1636,7 +1637,7 @@ def can_upload_video():
         return False
     elif upload_access == 'admins' and not current_user.is_admin_or_staff():
         return False
-    elif upload_access == 'users' and not current_user.is_authenticated():
+    elif upload_access == 'users' and not current_user.is_authenticated:
         return False
     return True
 
@@ -1644,11 +1645,11 @@ def can_upload_video():
 def reply_already_exists(user_id, post_id, parent_id, body) -> bool:
     if parent_id is None:
         num_matching_replies = db.session.execute(text(
-            'SELECT COUNT(id) as c FROM "post_reply" WHERE deleted is false and user_id = :user_id AND post_id = :post_id AND parent_id is null AND body = :body'),
+            'SELECT COUNT(*) as c FROM "post_reply" WHERE deleted is false and user_id = :user_id AND post_id = :post_id AND parent_id is null AND body = :body'),
             {'user_id': user_id, 'post_id': post_id, 'body': body}).scalar()
     else:
         num_matching_replies = db.session.execute(text(
-            'SELECT COUNT(id) as c FROM "post_reply" WHERE deleted is false and user_id = :user_id AND post_id = :post_id AND parent_id = :parent_id AND body = :body'),
+            'SELECT COUNT(*) as c FROM "post_reply" WHERE deleted is false and user_id = :user_id AND post_id = :post_id AND parent_id = :parent_id AND body = :body'),
             {'user_id': user_id, 'post_id': post_id, 'parent_id': parent_id, 'body': body}).scalar()
     return num_matching_replies != 0
 
@@ -2167,10 +2168,15 @@ def parse_page(page_url):
         "og:description"
     ]
 
+    #todo: do a head request head_request() and check content-type and size before proceeding
+
     # read the html from the page
     response = get_request(page_url)
 
     if response.status_code != 200:
+        return False
+
+    if 'text/html' not in response.headers.get('Content-Type', ''):
         return False
 
     # set up beautiful soup
