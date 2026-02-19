@@ -700,7 +700,7 @@ def html_to_text(html) -> str:
     soup = BeautifulSoup(html, 'html.parser')
     return soup.get_text()
 
-def html_to_text_title_new(html) -> str:
+def html_to_text_new(html) -> str:
     if html is None or html == '':
         return ''
     soup = BeautifulSoup(html, 'html.parser')
