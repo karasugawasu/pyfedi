@@ -700,6 +700,22 @@ def html_to_text(html) -> str:
     soup = BeautifulSoup(html, 'html.parser')
     return soup.get_text()
 
+def html_to_text_title_new(html) -> str:
+    if html is None or html == '':
+        return ''
+    soup = BeautifulSoup(html, 'html.parser')
+
+    for br in soup.find_all('br'):
+        br.replace_with('\n')
+
+    for p in soup.find_all('p'):
+        p.append('\n')
+
+    text = soup.get_text()
+
+    lines = [line.strip() for line in text.splitlines()]
+    return '\n'.join(line for line in lines if line)
+
 def html_to_text_title(html) -> str:
     if html is None or html == '':
         return ''
