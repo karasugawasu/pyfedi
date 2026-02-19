@@ -704,17 +704,19 @@ def html_to_text_new(html) -> str:
     if html is None or html == '':
         return ''
     soup = BeautifulSoup(html, 'html.parser')
-
     for br in soup.find_all('br'):
-        br.replace_with('\n')
+        br.replace_with('  \n')
 
     for p in soup.find_all('p'):
-        p.append('\n')
+        p.append('\n\n')
 
     text = soup.get_text()
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
 
-    lines = [line.strip() for line in text.splitlines()]
-    return '\n'.join(line for line in lines if line)
+    while '\n\n\n' in text:
+        text = text.replace('\n\n\n', '\n\n')
+
+    return text.strip()
 
 def html_to_text_title(html) -> str:
     if html is None or html == '':
