@@ -32,7 +32,7 @@ from app.utils import get_request, allowlist_html, get_setting, ap_datetime, mar
     is_image_url, domain_from_url, gibberish, ensure_directory_exists, head_request, \
     shorten_string, fixup_url, \
     microblog_content_to_title, is_video_url, \
-    notification_subscribers, communities_banned_from, html_to_text, add_to_modlog, joined_communities, \
+    notification_subscribers, communities_banned_from, html_to_text, html_to_text_new, add_to_modlog, joined_communities, \
     moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse, mastodon_extra_field_link, \
     blocked_users, piefed_markdown_to_lemmy_markdown, store_files_in_s3, guess_mime_type, get_recipient_language, \
     patch_db_session, to_srgb, communities_banned_from_all_users, blocked_communities, blocked_or_banned_instances, \
@@ -2504,7 +2504,7 @@ def create_post_reply(store_ap_json, community: Community, in_reply_to, request_
                 body = request_json['object']['source']['content']
                 body_html = markdown_to_html(body)  # prefer Markdown if provided, overwrite version obtained from HTML
             else:
-                body = html_to_text(body_html)
+                body = html_to_text_new(body_html)
 
         # Language - Lemmy uses 'language' while Mastodon uses 'contentMap'
         language_id = None
@@ -2901,7 +2901,7 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
                 reply.body = request_json['object']['source']['content']
                 reply.body_html = markdown_to_html(reply.body)          # prefer Markdown if provided, overwrite version obtained from HTML
             else:
-                reply.body = html_to_text(reply.body_html)
+                reply.body = html_to_text_new(reply.body_html)
         # Language
         if 'language' in request_json['object'] and isinstance(request_json['object']['language'], dict):
             language = find_language_or_create(request_json['object']['language']['identifier'],
