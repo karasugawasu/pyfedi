@@ -669,7 +669,6 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
         if not allow_img:
             raw_html = escape_img(raw_html)
 
-        print(raw_html)
         return allowlist_html(raw_html, a_target=a_target if anchors_new_tab else '', test_env=test_env)
     else:
         return ''
