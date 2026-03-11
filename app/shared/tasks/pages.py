@@ -63,7 +63,8 @@ import re
 def make_post(send_async, post_id):
     session = get_task_session()
     try:
-        send_post(post_id, session=session)
+        with patch_db_session(session):
+            send_post(post_id, session=session)
     except Exception:
         session.rollback()
         raise
@@ -75,7 +76,8 @@ def make_post(send_async, post_id):
 def edit_post(send_async, post_id):
     session = get_task_session()
     try:
-        send_post(post_id, edit=True, session=session)
+        with patch_db_session(session):
+            send_post(post_id, edit=True, session=session)
     except Exception:
         session.rollback()
         raise
@@ -400,7 +402,7 @@ def move_object(session, user_id, object, origin, target):
       'id': move_id,
       'type': 'Move',
       'actor': user.public_url(),
-      'object': f'{object.public_url()}/context',
+      'object': f'{object.public_url()}',
       '@context': default_context(),
       'origin': origin.public_url(),
       'target': target.public_url(),

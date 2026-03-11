@@ -5,6 +5,7 @@ import math
 import os
 import uuid
 import re
+import unicodedata
 from collections import defaultdict
 from datetime import datetime, timedelta
 from time import time
@@ -96,6 +97,11 @@ class Instance(db.Model):
     posting_warning = db.Column(db.String(512))
     nodeinfo_href = db.Column(db.String(100))
     admin_note = db.Column(db.Text)
+
+    __table_args__ = (
+        Index('ix_instance_created_at_active', created_at.desc(),
+              postgresql_where=text('gone_forever = false AND dormant = false')),
+    )
 
     posts = db.relationship('Post', backref='instance', lazy='dynamic')
     post_replies = db.relationship('PostReply', backref='instance', lazy='dynamic')
@@ -1008,6 +1014,7 @@ class User(UserMixin, db.Model):
     discord_oauth_id = db.Column(db.String(64), unique=True, index=True)
     password_updated_at = db.Column(db.DateTime, default=utcnow)
     code_style = db.Column(db.String(25), default='fruity')
+    admin_note = db.Column(db.Text)
 
     avatar = db.relationship('File', lazy='joined', foreign_keys=[avatar_id], single_parent=True, cascade="all, delete-orphan")
     cover = db.relationship('File', lazy='joined', foreign_keys=[cover_id], single_parent=True, cascade="all, delete-orphan")
@@ -1034,8 +1041,8 @@ class User(UserMixin, db.Model):
     extra_fields = db.relationship('UserExtraField', lazy='dynamic', cascade="all, delete-orphan")
     roles = db.relationship('Role', secondary=user_role, lazy='dynamic')
     passkeys = db.relationship('Passkey', lazy='dynamic', cascade="all, delete-orphan")
-    modlog_target = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.target_user_id", back_populates='target_user')
-    modlog_actor = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.user_id", back_populates='author')
+    modlog_target = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.target_user_id", back_populates='target_user', cascade="all, delete-orphan")
+    modlog_actor = db.relationship('ModLog', lazy='dynamic', foreign_keys="ModLog.user_id", back_populates='author', cascade="all, delete-orphan")
 
     hide_read_posts = db.Column(db.Boolean, default=False)
     # db relationship tracked by the "read_posts" table
@@ -1043,6 +1050,13 @@ class User(UserMixin, db.Model):
     # read_by is the corresponding Post object variable
     read_post = db.relationship('Post', secondary=read_posts, back_populates='read_by', lazy='dynamic')
     hidden_post = db.relationship('Post', secondary=hidden_posts, back_populates='hidden_by', lazy='dynamic')
+
+    __table_args__ = (
+        db.Index(
+            'idx_user_user_name_lower',
+            db.text('lower(user_name)')
+        ),
+    )
 
     def __repr__(self):
         return '<User {}_{}>'.format(self.user_name, self.id)
@@ -1080,7 +1094,11 @@ class User(UserMixin, db.Model):
     def display_name(self):
         if self.deleted is False:
             if self.title:
-                return self.title.strip()
+                # Sanitize some special unicode formatting characters
+                # ref: https://krvtz.net/posts/input-validation-of-free-form-unicode-text-in-python.html
+                title = self.title.strip()
+                clean_title = "".join(c for c in title if unicodedata.category(c) != "Cf")
+                return clean_title
             else:
                 return self.user_name.strip()
         else:
@@ -1399,6 +1417,8 @@ class User(UserMixin, db.Model):
             db.session.delete(file)
         if self.waiting_for_approval():
             db.session.query(UserRegistration).filter(UserRegistration.user_id == self.id).delete()
+        db.session.execute(text('DELETE FROM "post_vote" WHERE user_id = :user_id'), {'user_id': self.id})
+        db.session.execute(text('DELETE FROM "post_reply_vote" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.execute(text('DELETE FROM "user_role" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.execute(text('DELETE FROM "hidden_posts" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.execute(text('DELETE FROM "read_posts" WHERE user_id = :user_id'), {'user_id': self.id})
@@ -1418,8 +1438,6 @@ class User(UserMixin, db.Model):
         db.session.query(PostBookmark).filter(PostBookmark.user_id == self.id).delete()
         db.session.query(PostReplyBookmark).filter(PostReplyBookmark.user_id == self.id).delete()
         db.session.query(Reminder).filter(Reminder.user_id == self.id).delete()
-        db.session.query(ModLog).filter(ModLog.user_id == self.id).update({ModLog.user_id: None})
-        db.session.query(ModLog).filter(ModLog.target_user_id == self.id).update({ModLog.target_user_id: None})
         db.session.query(CommunityWikiPageRevision).filter(CommunityWikiPageRevision.user_id == self.id).update({CommunityWikiPageRevision.user_id: None})
         db.session.query(UserNote).filter(or_(UserNote.user_id == self.id, UserNote.target_id == self.id)).delete()
 
@@ -1507,6 +1525,17 @@ class User(UserMixin, db.Model):
             return user_note.body
         else:
             return ''
+    
+    def can_send_pm(self, recipient):
+        if (
+            self.created_very_recently()
+            or self.reputation <= -10
+            or self.banned
+            or not self.verified
+        ) and not (self.is_admin_or_staff() or recipient.is_admin_or_staff()):
+            return False
+        
+        return True
 
 
 class ActivityLog(db.Model):
@@ -1624,6 +1653,11 @@ class Post(db.Model):
             'ix_post_community_created_bot',
             'community_id', 'created_at',
             postgresql_where=db.text('from_bot = false')
+        ),
+        db.Index(
+            'idx_post_reports_gt_0',
+            'id',
+            postgresql_where=db.text('reports > 0')
         ),
     )
 
@@ -1988,7 +2022,7 @@ class Post(db.Model):
             post.ranking_scaled = int(post.ranking + community.scale_by())
             community.post_count += 1
             community.last_active = utcnow()
-            db.session.execute(text('UPDATE "user" SET post_count = post_count + 1 WHERE id = :user_id'),
+            db.session.execute(text('UPDATE "user" SET post_count = post_count + 1, last_seen = now() WHERE id = :user_id'),
                                {'user_id': user.id})
             db.session.execute(text('UPDATE "site" SET last_active = NOW()'))
             try:
@@ -2783,7 +2817,7 @@ class PostReply(db.Model):
                 post.reply_count += 1
                 post.community.post_reply_count += 1
                 post.community.last_active = post.last_active = utcnow()
-            session.execute(text('UPDATE "user" SET post_reply_count = post_reply_count + 1 WHERE id = :user_id'),
+            session.execute(text('UPDATE "user" SET post_reply_count = post_reply_count + 1, last_seen = now() WHERE id = :user_id'),
                                {'user_id': user.id})
             session.execute(text('UPDATE "site" SET last_active = NOW()'))
             session.commit()
@@ -3297,7 +3331,7 @@ class UserRegistration(db.Model):
     user = db.relationship('User', foreign_keys=[user_id], lazy='joined')
 
     def search_similar_names(self):
-        return User.query.filter(or_(User.user_name == self.user.user_name, User.title == self.user.title),
+        return User.query.filter(or_(func.lower(User.user_name) == self.user.user_name.lower(), User.title == self.user.title),
                                  User.id != self.user.id).order_by(desc(User.banned)).order_by(User.reputation).limit(15)
 
 

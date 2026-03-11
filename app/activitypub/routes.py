@@ -51,6 +51,7 @@ def testredis_get():
 
 
 @bp.route('/.well-known/webfinger')
+@cache.cached(timeout=60, query_string=True)
 def webfinger():
     if request.args.get('resource'):
         feed = False
@@ -342,14 +343,14 @@ def user_profile(actor):
         if '@' in actor:
             user: User = User.query.filter_by(ap_id=actor.lower()).first()
         else:
-            user: User = User.query.filter(or_(User.user_name == actor)).filter_by(ap_id=None).first()
+            user: User = User.query.filter(or_(func.lower(User.user_name) == actor.lower())).filter_by(ap_id=None).first()
             if user is None:
                 user = User.query.filter_by(ap_profile_id=f'{current_app.config["SERVER_URL"]}/u/{actor.lower()}', ap_id=None).first()
     else:
         if '@' in actor:
             user: User = User.query.filter_by(ap_id=actor.lower()).first()
         else:
-            user: User = User.query.filter(or_(User.user_name == actor)).filter_by(ap_id=None).first()
+            user: User = User.query.filter(or_(func.lower(User.user_name) == actor.lower())).filter_by(ap_id=None).first()
             if user is None:
                 user = User.query.filter_by(ap_profile_id=f'{current_app.config["SERVER_URL"]}/u/{actor.lower()}', ap_id=None).first()
 
@@ -497,7 +498,8 @@ def community_profile(actor):
                           "published": ap_datetime(community.created_at),
                           "updated": ap_datetime(community.last_active),
                           "lemmy:tagsForPosts": community.flair_for_ap(version=1),
-                          "tag": community.flair_for_ap(version=2)
+                          "tag": community.flair_for_ap(version=2),
+                          "postUrlType": community.post_url_type if community.post_url_type else "friendly",
                           }
             if community.description_html:
                 actor_data["summary"] = community.description_html
@@ -526,6 +528,9 @@ def community_profile(actor):
                         "type": "Image",
                         "url": f"{current_app.config['SERVER_URL']}{community.header_image()}"
                     }
+            actor_data['language'] = []
+            for language in community.languages:
+                actor_data['language'].append({'identifier': language.code, 'name': language.name})
             resp = jsonify(actor_data)
             resp.content_type = 'application/activity+json'
             resp.headers.set('Cache-Control', 'public, max-age=30')
@@ -887,6 +892,7 @@ def process_inbox_request(request_json, store_ap_json):
                                 session.add(member)
                                 community.subscriptions_count += 1
                                 community.last_active = utcnow()
+                                user.last_seen = utcnow()
                                 session.commit()
                                 cache.delete_memoized(community_membership, user, community)
                                 # send accept message to acknowledge the follow
@@ -1545,6 +1551,7 @@ def process_inbox_request(request_json, store_ap_json):
                                 session.delete(member)
                                 community.subscriptions_count -= 1
                                 community.last_active = utcnow()
+                                user.last_seen = utcnow()
                             if join_request:
                                 session.delete(join_request)
                             session.commit()
@@ -2084,7 +2091,7 @@ def post_ap_context(post_id):
 
 
 @bp.route('/activities/<type>/<id>')
-@cache.cached(timeout=600)
+@cache.cached(timeout=2400)
 def activities_json(type, id):
     activity = ActivityPubLog.query.filter_by(
         activity_id=f"{current_app.config['SERVER_URL']}/activities/{type}/{id}").first()
@@ -2095,10 +2102,10 @@ def activities_json(type, id):
             activity_json = {}
         resp = jsonify(activity_json)
         resp.content_type = 'application/activity+json'
-        resp.headers['Cache-Control'] = 'public, max-age=1200'
-        return resp
     else:
-        abort(404)
+        resp = make_response('', 404)
+    resp.headers['Cache-Control'] = 'public, max-age=2400'
+    return resp
 
 
 # Other instances can query the result of their POST to the inbox by using this endpoint. The ID of the activity they
@@ -2356,7 +2363,7 @@ def process_chat(user, store_ap_json, core_activity, session):
     recipient = find_actor_or_create_cached(recipient_ap_id)
     if recipient and recipient.is_local():
         recipient = session.query(User).get(recipient.id)  # for some reason find_actor_or_create_cached was giving me a user from the wrong DB session, causing an exception later on.
-        if sender.created_very_recently():
+        if sender.created_very_recently() and user.ap_domain != 'fediseer.com':
             log_incoming_ap(id, APLOG_CHATMESSAGE, APLOG_FAILURE, saved_json, 'Sender is too new')
             return True
         elif recipient.has_blocked_user(sender.id) or recipient.has_blocked_instance(sender.instance_id):

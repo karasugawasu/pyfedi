@@ -554,6 +554,11 @@ fieldset legend {
   font-size: inherit;
 }
 
+.form-control::placeholder {
+  color: rgba(var(--bs-secondary-color-rgb), 0.5);
+  font-style: italic;
+}
+
 .form-check-input {
   margin-top: 0;
 }
@@ -778,6 +783,14 @@ tg-spoiler:hover {
   top: 0; /* Bring the link back into view when it receives focus */
 }
 
+.ml-3 {
+  margin-left: 1rem !important;
+}
+
+.home .ml-3 {
+  margin-left: 1px !important;
+}
+
 #outer_container a:not(.btn):hover, footer a:not(.btn):hover {
   text-decoration: underline;
 }
@@ -789,9 +802,13 @@ tg-spoiler:hover {
 }
 
 div.navbar {
-  border-bottom: 1px solid rgba(0, 40, 100, 0.12);
   min-height: 60px;
   background-color: var(--bs-body-bg);
+}
+@media (min-width: 992px) {
+  div.navbar {
+    border-bottom: 1px solid rgba(0, 40, 100, 0.12);
+  }
 }
 @media (min-width: 1400px) {
   div.navbar .container-lg {
@@ -813,7 +830,7 @@ div.navbar {
 
 @media (min-width: 992px) {
   .navbar .dropdown-menu .dropdown-item {
-    max-width: 200px;
+    width: 200px;
   }
 }
 .navbar .dropdown-menu .dropdown-item {
@@ -821,6 +838,14 @@ div.navbar {
   break-inside: avoid;
 }
 
+@media (min-width: 992px) {
+  .navbar-collapse {
+    margin-right: calc(var(--bs-navbar-nav-link-padding-x) * -1);
+  }
+  .navbar-collapse.authenticated {
+    margin-right: calc(var(--bs-navbar-nav-link-padding-x) * -2);
+  }
+}
 @media (min-width: 992px) {
   ul.navbar-nav {
     width: 100%;
@@ -1710,6 +1735,28 @@ time {
   max-width: 100%;
 }
 
+details {
+  margin-bottom: 1rem;
+}
+
+.spoiler_block {
+  margin: 3px 0 0 1em;
+  padding: 0.5em 0.5em 0.5em 0.2em;
+  border-left-style: solid;
+  border-left-width: 2px;
+  background-color: var(--bs-secondary-bg-subtle);
+  border-left-color: var(--bs-secondary-border-subtle);
+}
+.spoiler_block p:last-child {
+  margin-bottom: 0;
+}
+.spoiler_block table, .spoiler_block img {
+  padding: 0.5em;
+}
+.spoiler_block > details {
+  margin-bottom: 0;
+}
+
 .render_username {
   display: inline;
 }
@@ -2286,7 +2333,7 @@ a.unread:before, div.unread:before {
   background-color: var(--bs-secondary-bg-subtle);
   border-left-color: var(--bs-secondary-border-subtle);
 }
-.post_body blockquote p, .comment_body blockquote p, #preview blockquote p, .reply_preview blockquote p, .accordion-body blockquote p, .post_col blockquote p {
+.post_body blockquote p:last-child, .comment_body blockquote p:last-child, #preview blockquote p:last-child, .reply_preview blockquote p:last-child, .accordion-body blockquote p:last-child, .post_col blockquote p:last-child {
   margin-bottom: 0px;
 }
 .post_body pre, .comment_body pre, #preview pre, .reply_preview pre, .accordion-body pre, .post_col pre {
@@ -2543,12 +2590,6 @@ h1 .warning_badge {
   background-color: #d1ecf1;
   border-color: #bee5eb;
 }
-@media (min-width: 992px) {
-  .alert-info, .alert-message, .alert-error {
-    padding-left: 1.8rem;
-    padding-right: 1.8rem;
-  }
-}
 
 .alert-error {
   color: #722047;
@@ -2556,10 +2597,15 @@ h1 .warning_badge {
 }
 
 .main_pane {
-  border: solid 1px #ddd;
-  border-radius: 5px;
-  padding-top: 8px;
+  /* Ensure a little space after pagination on mobile. */
   padding-bottom: 12px;
+}
+@media (min-width: 992px) {
+  .main_pane {
+    border: solid 1px #ddd;
+    border-radius: 5px;
+    padding-top: 8px;
+  }
 }
 .main_pane .url_thumbnail {
   width: 120px;
@@ -2718,6 +2764,10 @@ form h5 {
   background: whitesmoke url(/static/images/collapsed.gif) no-repeat center left;
 }
 
+.coolfieldset.expanded .coolfieldset.collapsed legend {
+  background: whitesmoke url(/static/images/collapsed.gif) no-repeat center left;
+}
+
 .domain_link {
   color: #777;
   font-size: 73%;
@@ -2835,10 +2885,12 @@ form h5 {
   margin-bottom: 10px;
 }
 
-.alert {
-  width: 96%;
+@media (min-width: 992px) {
+  .alert {
+    /* To match .row */
+    margin-left: calc(var(--bs-gutter-x) * -0.5);
+  }
 }
-
 #insertImageDialog {
   max-width: 1000px;
 }
@@ -3328,6 +3380,17 @@ form h5 {
   -webkit-animation: blink-animation 1s steps(2, start) infinite;
 }
 
+#outer_container .share_desktop a {
+  text-decoration: none !important;
+}
+#outer_container .share_desktop a:hover {
+  text-decoration: none !important;
+}
+#outer_container .share_desktop a img {
+  width: 20px;
+  height: 20px;
+}
+
 @keyframes blink-animation {
   to {
     visibility: hidden;
@@ -3427,7 +3490,11 @@ form h5 {
   color: white;
 }
 
-[data-bs-theme=dark] .coolfieldset legend, .coolfieldset.expanded legend {
+.coolfieldset.expanded legend {
+  background: whitesmoke url(/static/images/expanded.gif) no-repeat center left;
+}
+
+[data-bs-theme=dark] .coolfieldset legend {
   background: #424549 url(/static/images/expanded.gif) no-repeat center left;
 }
 
@@ -3445,6 +3512,10 @@ form h5 {
 
 [data-bs-theme=dark] .skip-link {
   color: black;
+}
+
+[data-bs-theme=dark] .share_desktop img {
+  filter: invert(1);
 }
 
 :root {

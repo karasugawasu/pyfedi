@@ -7,7 +7,7 @@ import os
 from flask import Flask, request, current_app, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
-from flask_login import LoginManager
+from flask_login import LoginManager, current_user
 from flask_bootstrap import Bootstrap5
 from flask_mail import Mail
 from flask_babel import Babel, lazy_gettext as _l
@@ -26,7 +26,9 @@ from config import Config
 
 def get_locale():
     try:
-        if session.get('ui_language', None):
+        if current_user.is_authenticated and current_user.interface_language:
+            return current_user.interface_language
+        elif session.get('ui_language', None):
             return session['ui_language']
         else:
             try:
@@ -63,6 +65,34 @@ rest_api = Api()
 app_bcrypt = Bcrypt()
 
 
+class StripCookieVaryForAnonymous:
+    """WSGI middleware that removes 'Cookie' from the Vary header for requests
+    that have no session cookie. This allows Cloudflare to cache responses for
+    anonymous users, which Flask's session middleware prevents by always adding
+    Vary: Cookie when it processes the session."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def __call__(self, environ, start_response):
+        has_session_cookie = 'session=' in environ.get('HTTP_COOKIE', '')
+
+        def custom_start_response(status, headers, exc_info=None):
+            if not has_session_cookie:
+                new_headers = []
+                for name, value in headers:
+                    if name.lower() == 'vary':
+                        value = ', '.join(
+                            part.strip() for part in value.split(',')
+                            if part.strip().lower() != 'cookie'
+                        )
+                    new_headers.append((name, value))
+                headers = new_headers
+            return start_response(status, headers, exc_info)
+
+        return self.app(environ, custom_start_response)
+
+
 def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
@@ -78,7 +108,7 @@ def create_app(config_class=Config):
             enable_tracing=False,
         )
 
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+    app.wsgi_app = StripCookieVaryForAnonymous(ProxyFix(app.wsgi_app, x_for=1))
 
     app.config["API_TITLE"] = "PieFed 1.6 Alpha API"
     app.config["API_VERSION"] = "alpha 1.6"
@@ -250,7 +280,7 @@ def create_app(config_class=Config):
 
     # API Namespaces
     from app.api.alpha import site_bp, misc_bp, comm_bp, feed_bp, topic_bp, user_bp, \
-                              reply_bp, post_bp, upload_bp, private_message_bp
+                              reply_bp, post_bp, upload_bp, private_message_bp, admin_bp
     rest_api.register_blueprint(site_bp)
     rest_api.register_blueprint(misc_bp)
     rest_api.register_blueprint(comm_bp)
@@ -261,6 +291,7 @@ def create_app(config_class=Config):
     rest_api.register_blueprint(post_bp)
     rest_api.register_blueprint(upload_bp)
     rest_api.register_blueprint(private_message_bp)
+    rest_api.register_blueprint(admin_bp)
 
     # send error reports via email
     if app.config['MAIL_SERVER'] and app.config['ERRORS_TO']:

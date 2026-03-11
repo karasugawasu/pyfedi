@@ -40,8 +40,8 @@ class AddCommunityForm(FlaskForm):
         (4, _l('Invitation by owner required')),
     ]
     invitations = SelectField(_l('Joining process'), coerce=int, choices=joining_options)
-    publicize = BooleanField('Announce this community to newcommunities@lemmy.world')
-    question_answer = BooleanField('Question & answer community')
+    publicize = BooleanField(_l('Announce this community to newcommunities@lemmy.world'))
+    question_answer = BooleanField(_l('Question & answer community'))
     languages = MultiCheckboxField(_l('Languages'), coerce=int, validators=[Optional()],
                                    render_kw={'class': 'form-multicheck-columns'})
     submit = SubmitField(_l('Create'))
@@ -100,7 +100,7 @@ class EditCommunityForm(FlaskForm):
         (4, _l('Invitation by owner required')),
     ]
     invitations = SelectField(_l('Joining process'), coerce=int, choices=joining_options)
-    question_answer = BooleanField('Question & answer community')
+    question_answer = BooleanField(_l('Question & answer community'))
     restricted_to_mods = BooleanField(_l('Only moderators can post'))
     new_mods_wanted = BooleanField(_l('New moderators wanted'))
     downvote_accept_modes = [(DOWNVOTE_ACCEPT_ALL, _l('Everyone')),
@@ -230,7 +230,7 @@ class CreatePostForm(FlaskForm):
                          choices=[('none', _l('None')), ('daily', _l('Daily')),
                                   ('weekly', _l('Weekly')), ('monthly', _l('Monthly'))],
                          render_kw={'class': 'form-select'})
-    timezone = SelectField(_('Timezone'), validators=[DataRequired()], render_kw={'id': 'timezone', "class": "form-control tom-select"})
+    timezone = SelectField(_('Timezone'), validators=[DataRequired()], render_kw={'id': 'timezone', "class": "form-control"})
     submit = SubmitField(_l('Publish'))
 
     def __init__(self, *args, **kwargs):

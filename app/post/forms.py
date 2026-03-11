@@ -12,7 +12,7 @@ from app.utils import MultiCheckboxField
 
 
 class NewReplyForm(FlaskForm):
-    body = TextAreaField(_l('Body'), render_kw={'placeholder': 'What are your thoughts?', 'rows': 5, 'class': 'autoresize'},
+    body = TextAreaField(_l('Body'), render_kw={'placeholder': _l('What are your thoughts?'), 'rows': 5, 'class': 'autoresize'},
                          validators=[DataRequired(), Length(min=1, max=10000)])
     notify_author = BooleanField(_l('Notify about replies'))
     distinguished = BooleanField(_l('Distinguish as moderator comment'))
@@ -64,7 +64,9 @@ class CrossPostForm(FlaskForm):
                                              'hx-trigger': 'keyup delay:500ms',
                                              'hx-target': '#community_suggestions',
                                              'hx-swap': 'innerHTML settle:0ms',
-                                             'autocomplete': 'off'})
+                                             'autocomplete': 'off',
+                                             'pattern': r'!?[^@\s]+@[^@\s]+\.[^@\s]+',
+                                             'title': _l('Enter a community name in the format xyz@example.com')})
     submit = SubmitField(_l('Next'))
 
 
@@ -130,5 +132,8 @@ class MovePostForm(FlaskForm):
                                             'hx-trigger': 'keyup delay:500ms',
                                             'hx-target': '#community_suggestions',
                                             'hx-swap': 'innerHTML settle:0ms',
-                                            'autocomplete': 'off'})
+                                            'autocomplete': 'off',
+                                            'pattern': r'!?[^@\s]+@[^@\s]+\.[^@\s]+',
+                                            'title': _l('Enter a community name in the format xyz@example.com')
+                                            })
     submit = SubmitField(_l('Move'))

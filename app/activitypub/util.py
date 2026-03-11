@@ -956,6 +956,9 @@ def refresh_community_profile_task(community_id, activity_json):
                     community.ap_fetched_at = utcnow()
                     community.public_key = activity_json['publicKey']['publicKeyPem']
 
+                    if 'postUrlType' in activity_json and activity_json['postUrlType']:
+                        community.post_url_type = activity_json['postUrlType']
+
                     if 'summary' in activity_json:
                         description_html = activity_json['summary']
                     elif 'content' in activity_json:
@@ -1400,6 +1403,7 @@ def actor_json_to_model(activity_json, address, server):
                               instance_id=find_instance_id(server),
                               content_retention=current_app.config['DEFAULT_CONTENT_RETENTION'],
                               first_federated_at=utcnow(),
+                              post_url_type=activity_json['postUrlType'] if 'postUrlType' in activity_json else None,
                               )
         if get_setting('meme_comms_low_quality', False):
             community.low_quality = 'memes' in activity_json['preferredUsername'] or 'shitpost' in activity_json['preferredUsername']
@@ -1770,6 +1774,9 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
 
                                         if store_files_in_s3():
                                             content_type = guess_mime_type(final_place)
+                                            extra_args = {'ContentType': content_type}
+                                            if current_app.config.get('S3_STORAGE_CLASS'):
+                                                extra_args['StorageClass'] = current_app.config['S3_STORAGE_CLASS']
                                             boto3_session = boto3.session.Session()
                                             s3 = boto3_session.client(
                                                 service_name='s3',
@@ -1781,7 +1788,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                             s3.upload_file(final_place, current_app.config['S3_BUCKET'],
                                                            original_directory + '/' +
                                                            new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + final_ext,
-                                                           ExtraArgs={'ContentType': content_type})
+                                                           ExtraArgs=extra_args)
                                             os.unlink(final_place)
                                             final_place = f"https://{current_app.config['S3_PUBLIC_URL']}/{original_directory}/{new_filename[0:2]}/{new_filename[2:4]}" + \
                                                           '/' + new_filename + final_ext
@@ -1812,6 +1819,9 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
 
                                         if store_files_in_s3():
                                             content_type = guess_mime_type(final_place_thumbnail)
+                                            extra_args = {'ContentType': content_type}
+                                            if current_app.config.get('S3_STORAGE_CLASS'):
+                                                extra_args['StorageClass'] = current_app.config['S3_STORAGE_CLASS']
                                             if boto3_session is None and s3 is None:
                                                 boto3_session = boto3.session.Session()
                                                 s3 = boto3_session.client(
@@ -1824,7 +1834,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                             s3.upload_file(final_place_thumbnail, current_app.config['S3_BUCKET'],
                                                            original_directory + '/' +
                                                            new_filename[0:2] + '/' + new_filename[2:4] + '/' + new_filename + '_thumbnail' + thumbnail_ext,
-                                                           ExtraArgs={'ContentType': content_type})
+                                                           ExtraArgs=extra_args)
                                             os.unlink(final_place_thumbnail)
                                             final_place_thumbnail = f"https://{current_app.config['S3_PUBLIC_URL']}/{original_directory}/{new_filename[0:2]}/{new_filename[2:4]}" + \
                                                                     '/' + new_filename + '_thumbnail' + thumbnail_ext
@@ -2238,7 +2248,7 @@ def site_ban_remove_data(blocker_id, blocked):
     # Images attached to posts can't be restored, but site ban reversals don't have a 'removeData' field anyway.
     files = db.session.query(File).join(Post).filter(Post.user_id == blocked.id).all()
     for file in files:
-        file.delete_from_disk()
+        file.delete_from_disk(purge_cdn=True)
         file.source_url = ''
     if blocked.avatar_id:
         blocked.avatar.delete_from_disk()

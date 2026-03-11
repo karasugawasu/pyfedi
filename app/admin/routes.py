@@ -8,9 +8,9 @@ import shutil
 
 from flask import request, flash, json, url_for, current_app, redirect, g, abort, send_file
 from flask_login import current_user, login_user
-from flask_babel import _
+from flask_babel import _, ngettext
 from slugify import slugify
-from sqlalchemy import text, desc, or_
+from sqlalchemy import text, desc, or_, delete, update
 from PIL import Image
 from urllib.parse import urlparse
 from furl import furl
@@ -43,7 +43,7 @@ from app.utils import render_template, permission_required, set_setting, get_set
     download_defeds, instance_banned, login_required, referrer, \
     community_membership, retrieve_image_hash, posts_with_blocked_images, user_access, reported_posts, user_notes, \
     safe_order_by, get_task_session, patch_db_session, low_value_reposters, moderating_communities_ids, \
-    instance_allowed, trusted_instance_ids, get_emoji_replacements
+    instance_allowed, trusted_instance_ids, get_emoji_replacements, get_site_as_dict
 from app.admin import bp
 
 
@@ -62,10 +62,11 @@ def admin_home():
     used = usage.used
     percent_used = used / total * 100
 
+    storage_used = _('Storage used')
     if percent_used > 95:
-        disk_usage = f"<span class='blink red'>Storage used: {percent_used:.2f}%</span>"
+        disk_usage = f"<span class='blink red'>{storage_used}: {percent_used:.2f}%</span>"
     else:
-        disk_usage = f"Storage used: {percent_used:.2f}%"
+        disk_usage = f"{storage_used}: {percent_used:.2f}%"
     
     # Get plugin information
     from app.plugins import get_loaded_plugins, get_plugin_hooks
@@ -214,6 +215,7 @@ def admin_site():
                 os.unlink(f'app/static/media/{base_filename}{file_ext}')
 
         db.session.commit()
+        cache.delete_memoized(get_site_as_dict)
         set_setting('announcement', form.announcement.data)
         set_setting('announcement_html', markdown_to_html(form.announcement.data, anchors_new_tab=False, a_target=""))
         flash(_('Settings saved.'))
@@ -276,6 +278,7 @@ def admin_misc():
             db.session.add(site)
         db.session.commit()
         cache.delete_memoized(blocked_referrers)
+        cache.delete_memoized(get_site_as_dict)
         set_setting("allow_default_user_add_remote_community", form.allow_default_user_add_remote_community.data)
         set_setting('meme_comms_low_quality', form.meme_comms_low_quality.data)
         set_setting('public_modlog', form.public_modlog.data)
@@ -469,7 +472,10 @@ def admin_federation():
             flash(_('Results: %(results)s', results=str(pre_load_messages)))
         else:
             flash(
-                _('Subscription process for %(communities_to_add)d of %(parsed_communities_sorted)d communities launched in background, check admin/activities for details',
+                ngettext(
+                  'Subscription process for %(communities_to_add)d of %(parsed_communities_sorted)d community launched in background, check admin/activities for details',
+                  'Subscription process for %(communities_to_add)d of %(parsed_communities_sorted)d communities launched in background, check admin/activities for details',
+                  len(parsed_communities_sorted),
                   communities_to_add=communities_to_add, parsed_communities_sorted=len(parsed_communities_sorted)))
 
         return redirect(url_for('admin.admin_federation'))
@@ -484,7 +490,7 @@ def admin_federation():
         is_piefed = False
 
         # get the remote_url data
-        remote_url = remote_scan_form.remote_url.data
+        remote_url = remote_scan_form.remote_url.data.strip()
 
         # test to make sure its a valid fqdn
         regex_pattern = '^(https:\\/\\/)(?=.{1,255}$)((.{1,63}\\.){1,127}(?![0-9]*$)[a-z0-9-]+\\.?)$'
@@ -779,7 +785,10 @@ def admin_federation():
             flash(_('Results: %(results)s', results=str(remote_scan_messages)))
         else:
             flash(
-                _('Based on current filters, the subscription process for %(communities_to_join)d of %(candidate_communities)d communities launched in background, check admin/activities for details',
+                ngettext(
+                  'Based on current filters, the subscription process for %(communities_to_join)d of %(candidate_communities)d community launched in background, check admin/activities for details',
+                  'Based on current filters, the subscription process for %(communities_to_join)d of %(candidate_communities)d communities launched in background, check admin/activities for details',
+                  len(candidate_communities),
                   communities_to_join=len(community_urls_to_join), candidate_communities=len(candidate_communities)))
 
         return redirect(url_for('admin.admin_federation'))
@@ -874,20 +883,17 @@ def admin_federation():
 
     # this is the main settings form
     elif form.validate_on_submit():
-        if form.federation_mode.data == 'allowlist':
-            set_setting('use_allowlist', True)
-            db.session.execute(text('DELETE FROM allowed_instances'))
-            for allow in form.allowlist.data.split('\n'):
-                if allow.strip():
-                    db.session.add(AllowedInstances(domain=allow.strip().lower()))
-                    cache.delete_memoized(instance_allowed, allow.strip())
-        else:  # blocklist mode
-            set_setting('use_allowlist', False)
-            db.session.execute(text('DELETE FROM banned_instances WHERE subscription_id is null'))
-            for banned in form.blocklist.data.split('\n'):
-                if banned.strip():
-                    db.session.add(BannedInstances(domain=banned.strip().lower()))
-                    cache.delete_memoized(instance_banned, banned.strip())
+        set_setting('use_allowlist', form.federation_mode.data == 'allowlist')
+        db.session.execute(text('DELETE FROM allowed_instances'))
+        for allow in form.allowlist.data.split('\n'):
+            if allow.strip():
+                db.session.add(AllowedInstances(domain=allow.strip().lower()))
+                cache.delete_memoized(instance_allowed, allow.strip())
+        db.session.execute(text('DELETE FROM banned_instances WHERE subscription_id is null'))
+        for banned in form.blocklist.data.split('\n'):
+            if banned.strip():
+                db.session.add(BannedInstances(domain=banned.strip().lower()))
+                cache.delete_memoized(instance_banned, banned.strip())
 
         # update and sync defederation subscriptions
         db.session.execute(text('DELETE FROM banned_instances WHERE subscription_id is not null'))
@@ -1590,9 +1596,17 @@ def admin_approve_registrations_denied(user_id):
         db.session.delete(registration)
 
         # remove notifications caused by the registration attempt
-        reg_notifs = Notification.query.filter_by(author_id=user.id)
-        for n in reg_notifs:
-            db.session.delete(n)
+        notifications = db.session.execute(
+            delete(Notification)
+            .where(Notification.author_id == user.id)
+            .returning(Notification.user_id, Notification.read)
+        ).all()
+        unread_notification_users = [n.user_id for n in notifications if not n.read]
+        db.session.execute(
+            update(User)
+            .where(User.id.in_(unread_notification_users))
+            .values({User.unread_notifications: User.unread_notifications - 1})
+        )
 
         # remove the user from the db so the username is available again
         user.deleted = True
@@ -1622,6 +1636,7 @@ def admin_user_edit(user_id):
         user.ban_comments = form.ban_comments.data
         user.hide_nsfw = form.hide_nsfw.data
         user.hide_nsfl = form.hide_nsfl.data
+        user.admin_note = form.admin_note.data
         if form.verified.data and not user.verified:
             finalize_user_setup(user)
         user.verified = form.verified.data
@@ -1669,6 +1684,7 @@ def admin_user_edit(user_id):
         form.ban_comments.data = user.ban_comments
         form.hide_nsfw.data = user.hide_nsfw
         form.hide_nsfl.data = user.hide_nsfl
+        form.admin_note.data = user.admin_note
         if user.roles and user.roles.count() > 0:
             form.role.data = user.roles[0].id
 
@@ -2242,3 +2258,26 @@ def masquerade(user_id):
         login_user(user, False)
         return redirect('/')
     return ''
+
+
+@bp.route('/perf_test', methods=['POST'])
+@login_required
+@permission_required('change instance settings')
+def perf_test():
+    import time
+
+    N = 100_000_000
+
+    start = time.perf_counter()
+
+    x = 0
+    for i in range(N):
+        x += i * i
+
+    elapsed = time.perf_counter() - start
+
+    result = []
+    #result.append(f"Result: {x}")
+    result.append(f"Time: {elapsed:.3f} seconds")
+    result.append(f"Iterations per second: {N / elapsed:,.0f}")
+    return "<br>".join(result)

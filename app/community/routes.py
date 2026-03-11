@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from flask import redirect, url_for, flash, request, make_response, current_app, abort, g, json
 from markupsafe import Markup, escape
 from flask_login import current_user
-from flask_babel import _, force_locale, gettext
+from flask_babel import _, force_locale, gettext, ngettext
 from slugify import slugify
 from sqlalchemy import or_, asc, desc, text
 from sqlalchemy.orm.exc import NoResultFound
@@ -55,7 +55,8 @@ from app.utils import get_setting, render_template, markdown_to_html, validation
     instance_software, domain_from_email, referrer, flair_for_form, find_flair_id, login_required_if_private_instance, \
     possible_communities, reported_posts, user_notes, login_required, get_task_session, patch_db_session, \
     approval_required, permission_required, aged_account_required, communities_banned_from_all_users, \
-    moderating_communities_ids_all_users, block_honey_pot, user_pronouns, community_membership_private
+    moderating_communities_ids_all_users, block_honey_pot, user_pronouns, community_membership_private, \
+    show_reason_why_no_federation
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
 from app.shared.community import leave_community
@@ -158,7 +159,7 @@ def add_local():
         cache.delete_memoized(community_membership_private, current_user.id)
         return redirect('/c/' + community.name)
     else:
-        form.publicize.data = not current_app.debug
+        form.publicize.data = not current_app.debug and not current_app.config['CONTENT_WARNING']
 
     return render_template('community/add_local.html', title=_('Create community'), form=form,
                            current_app=current_app)
@@ -195,7 +196,7 @@ def add_remote():
             server, community = extract_domain_and_actor(address)
             new_community = search_for_community('!' + community + '@' + server)
         else:
-            message = Markup('Accepted address formats: !community@server.name or https://server.name/{c|m}/community. Search on <a href="https://lemmyverse.net/communities">Lemmyverse.net</a> to find some.')
+            message = Markup(_('Accepted address formats: !community@server.name or https://server.name/c/community.') + ' ' + _('Search on <a href="https://lemmyverse.net/communities">Lemmyverse.net</a> to find some.'))
             flash(message, 'error')
         if new_community is None:
             if g.site.enable_nsfw:
@@ -518,6 +519,8 @@ def show_community(community: Community):
     community_feeds = Feed.query.join(FeedItem, FeedItem.feed_id == Feed.id).\
         filter(FeedItem.community_id == community.id).filter(Feed.public == True).all()
 
+    show_reason_why_no_federation(community.instance_id)
+
     # Upcoming events
     upcoming_events = db.session.execute(text("""SELECT e.start, p.title, p.id FROM "event" e
                                                  INNER JOIN post p on e.post_id = p.id
@@ -657,9 +660,12 @@ def show_community(community: Community):
                                          post_layout=post_layout, content_type=content_type, current_app=current_app,
                                          user_has_feeds=user_has_feeds, current_feed_id=current_feed_id,
                                          current_feed_title=current_feed_title, user_flair=user_flair, sticky_posts=sticky_posts))
+    resp.headers.set('ETag', f"{community.id}{sort}{post_layout}_{hash(community.last_active)}")
     if current_user.is_anonymous:
+        resp.headers.set('Vary', 'Accept, Accept-Language')
         resp.headers.set('Cache-Control', 'public, max-age=30')
     else:
+        resp.headers.set('Vary', 'Accept, Cookie, Accept-Language')
         resp.headers.set('Cache-Control', 'private, max-age=15, must-revalidate')
 
     return resp
@@ -2448,8 +2454,9 @@ def community_invite(actor):
                                 sent_to.add(line)
                         total_invites += 1
 
-            flash(_('Invited %(total_invites)d people using %(chat_invites)d chat messages and %(email_invites)d emails.',
-                  total_invites=total_invites, chat_invites=chat_invites, email_invites=email_invites))
+            flash(ngettext('Invited %(num)d person', 'Invited %(num)d people', total_invites) + ' ' +
+                  ngettext('using %(num)d chat message', 'using %(num)d chat messages', chat_invites) + ' ' +
+                  ngettext('and %(num)d email', 'and %(num)d emails', email_invites) + '.')
             return redirect('/c/' + community.link())
 
         if community.is_local() and community.local_only:

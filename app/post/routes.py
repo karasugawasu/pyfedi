@@ -62,14 +62,9 @@ from app.utils import render_template, markdown_to_html, validation_required, \
     possible_communities, user_notes, login_required, get_recipient_language, user_filters_posts, \
     total_comments_on_post_and_cross_posts, approval_required, libretranslate_string, user_in_restricted_country, \
     site_language_code, block_honey_pot, joined_communities, moderating_communities, user_pronouns, \
-    instance_sticky_posts, instance_sticky_post_ids
+    instance_sticky_posts, instance_sticky_post_ids, user_access, show_reason_why_no_federation
 
 
-def post_cache_key(post_id, sort, low_bandwidth, autoplay):
-    return f"{current_user.get_id()}_{post_id}_{sort}_{low_bandwidth}_{autoplay}_{request.method}"
-
-
-@cache.cached(timeout=5, make_cache_key=post_cache_key)
 @login_required_if_private_instance
 def show_post(post_id: int, sort, low_bandwidth, autoplay):
     with limiter.limit('30/minute'):
@@ -141,6 +136,8 @@ def show_post(post_id: int, sort, low_bandwidth, autoplay):
         if current_user.is_authenticated:
             if not post.community.is_moderator() and not post.community.is_owner() and not current_user.is_staff() and not current_user.is_admin():
                 form.distinguished.render_kw = {'disabled': True}
+
+            show_reason_why_no_federation(community.instance_id)
 
         if current_user.is_authenticated and current_user.verified and form.validate_on_submit() and not post.deleted:
             try:
@@ -332,14 +329,16 @@ def show_post(post_id: int, sort, low_bandwidth, autoplay):
                                    author_banned=author_banned,
                                    user_pronouns=user_pronouns()
                                    )
-        response.headers.set('Vary', 'Accept, Cookie, Accept-Language')
         response.headers.set('Link',
                              f'<https://{current_app.config["SERVER_NAME"]}/post/{post.id}>; rel="alternate"; type="application/activity+json"')
         oembed_url = url_for('post.post_oembed', post_id=post.id, _external=True)
         response.headers.set('Link', f'<{oembed_url}>; rel="alternate"; type="application/json+oembed"')
+        response.headers.set('ETag', f"{post.id}{sort}_{hash(post.last_active)}")
         if current_user.is_anonymous:
+            response.headers.set('Vary', 'Accept, Accept-Language')
             response.headers.set('Cache-Control', 'public, max-age=30')
         else:
+            response.headers.set('Vary', 'Accept, Cookie, Accept-Language')
             response.headers.set('Cache-Control', 'private, max-age=15, must-revalidate')
 
         return response
@@ -666,6 +665,8 @@ def continue_discussion(post_id, comment_id):
         recently_downvoted = recently_downvoted_posts(current_user.id)
         recently_upvoted_replies = recently_upvoted_post_replies(current_user.id)
         recently_downvoted_replies = recently_downvoted_post_replies(current_user.id)
+
+        show_reason_why_no_federation(post.community.instance_id)
     else:
         recently_upvoted = []
         recently_downvoted = []
@@ -1130,7 +1131,7 @@ def post_edit(post_id: int):
 def post_delete(post_id: int):
     post = Post.query.get_or_404(post_id)
     community = post.community
-    if post.user_id == current_user.id or community.is_moderator() or current_user.is_admin():
+    if post.user_id == current_user.id or community.is_moderator() or current_user.is_admin() or user_access('administer all communities', current_user.get_id()):
         if post.community.id in communities_banned_from(current_user.id):
             abort(403)
         form = DeleteConfirmationForm()
@@ -1494,7 +1495,7 @@ def post_mea_culpa(post_id: int):
 @login_required
 def post_sticky(post_id: int, mode):
     post = Post.query.get_or_404(post_id)
-    if post.community.is_moderator(current_user) or current_user.is_admin():
+    if post.community.is_moderator(current_user) or current_user.is_admin() or user_access('administer all communities', current_user.get_id()):
         sticky_post(post.id, mode == 'yes', SRC_WEB)
     if mode == 'yes':
         flash(_('%(name)s has been stickied.', name=post.title))
@@ -1542,7 +1543,7 @@ def post_hide(post_id: int, mode):
 @login_required
 def post_set_flair(post_id):
     post = Post.query.get_or_404(post_id)
-    if post.user_id == current_user.id or post.community.is_moderator(current_user) or current_user.is_staff() or current_user.is_admin():
+    if post.user_id == current_user.id or post.community.is_moderator(current_user) or current_user.is_staff() or current_user.is_admin() or user_access('administer all communities', current_user.get_id()):
 
         if request.headers.get("HX-Request"):
             curr_url = request.headers.get("HX-Current-Url")
@@ -1656,7 +1657,7 @@ def post_reply_lock(post_id: int, post_reply_id: int, mode):
 @login_required
 def post_move(post_id: int):
     post = Post.query.get_or_404(post_id)
-    if current_user.id == post.user_id or post.community.is_moderator(current_user) or (post.community.is_local() and post.community.is_admin_or_staff(current_user)):
+    if current_user.id == post.user_id or post.community.is_moderator(current_user) or (post.community.is_local() and (post.community.is_admin_or_staff(current_user)  or user_access('administer all communities', current_user.get_id()))):
         form = MovePostForm()
         if form.validate_on_submit():
             search = form.which_community.data.lower().strip()
@@ -1882,11 +1883,11 @@ def post_reply_delete(post_id: int, comment_id: int):
 
     form = ConfirmationMultiDeleteForm()
 
-    if not (community.is_moderator() or community.is_owner() or current_user.is_admin_or_staff()):
+    if not (community.is_moderator() or community.is_owner() or current_user.is_admin_or_staff() or user_access('administer all communities', current_user.get_id())):
         form.also_delete_replies.label = Label(field_id="also_delete_replies",
                                                text=_("Delete all my comments in this chain"))
 
-    if post_reply.user_id == current_user.id or community.is_moderator() or community.is_owner() or current_user.is_admin_or_staff():
+    if post_reply.user_id == current_user.id or community.is_moderator() or community.is_owner() or current_user.is_admin_or_staff() or user_access('administer all communities', current_user.get_id()):
         if form.validate_on_submit():
             if form.also_delete_replies.data:
                 num_deleted = 0
@@ -1939,7 +1940,7 @@ def post_reply_restore(post_id: int, comment_id: int):
     post = Post.query.get_or_404(post_id)
     post_reply = PostReply.query.get_or_404(comment_id)
 
-    if post_reply.user_id == current_user.id or post.community.is_moderator() or current_user.is_admin():
+    if post_reply.user_id == current_user.id or post.community.is_moderator() or current_user.is_admin() or user_access('administer all communities', current_user.get_id()):
         if post_reply.deleted_by == post_reply.user_id:
             was_mod_deletion = False
         else:
@@ -2023,7 +2024,7 @@ def post_reply_purge(post_id: int, comment_id: int):
     post_reply = PostReply.query.get_or_404(comment_id)
     if not post_reply.deleted:
         abort(404)
-    if post_reply.deleted_by == current_user.id or post.community.is_moderator() or current_user.is_admin():
+    if post_reply.deleted_by == current_user.id or post.community.is_moderator() or current_user.is_admin() or user_access('administer all communities', current_user.get_id()):
         if not post_reply.has_replies():
             from app import redis_client
             with redis_client.lock(f"lock:post_reply:{post_reply.id}", timeout=10, blocking_timeout=6):
@@ -2132,10 +2133,18 @@ def post_view_voting_activity(post_id: int):
     if current_user.is_admin_or_staff() or post.community.is_moderator():
 
         post_title = post.title
-        upvoters = User.query.join(PostVote, PostVote.user_id == User.id).filter_by(post_id=post_id, effect=1.0).\
-            order_by(User.ap_domain, User.user_name)
-        downvoters = User.query.join(PostVote, PostVote.user_id == User.id).filter_by(post_id=post_id, effect=-1.0).\
-            order_by(User.ap_domain, User.user_name)
+        upvoters = (
+            db.session.query(User, PostVote)
+            .join(PostVote, PostVote.user_id == User.id)
+            .filter(PostVote.post_id == post_id, PostVote.effect == 1.0)
+            .order_by(PostVote.created_at)
+        )
+        downvoters = (
+            db.session.query(User, PostVote)
+            .join(PostVote, PostVote.user_id == User.id)
+            .filter(PostVote.post_id == post_id, PostVote.effect == -1.0)
+            .order_by(PostVote.created_at)
+        )
 
         # local users will be at the bottom of each list as ap_domain is empty for those.
 
@@ -2153,10 +2162,18 @@ def post_reply_view_voting_activity(comment_id: int):
     if current_user.is_admin_or_staff() or post_reply.community.is_moderator():
 
         reply_text = post_reply.body
-        upvoters = User.query.join(PostReplyVote, PostReplyVote.user_id == User.id).filter_by(post_reply_id=comment_id, effect=1.0).\
-            order_by(User.ap_domain, User.user_name)
-        downvoters = User.query.join(PostReplyVote, PostReplyVote.user_id == User.id).filter_by(post_reply_id=comment_id, effect=-1.0).\
-            order_by(User.ap_domain, User.user_name)
+        upvoters = (
+            db.session.query(User, PostReplyVote)
+            .join(PostReplyVote, PostReplyVote.user_id == User.id)
+            .filter(PostReplyVote.post_reply_id == comment_id, PostReplyVote.effect == 1.0)
+            .order_by(PostReplyVote.created_at)
+        )
+        downvoters = (
+            db.session.query(User, PostReplyVote)
+            .join(PostReplyVote, PostReplyVote.user_id == User.id)
+            .filter(PostReplyVote.post_reply_id == comment_id, PostReplyVote.effect == -1.0)
+            .order_by(PostReplyVote.created_at)
+        )
 
         # local users will be at the bottom of each list as ap_domain is empty for those.
 
@@ -2302,22 +2319,31 @@ def show_post_ical(post_id: int):
 def post_check_ai(post_id):
     post = Post.query.get(post_id)
     if current_app.config['DETECT_AI_ENDPOINT']:
-        if len(post.body) > 100:
-            is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={post.ap_id}")
-            if is_ai and is_ai.status_code == 200:
-                is_ai_result = is_ai.json()
-                if is_ai_result['detection_result'] == 'ai':
+        is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={post.ap_id}")
+        if is_ai and is_ai.status_code == 200:
+            is_ai_result = is_ai.json()
+            if is_ai_result['detection_result'] == 'ai':
+                result_type = 'alert-warning'
+            else:
+                result_type = 'alert-success'
+            if is_ai_result['detection_result'] == 'none':
+                return f'<div class="w-100 alert {result_type}">Detection blocked</div>'
+            output = f'<div class="w-100 alert {result_type}">'
+            output += 'Post: ' + is_ai_result['detection_result'].upper()
+            output += '<br>'
+            output += f"{int(is_ai_result['confidence'] * 100)}% confident"
+            output += '</div>'
+            if 'attachment' in is_ai_result:
+                if is_ai_result['attachment']['detection_result'] == 'ai':
                     result_type = 'alert-warning'
                 else:
                     result_type = 'alert-success'
-                output = f'<div class="w-100 alert {result_type}">'
-                output += is_ai_result['detection_result'].upper()
+                output += f'<div class="w-100 alert {result_type}">'
+                output += 'Link: ' + is_ai_result['attachment']['detection_result'].upper()
                 output += '<br>'
-                output += f"{int(is_ai_result['confidence'] * 100)}% confident"
+                output += f"{int(is_ai_result['attachment']['confidence'] * 100)}% confident"
                 output += '</div>'
-                return output
-        else:
-            return _('Body text is too short to be sure.')
+            return output
     else:
         return _('Not configured.')
 

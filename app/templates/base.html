@@ -86,6 +86,9 @@
       {% if preconnect and not low_bandwidth -%}
         <link rel="preconnect" href='{{ preconnect }}'>
       {% endif -%}
+      {% if config["S3_PUBLIC_URL"] and not low_bandwidth -%}
+        <link rel="preconnect" href="{{ config['S3_PUBLIC_URL'] }}">
+      {% endif -%}
       {% if g.site.additional_css -%}
       <style>
           {{ g.site.additional_css | safe }}
@@ -105,6 +108,7 @@
     {% endblock %}
   </head>
   <body class="d-flex flex-column{{ ' low_bandwidth' if low_bandwidth }} {{ compaction_level() }}" hx-headers='{"x-csrftoken": "{{ cs }}"}'>
+    {%- include "translation.html" -%}
     {%- include "svg_sprites.html" -%}
     {% if 'fontSize' in request.cookies -%}
         <style>
@@ -166,7 +170,7 @@
                 <span class="navbar-toggler-icon"></span>
             </button>
 
-            <div class="collapse navbar-collapse" id="navbarSupportedContent" role="navigation">
+            <div class="collapse navbar-collapse{% if current_user.is_authenticated %} authenticated{% endif %}" id="navbarSupportedContent" role="navigation">
                     <ul class="nav navbar-nav text-end text-lg-start">
                         {% if current_user.is_anonymous -%}
                             <li class="nav-item dropdown{% if active_parent == 'communities' %} active{% endif %} communities_menu_parent">
@@ -254,7 +258,7 @@
                             {% endif %}
                             <!-- <li class="nav-item"><a class="nav-link" href="/donate">{{ _('Donate') }}</a></li> -->
                             <li class="nav-item right d-none d-md-inline-block">
-                                <a class="nav-link" href="/notifications" title="{{ _('%(num)d unread notifications', num=current_user.unread_notifications) if current_user.unread_notifications else _('Notifications') }}" aria-label="{{ _('%(num)d unread notifications', num=current_user.unread_notifications) if current_user.unread_notifications else _('Notifications') }}">
+                                <a class="nav-link" href="/notifications" title="{{ ngettext('%(num)d unread notification', '%(num)d unread notifications', current_user.unread_notifications) if current_user.unread_notifications else _('Notifications') }}" aria-label="{{ ngettext('%(num)d unread notification', '%(num)d unread notifications', current_user.unread_notifications) if current_user.unread_notifications else _('Notifications') }}">
                                     {% if current_user.unread_notifications %}
                                         <span class="fe fe-bell red"></span> <span class="red unreadNotificationDisplay">{{ current_user.unread_notifications }}</span>
                                     {% else %}
@@ -264,7 +268,7 @@
                             </li>
                         {% endif %}
                         <li class="nav-item {% if current_user.is_anonymous %}right{% endif %} content-center" aria-label="{{ _('Search') }}"><a class="nav-link" id="search" href="/search" tabindex="" title="{{ _('Search') }}"><span class="fe fe-search"></span></a></li>
-                        <li class="nav-item content-center"  aria-label="{{ _('Color mode') }}"><a class="nav-link" id="color_mode" href="#" tabindex="" title="{{ _('Color mode') }}"><span id="color_mode_icon" class="fe fe-eye"></span></a></li>
+                        <li class="nav-item content-center"  aria-label="{{ _('Color mode') }}"><a class="nav-link" id="color_mode" data-dark="{{ _('Dark mode') }}" data-light="{{ _('Light mode') }}" href="#" tabindex="" title="{{ _('Color mode') }}"><span id="color_mode_icon" class="fe fe-eye"></span></a></li>
                         {% if current_user.is_anonymous %}<li class="nav-item"><a class="nav-link" href="/auth/login">{{ _('Log in') }}</a></li>
                             <li class="nav-item"><a class="nav-link" href="/auth/instance_chooser">{{ _('Register') }}</a></li>{% endif %}
                         {% if current_user.is_authenticated %}<li class="nav-item content-center"  aria-label="{{ _('Settings') }}"><a class="nav-link" href="/user/settings" tabindex="" title="{{ _('Settings') }}"><span class="fe fe-settings"></span></a></li>{% endif %}
