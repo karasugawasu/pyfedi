@@ -1790,6 +1790,7 @@ def announce_activity_to_followers(community: Community, creator: User, activity
     if '@context' in activity:
         del activity["@context"]
 
+    announce_id = f"{current_app.config['SERVER_URL']}/activities/announce/{gibberish(15)}"
     announce_activity = {
         '@context': default_context(),
         "actor": community.public_url(),
@@ -1801,7 +1802,24 @@ def announce_activity_to_followers(community: Community, creator: User, activity
             f"{community.public_url()}/followers"
         ],
         "type": "Announce",
-        "id": f"{current_app.config['SERVER_URL']}/activities/announce/{gibberish(15)}"
+        "id": announce_id
+    }
+
+    microblog_object = activity.get('object') if isinstance(activity, dict) else None
+    if isinstance(microblog_object, dict):
+        microblog_object = microblog_object.get('id')
+    microblog_announce_activity = {
+        '@context': default_context(),
+        "id": announce_id,
+        "type": "Announce",
+        "actor": community.public_url(),
+        "to": [
+            "https://www.w3.org/ns/activitystreams#Public"
+        ],
+        "cc": [
+            f"{community.public_url()}/followers"
+        ],
+        "object": microblog_object if microblog_object else activity.get('id')
     }
 
     if is_flag:
@@ -1820,19 +1838,24 @@ def announce_activity_to_followers(community: Community, creator: User, activity
 
         # All good? Send!
         if instance and instance.online() and instance.inbox and not instance_banned(instance.inbox):
-            if creator.instance_id != instance.id:  # don't send it to the instance that hosts the creator as presumably they already have the content
+            should_send = creator.instance_id != instance.id
+            if not should_send and instance.software in MICROBLOG_APPS:
+                should_send = True
+
+            if should_send:  # usually skip creator instance, except for microblog software for AP compatibility
+                instance_announce_activity = microblog_announce_activity if instance.software in MICROBLOG_APPS else announce_activity
                 if can_batch and instance.software == 'piefed':
                     db.session.add(ActivityBatch(instance_id=instance.id, community_id=community.id,
                                                  payload=activity))
                     db.session.commit()
                 else:
-                    if current_app.config['NOTIF_SERVER'] and is_vote(announce_activity):   # Votes make up a very high percentage of activities, so it is more efficient to send them via piefed_notifs. However piefed_notifs does not retry failed sends. For votes this is acceptable.
-                        send_async.append(HttpSignature.signed_request(instance.inbox, announce_activity,
+                    if current_app.config['NOTIF_SERVER'] and is_vote(instance_announce_activity):   # Votes make up a very high percentage of activities, so it is more efficient to send them via piefed_notifs. However piefed_notifs does not retry failed sends. For votes this is acceptable.
+                        send_async.append(HttpSignature.signed_request(instance.inbox, instance_announce_activity,
                                                                        community.private_key,
                                                                        community.ap_profile_id + '#main-key',
                                                                        send_via_async=True))
                     else:
-                        send_to_remote_instance_fast(instance.inbox, community.private_key, community.ap_profile_id, announce_activity)
+                        send_to_remote_instance_fast(instance.inbox, community.private_key, community.ap_profile_id, instance_announce_activity)
 
     if len(send_async):
         from app import redis_client
