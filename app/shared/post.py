@@ -690,6 +690,23 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
             event.location = event_data['location']
         db.session.commit()
 
+    tag_context = plugins.fire_hook(
+        'before_post_federate',
+        {
+            'post': post,
+            'community': post.community,
+            'user': user,
+            'tags': tags,
+            'flair': flair,
+            'from_scratch': from_scratch,
+            'src': src,
+            'federate': federate,
+        },
+    )
+    if isinstance(tag_context, dict):
+        tags = tag_context.get('tags', tags)
+        # flair = tag_context.get('flair', flair)
+
     # add tags & flair
     post.tags = tags
     post.flair = flair
