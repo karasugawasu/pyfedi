@@ -12,7 +12,6 @@ bp = Blueprint('community_hashtag_injector', __name__)
 #     456: ["eventinfo"],
 # }
 COMMUNITY_HASHTAG_MAP = {
-    31: ["test"],
     11: ["karasu_test"],
     17: ["precure_fun"],       #プリキュア
     67: ["PieFed"],            #PieFed JP
