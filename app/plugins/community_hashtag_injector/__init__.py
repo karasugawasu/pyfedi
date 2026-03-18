@@ -1,6 +1,7 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, current_app, jsonify
 
 from app.activitypub.util import find_hashtag_or_create
+from app.models import Community
 from app.plugins.hooks import hook
 
 bp = Blueprint('community_hashtag_injector', __name__)
@@ -18,12 +19,40 @@ COMMUNITY_HASHTAG_MAP = {
     112: ["DQウォーク", "DQW"]  #DQW
 }
 
+def configured_communities_by_id():
+    configured_ids = list(COMMUNITY_HASHTAG_MAP.keys())
+    if not configured_ids:
+        return {}
+
+    communities = Community.query.filter(Community.id.in_(configured_ids)).all()
+    return {community.id: community for community in communities}
+
+
+def community_acct(community):
+    if community is None:
+        return None
+    if community.ap_id:
+        return community.ap_id.lower()
+    return f"{community.name.lower()}@{current_app.config['SERVER_NAME']}"
+
+
 def community_hashtag_map_payload():
+    communities_by_id = configured_communities_by_id()
+    communities = []
+
+    for community_id, hashtags in COMMUNITY_HASHTAG_MAP.items():
+        community = communities_by_id.get(community_id)
+        if community is None:
+            continue
+        communities.append({
+            'id': community_id,
+            'acct': community_acct(community),
+            'title': getattr(community, 'title', None),
+            'hashtags': hashtags,
+        })
+
     return {
-        'community_hashtag_map': {
-            str(community_id): hashtags
-            for community_id, hashtags in COMMUNITY_HASHTAG_MAP.items()
-        }
+        'communities': communities,
     }
 
 def apply_community_hashtags(tag_context):
