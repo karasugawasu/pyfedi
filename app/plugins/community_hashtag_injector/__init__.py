@@ -15,6 +15,7 @@ bp = Blueprint('community_hashtag_injector', __name__)
 COMMUNITY_HASHTAG_MAP = {
     11: ["karasu_test"],
     17: ["precure_fun"],       #プリキュア
+    38: ["DQ10", "DQX"],       #DQX
     67: ["PieFed"],            #PieFed JP
     112: ["DQウォーク", "DQW"]  #DQW
 }
