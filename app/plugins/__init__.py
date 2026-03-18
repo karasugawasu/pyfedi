@@ -18,12 +18,13 @@ logger = logging.getLogger(__name__)
 _loaded_plugins: Dict[str, Any] = {}
 
 
-def load_plugins(plugins_dir: str = None) -> Dict[str, Any]:
+def load_plugins(plugins_dir: str = None, app=None) -> Dict[str, Any]:
     """
     Load all plugins from the plugins directory
     
     Args:
         plugins_dir: Directory containing plugins (defaults to app/plugins)
+        app: Optional Flask application for plugin initialization
     
     Returns:
         Dictionary of loaded plugins
@@ -66,6 +67,9 @@ def load_plugins(plugins_dir: str = None) -> Dict[str, Any]:
             plugin_info = {}
             if hasattr(plugin_module, 'plugin_info'):
                 plugin_info = plugin_module.plugin_info()
+            
+            if app is not None and hasattr(plugin_module, 'init_app'):
+                plugin_module.init_app(app)
             
             _loaded_plugins[plugin_name] = {
                 'module': plugin_module,

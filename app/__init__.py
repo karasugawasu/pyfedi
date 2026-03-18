@@ -326,7 +326,7 @@ def create_app(config_class=Config):
 
     # Load plugins
     from app.plugins import load_plugins
-    load_plugins()
+    load_plugins(app=app)
 
     return app
 

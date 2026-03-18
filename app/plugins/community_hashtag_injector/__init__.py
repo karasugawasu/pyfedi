@@ -1,5 +1,9 @@
+from flask import Blueprint, jsonify
+
 from app.activitypub.util import find_hashtag_or_create
 from app.plugins.hooks import hook
+
+bp = Blueprint('community_hashtag_injector', __name__)
 
 # Hard-code community IDs to the hashtags that should be added before ActivityPub federation.
 # Example:
@@ -8,11 +12,20 @@ from app.plugins.hooks import hook
 #     456: ["eventinfo"],
 # }
 COMMUNITY_HASHTAG_MAP = {
+    31: ["test"],
     11: ["karasu_test"],
     17: ["precure_fun"],       #プリキュア
     67: ["PieFed"],            #PieFed JP
     112: ["DQウォーク", "DQW"]  #DQW
 }
+
+def community_hashtag_map_payload():
+    return {
+        'community_hashtag_map': {
+            str(community_id): hashtags
+            for community_id, hashtags in COMMUNITY_HASHTAG_MAP.items()
+        }
+    }
 
 def apply_community_hashtags(tag_context):
     if not isinstance(tag_context, dict):
@@ -42,11 +55,16 @@ def apply_community_hashtags(tag_context):
     tag_context['tags'] = tags
     return tag_context
 
+@bp.get('/plugins/community-hashtag-map.json')
+def get_community_hashtag_map():
+    return jsonify(community_hashtag_map_payload())
 
 @hook('before_post_federate')
 def add_community_hashtags_before_post_federate(tag_context, **kwargs):
     return apply_community_hashtags(tag_context)
 
+def init_app(app):
+    app.register_blueprint(bp)
 
 def plugin_info():
     return {
