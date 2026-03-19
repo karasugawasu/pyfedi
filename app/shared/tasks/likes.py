@@ -1,8 +1,9 @@
 from app import celery
 from app.activitypub.signature import default_context, send_post_request, HttpSignature
-from app.models import CommunityBan, Post, PostReply, User, ActivityBatch, Community, PollChoiceVote, PollChoice, utcnow
+from app.constants import MICROBLOG_APPS
+from app.models import CommunityBan, Post, PostReply, User, ActivityBatch, Community, PollChoiceVote, PollChoice, utcnow, Emoji
 from app.shared.tasks import task_selector
-from app.utils import gibberish, instance_banned, get_task_session, patch_db_session
+from app.utils import gibberish, instance_banned, get_task_session, patch_db_session, guess_mime_type
 
 from flask import current_app, json
 
@@ -18,6 +19,50 @@ from flask import current_app, json
   'cc': []      (announce only)
 }
 """
+
+
+def add_custom_emoji_tag(payload, emoji):
+    if not emoji or not emoji.startswith(':'):
+        return payload
+
+    custom_emoji = Emoji.query.filter_by(token=emoji, instance_id=1).first()
+    if not custom_emoji or not custom_emoji.url:
+        return payload
+
+    tag = {
+        'id': f"{current_app.config['SERVER_URL']}/e/{custom_emoji.id}",
+        'type': 'Emoji',
+        'name': custom_emoji.token,
+        'icon': {
+            'type': 'Image',
+            'mediaType': guess_mime_type(custom_emoji.url),
+            'url': custom_emoji.url
+        }
+    }
+    if custom_emoji.category:
+        tag['category'] = custom_emoji.category
+    if custom_emoji.aliases:
+        tag['aliases'] = custom_emoji.aliases.split()
+
+    payload['tag'] = [tag]
+    return payload
+
+
+def vote_delivery_details(instance, vote_payload, announce_payload, target_author_inbox, user, community):
+    if instance.software in MICROBLOG_APPS:
+        return {
+            'inbox': target_author_inbox or instance.inbox,
+            'payload': vote_payload,
+            'private_key': user.private_key,
+            'key_id': user.public_url() + '#main-key'
+        }
+
+    return {
+        'inbox': instance.inbox,
+        'payload': announce_payload,
+        'private_key': community.private_key,
+        'key_id': community.public_url() + '#main-key'
+    }
 
 
 @celery.task
@@ -75,6 +120,7 @@ def send_vote(user_id, object, vote_to_undo, vote_direction, emoji):
         }
         if emoji:
             vote_public['content'] = emoji
+            add_custom_emoji_tag(vote_public, emoji)
 
         # Create undo
         if vote_to_undo:
@@ -130,14 +176,23 @@ def send_vote(user_id, object, vote_to_undo, vote_direction, emoji):
                     session.add(ActivityBatch(instance_id=instance.id, community_id=community.id, payload=payload_copy))
                     session.commit()
                 else:
-                    if current_app.config['NOTIF_SERVER']:   # Votes make up a very high percentage of activities, so it is more efficient to send them via fastapi_server.py. However fastapi_server.py does not retry failed sends. For votes this is acceptable.
-                        send_async.append(HttpSignature.signed_request(instance.inbox, announce,
-                                                                       community.private_key,
-                                                                       community.public_url() + '#main-key',
+                    delivery = vote_delivery_details(
+                        instance,
+                        undo_public if vote_to_undo else vote_public,
+                        announce,
+                        object.author.ap_inbox_url if object.author else None,
+                        user,
+                        community
+                    )
+                    if current_app.config['NOTIF_SERVER'] and instance.software not in MICROBLOG_APPS:   # Votes make up a very high percentage of activities, so it is more efficient to send them via fastapi_server.py. However fastapi_server.py does not retry failed sends. For votes this is acceptable.
+                        send_async.append(HttpSignature.signed_request(delivery['inbox'], delivery['payload'],
+                                                                       delivery['private_key'],
+                                                                       delivery['key_id'],
                                                                        send_via_async=True))
                     else:
                         # Send the announcement directly
-                        send_post_request(instance.inbox, announce, community.private_key, community.public_url() + '#main-key')
+                        send_post_request(delivery['inbox'], delivery['payload'],
+                                          delivery['private_key'], delivery['key_id'])
 
             if len(send_async):
                 from app import redis_client
