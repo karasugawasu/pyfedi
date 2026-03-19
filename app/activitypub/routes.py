@@ -1192,7 +1192,7 @@ def process_inbox_request(request_json, store_ap_json):
                                     to_delete.community,
                                     user,
                                     request_json,
-                                    microblog_delete_as_undo_announce=relay_delete_to_microblog_followers,
+                                    force_full_activity_for_microblog=relay_delete_to_microblog_followers,
                                 )
                     else:
                         # no content found. check if it was a PM
@@ -1788,7 +1788,7 @@ def process_delete_request(request_json, store_ap_json):
 # if is_flag is set, the report is just sent to any remote mods and the reported user's instance
 def announce_activity_to_followers(community: Community, creator: User, activity, can_batch=False,
                                    is_flag=False, admin_instance_id=1,
-                                   microblog_delete_as_undo_announce=False):
+                                   force_full_activity_for_microblog=False):
     from app.activitypub.signature import default_context
 
     # avoid announcing activity sent to local users unless it is also in a local community
@@ -1834,32 +1834,6 @@ def announce_activity_to_followers(community: Community, creator: User, activity
         "object": microblog_object if microblog_object else activity.get('id')
     }
 
-    microblog_delete_undo_activity = None
-    if microblog_delete_as_undo_announce and activity.get('type') == 'Delete':
-        microblog_delete_undo_activity = {
-            '@context': default_context(),
-            'id': f"{current_app.config['SERVER_URL']}/activities/undo/{gibberish(15)}",
-            'type': 'Undo',
-            'actor': community.public_url(),
-            'to': [
-                "https://www.w3.org/ns/activitystreams#Public"
-            ],
-            'cc': [
-                f"{community.public_url()}/followers"
-            ],
-            'object': {
-                'type': 'Announce',
-                'actor': community.public_url(),
-                'to': [
-                    "https://www.w3.org/ns/activitystreams#Public"
-                ],
-                'cc': [
-                    f"{community.public_url()}/followers"
-                ],
-                'object': microblog_object if microblog_object else activity.get('id')
-            }
-        }
-
     if is_flag:
         instances = community.following_instances(include_dormant=True, mod_hosts_only=True)
         if admin_instance_id != 1 and not any(i.id == admin_instance_id for i in instances):
@@ -1881,8 +1855,8 @@ def announce_activity_to_followers(community: Community, creator: User, activity
                 should_send = True
 
             if should_send:  # usually skip creator instance, except for microblog software for AP compatibility
-                if microblog_delete_undo_activity and instance.software in MICROBLOG_APPS:
-                    instance_announce_activity = microblog_delete_undo_activity
+                if force_full_activity_for_microblog and instance.software in MICROBLOG_APPS:
+                    instance_announce_activity = announce_activity
                 else:
                     instance_announce_activity = microblog_announce_activity if instance.software in MICROBLOG_APPS else announce_activity
                 if can_batch and instance.software == 'piefed':
