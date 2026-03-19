@@ -1182,18 +1182,7 @@ def process_inbox_request(request_json, store_ap_json):
                             reason = core_activity['summary'] if 'summary' in core_activity else ''
                             delete_post_or_comment(user, to_delete, store_ap_json, request_json, reason)
                             if not announced:
-                                relay_delete_to_microblog_followers = (
-                                    isinstance(to_delete, Post)
-                                    and to_delete.microblog
-                                    and user.instance is not None
-                                    and user.instance.software in MICROBLOG_APPS
-                                )
-                                announce_activity_to_followers(
-                                    to_delete.community,
-                                    user,
-                                    request_json,
-                                    force_full_activity_for_microblog=relay_delete_to_microblog_followers,
-                                )
+                                announce_activity_to_followers(to_delete.community, user, request_json)
                     else:
                         # no content found. check if it was a PM
                         updated_message = session.query(ChatMessage).filter_by(ap_id=ap_id, sender_id=user.id).first()
@@ -1787,8 +1776,7 @@ def process_delete_request(request_json, store_ap_json):
 # Announces incoming activity back out to subscribers
 # if is_flag is set, the report is just sent to any remote mods and the reported user's instance
 def announce_activity_to_followers(community: Community, creator: User, activity, can_batch=False,
-                                   is_flag=False, admin_instance_id=1,
-                                   force_full_activity_for_microblog=False):
+                                   is_flag=False, admin_instance_id=1):
     from app.activitypub.signature import default_context
 
     # avoid announcing activity sent to local users unless it is also in a local community
@@ -1855,10 +1843,7 @@ def announce_activity_to_followers(community: Community, creator: User, activity
                 should_send = True
 
             if should_send:  # usually skip creator instance, except for microblog software for AP compatibility
-                if force_full_activity_for_microblog and instance.software in MICROBLOG_APPS:
-                    instance_announce_activity = announce_activity
-                else:
-                    instance_announce_activity = microblog_announce_activity if instance.software in MICROBLOG_APPS else announce_activity
+                instance_announce_activity = microblog_announce_activity if instance.software in MICROBLOG_APPS else announce_activity
                 if can_batch and instance.software == 'piefed':
                     db.session.add(ActivityBatch(instance_id=instance.id, community_id=community.id,
                                                  payload=activity))
