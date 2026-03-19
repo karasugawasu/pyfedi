@@ -2259,11 +2259,9 @@ def process_new_content(user, community, store_ap_json, request_json, announced)
 def process_upvote(user, store_ap_json, request_json, announced):
     saved_json = request_json if store_ap_json else None
     id = request_json['id']
-    ap_id = request_json['object'] if not announced else request_json['object']['object']
-    if not announced:
-        emoji = request_json['content'] if 'content' in request_json else None
-    else:
-        emoji = request_json['object']['content'] if 'content' in request_json['object'] else None
+    like_obj = request_json if not announced else (request_json.get('object') or {})
+    ap_id = request_json['object'] if not announced else like_obj.get('object')
+    emoji = like_obj.get('content') if 'content' in like_obj else None
 
     if isinstance(ap_id, dict) and 'id' in ap_id:
         ap_id = ap_id['id']
@@ -2273,12 +2271,71 @@ def process_upvote(user, store_ap_json, request_json, announced):
         return
     if can_upvote(user, liked.community) and not instance_banned(user.instance.domain):
         if isinstance(liked, (Post, PostReply)) and user.id not in blocked_users(liked.author.id):
+            upsert_custom_emojis_from_like(like_obj, user.instance_id)
             liked.vote(user, 'upvote', emoji)
             log_incoming_ap(id, APLOG_LIKE, APLOG_SUCCESS, saved_json)
             if not announced:
                 announce_activity_to_followers(liked.community, user, request_json, can_batch=True)
     else:
         log_incoming_ap(id, APLOG_LIKE, APLOG_IGNORED, saved_json, 'Cannot upvote this')
+
+def upsert_custom_emojis_from_like(like_obj: dict, instance_id: int) -> int:
+    tags = like_obj.get('tag') or []
+    if isinstance(tags, dict):
+        tags = [tags]
+
+    changed = 0
+
+    for tag in tags:
+        if not isinstance(tag, dict) or tag.get('type') != 'Emoji':
+            continue
+
+        token = tag.get('name')
+        if token and not token.startswith(':'):
+            token = f':{token.strip(":")}:'
+
+        icon = tag.get('icon') or {}
+        url = icon.get('url')
+
+        aliases = tag.get('aliases') or []
+        if isinstance(aliases, str):
+            aliases = aliases.split()
+        aliases_str = ' '.join(alias for alias in aliases if alias) or None
+        category = tag.get('category') or None
+
+        if not token or not url:
+            continue
+
+        existing = db.session.query(Emoji).filter(
+            Emoji.instance_id == instance_id,
+            Emoji.token == token,
+        ).first()
+
+        if existing:
+            updated = False
+            if existing.url != url:
+                existing.url = url
+                updated = True
+            if category and existing.category != category:
+                existing.category = category
+                updated = True
+            if aliases_str and existing.aliases != aliases_str:
+                existing.aliases = aliases_str
+                updated = True
+            if updated:
+                changed += 1
+            continue
+
+        db.session.add(Emoji(
+            instance_id=instance_id,
+            token=token,
+            url=url,
+            category=category,
+            aliases=aliases_str,
+        ))
+        changed += 1
+
+    return changed
 
 def process_downvote(user, store_ap_json, request_json, announced):
     saved_json = request_json if store_ap_json else None
