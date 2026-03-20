@@ -17,7 +17,8 @@ COMMUNITY_HASHTAG_MAP = {
     17: ["precure_fun"],       #プリキュア
     38: ["DQ10", "DQX"],       #DQX
     67: ["PieFed"],            #PieFed JP
-    112: ["DQウォーク", "DQW"]  #DQW
+    112: ["DQウォーク", "DQW"],  #DQW
+    116: ["capsicum"],           #capsicum
 }
 
 def configured_communities_by_id():
