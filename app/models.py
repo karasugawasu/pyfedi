@@ -1717,6 +1717,15 @@ class Post(db.Model):
             post.edited_at = utcnow()
         if community.nsfw:
             post.nsfw = True  # old Lemmy instances ( < 0.19.8 ) allow nsfw content in nsfw communities to be flagged as sfw which makes no sense
+        else:
+            # tagにcw_onlyが含まれてたらsensitive解除
+            if post.microblog:
+                tags = request_json.get('object', {}).get('tag', [])
+                if any(
+                    tag and tag.get('type') == 'Hashtag' and 'cw_only' in tag.get('name', '').lower()
+                    for tag in tags
+                ):
+                    post.nsfw = False
         if community.nsfl:
             post.nsfl = True
         if community.ai_generated:
@@ -1802,15 +1811,6 @@ class Post(db.Model):
                     for tag in tags
                 ):
                     post.url = None
-            # tagにcw_onlyが含まれてたらsensitive解除
-            if post.microblog:
-                tags = request_json.get('object', {}).get('tag', [])
-                if any(
-                    tag and tag.get('type') == 'Hashtag' and 'cw_only' in tag.get('name', '').lower()
-                    for tag in tags
-                ):
-                    if not community.nsfw:
-                        post.nsfw = False
             # Mastodon,Misskeyの画像を全部本文に表示する
             if post.microblog:
                 attachments = request_json.get('object', {}).get('attachment', [])
