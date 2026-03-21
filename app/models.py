@@ -1809,7 +1809,8 @@ class Post(db.Model):
                     tag and tag.get('type') == 'Hashtag' and 'cw_only' in tag.get('name', '').lower()
                     for tag in tags
                 ):
-                    post.url = None
+                    if not community.nsfw:
+                        post.nsfw = False
             # Mastodon,Misskeyの画像を全部本文に表示する
             if post.microblog:
                 attachments = request_json.get('object', {}).get('attachment', [])
