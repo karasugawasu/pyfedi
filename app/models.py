@@ -1802,6 +1802,14 @@ class Post(db.Model):
                     for tag in tags
                 ):
                     post.url = None
+            # tagにcw_onlyが含まれてたらsensitive解除
+            if post.microblog:
+                tags = request_json.get('object', {}).get('tag', [])
+                if any(
+                    tag and tag.get('type') == 'Hashtag' and 'cw_only' in tag.get('name', '').lower()
+                    for tag in tags
+                ):
+                    post.url = None
             # Mastodon,Misskeyの画像を全部本文に表示する
             if post.microblog:
                 attachments = request_json.get('object', {}).get('attachment', [])
@@ -1850,7 +1858,7 @@ class Post(db.Model):
                 if classes & {"mention", "hashtag"}:
                     continue
                 href = a["href"]
-                if "/tags/" in href or "/tag/" in href:
+                if "/tags/" in href:
                     continue
                 post.url = a["href"]
                 break
@@ -2000,7 +2008,7 @@ class Post(db.Model):
                         if not isinstance(name, str):
                             continue
                         if post.microblog:
-                            if name.lower() in ('#link', '#text'):
+                            if name.lower() in ('#link', '#text', '#cw_only'):
                                 continue
                             flair_name = name[1:] if name.startswith('#') else name
                             flair = find_flair(flair_name, post.community_id)
