@@ -36,7 +36,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     else:
         page = 1
 
-    if 'p.piefed.social' in request.referrer:
+    if request.referrer and 'p.piefed.social' in request.referrer:
         page += 1
 
     limit = int(data['limit']) if 'limit' in data else 50
