@@ -14,9 +14,10 @@ from app.models import ChatMessage, Community, Language, Instance, Post, PostRep
     AllowedInstances, BannedInstances, utcnow, Site, Feed, FeedItem, Topic, CommunityFlair, \
     UserNote, Poll, Event, PollChoice
 from app.post.util import tags_to_string, flair_to_string
-from app.utils import blocked_communities, blocked_or_banned_instances, blocked_users, communities_banned_from, get_setting, \
+from app.utils import blocked_communities, blocked_or_banned_instances, blocked_users, communities_banned_from, \
+    get_setting, \
     num_topics, moderating_communities_ids, moderating_communities, joined_communities, \
-    moderating_communities_ids_all_users
+    moderating_communities_ids_all_users, community_membership_private
 from app.shared.community import get_comm_flair_list
 from app.shared.post import get_post_flair_list
 
@@ -282,6 +283,9 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
                     xplist.append(entry)
                 except NoResultFound:
                     continue
+
+        if post.community.private and post.community_id not in community_membership_private(user_id):
+            raise Exception('Private community - membership required')
 
         v3 = {'post_view': post_view(post=post, variant=2, user_id=user_id, communities_moderating=communities_moderating),
               'community_view': community_view(community=post.community, variant=2, user_id=user_id),
@@ -987,7 +991,7 @@ def feed_view(feed: Feed | int, variant: int, user_id, subscribed, include_commu
 
         v1['communities'] = []
         if include_communities:
-            for community in Community.query.filter(Community.banned == False).\
+            for community in Community.query.filter(Community.banned == False, Community.private == False).\
                 join(FeedItem, FeedItem.community_id == Community.id).filter(FeedItem.feed_id == feed.id):
                 if community.id not in blocked_community_ids and \
                         community.instance_id not in blocked_instance_ids and \
@@ -1102,7 +1106,7 @@ def topic_view(topic: Topic | int, variant: int, communities_moderating, banned_
 
         v1['communities'] = []
         if include_communities:
-            for community in Community.query.filter(Community.banned == False, Community.topic_id == topic.id):
+            for community in Community.query.filter(Community.banned == False, Community.topic_id == topic.id, Community.private == False):
                 if community.id not in blocked_community_ids and \
                         community.instance_id not in blocked_instance_ids and \
                         community.id not in banned_from:
@@ -1251,7 +1255,7 @@ def federated_instances_view():
     return v1
 
 
-@cache.memoize(timeout=60)
+@cache.memoize(timeout=3000)
 def cached_modlist_for_community(community_id):
     moderator_ids = db.session.execute(
         text('SELECT user_id FROM "community_member" WHERE community_id = :community_id and (is_moderator = True or is_owner = True)'),
@@ -1266,7 +1270,7 @@ def cached_modlist_for_community(community_id):
     return modlist
 
 
-@cache.memoize(timeout=60)
+@cache.memoize(timeout=3000)
 def cached_modlist_for_user(user):
     community_ids = db.session.execute(
         text('SELECT community_id FROM "community_member" WHERE user_id = :user_id and (is_moderator = True or is_owner = True)'),

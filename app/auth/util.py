@@ -495,7 +495,10 @@ def sync_user_with_ldap(user, password):
 def determine_next_page():
     next_page = request.args.get("next")
     if not next_page or urlsplit(next_page).netloc != "":
-        next_page = url_for("auth.filter_selection" if not current_user.communities() else "main.index")
+        check_user_finished_onboarding()
+        next_page = url_for(
+            "auth.filter_selection" if not current_user.finished_onboarding else "main.index"
+        )
     return next_page
 
 

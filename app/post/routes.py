@@ -61,7 +61,8 @@ from app.utils import render_template, markdown_to_html, validation_required, \
     possible_communities, user_notes, login_required, get_recipient_language, user_filters_posts, \
     total_comments_on_post_and_cross_posts, approval_required, libretranslate_string, user_in_restricted_country, \
     site_language_code, block_honey_pot, joined_communities, moderating_communities, user_pronouns, \
-    instance_sticky_posts, instance_sticky_post_ids, user_access, show_reason_why_no_federation
+    instance_sticky_posts, instance_sticky_post_ids, user_access, show_reason_why_no_federation, \
+    community_membership_private
 
 
 @login_required_if_private_instance
@@ -88,8 +89,14 @@ def show_post(post_id: int, sort, low_bandwidth, autoplay):
                 if post.nsfw or post.nsfl:
                     flash(_('This post is only visible to logged in users.'))
                     return redirect(url_for("auth.login", next=f"/post/{post_id}"))
+
+            if post.community.private:
+                abort(403)
         else:
             if (post.nsfw or post.nsfl) and user_in_restricted_country(current_user):
+                abort(403)
+
+            if post.community.private and post.community_id not in community_membership_private(current_user.id):
                 abort(403)
 
         # If nothing has changed since their last visit, return HTTP 304
@@ -920,9 +927,10 @@ def cancel_inline(comment_id:int):
     return f'<div id="reply_to_{comment_id}" class="hidable"></div>' # Hide the form
 
 
-@bp.route('/post/<int:post_id>/options_menu', methods=['GET'])
+@bp.route('/post/<int:post_id>/options_menu', defaults={'offer_markdown_source': 'False'}, methods=['GET'])
+@bp.route('/post/<int:post_id>/<string:offer_markdown_source>/options_menu', methods=['GET'])
 @block_bots
-def post_options(post_id: int):
+def post_options(post_id: int, offer_markdown_source: str):
     post = Post.query.get_or_404(post_id)
     if post.deleted:
         if current_user.is_anonymous:
@@ -935,7 +943,7 @@ def post_options(post_id: int):
                                                       PostBookmark.user_id == current_user.id).first()
         hidden = current_user.has_hidden_post(post)
 
-    return render_template('post/post_options.html', post=post, existing_bookmark=existing_bookmark, hidden=hidden)
+    return render_template('post/post_options.html', post=post, existing_bookmark=existing_bookmark, hidden=hidden, offer_markdown_source=offer_markdown_source)
 
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>/options_menu', methods=['GET'])
@@ -1140,7 +1148,11 @@ def post_delete(post_id: int):
             abort(403)
         form = DeleteConfirmationForm()
         if form.validate_on_submit():
-            post_delete_post(community, post, current_user.id, form.reason.data)
+            if post.user_id != current_user.id:
+                mod_remove_post(post.id, form.reason.data, SRC_WEB, None)
+            else:
+                delete_post(post.id, True, SRC_WEB, None)
+            flash(_('Post deleted.'))
             ref = request.form.get('referrer')
             if '/post/' not in ref:
                 return redirect(ref)
@@ -1154,27 +1166,6 @@ def post_delete(post_id: int):
                                    title=_('Are you sure you want to delete the post "%(post_title)s"?',
                                            post_title=post.title),
                                    form=form)
-
-
-def post_delete_post(community: Community, post: Post, user_id: int, reason: str | None, federate_deletion=True):
-    user: User = db.session.query(User).get(user_id)
-    from app import redis_client
-    with redis_client.lock(f"lock:post:{post.id}", timeout=10, blocking_timeout=6):
-        if post.url:
-            post.calculate_cross_posts(delete_only=True)
-        post.deleted = True
-        post.deleted_by = user_id
-        post.author.post_count -= 1
-        community.post_count -= 1
-        if hasattr(g, 'site'):  # g.site is invalid when running from cli
-            flash(_('Post deleted.'))
-        db.session.commit()
-
-    if federate_deletion:
-        if post.user_id != user.id:
-            mod_remove_post(post.id, reason, SRC_WEB, None)
-        else:
-            delete_post(post.id, SRC_WEB, None)
 
 
 @bp.route('/post/<int:post_id>/restore', methods=['POST'])
@@ -1266,11 +1257,11 @@ def post_reminder(post_id: int):
     form = NewReminderForm()
     if form.validate_on_submit():
         import dateparser
-        import arrow
+        import pendulum
         remind_at = dateparser.parse(form.remind_at.data, settings={'RELATIVE_BASE': datetime.now(),
                                                                     "RETURN_AS_TIMEZONE_AWARE": True}, languages=[get_locale()])
-        remind_at_utc = arrow.get(remind_at).to('UTC')
-        reminder = Reminder(user_id=current_user.id, remind_at=remind_at_utc.naive, reminder_type=1, reminder_destination=post.id)
+        remind_at_utc = pendulum.instance(remind_at).in_tz('UTC')
+        reminder = Reminder(user_id=current_user.id, remind_at=remind_at_utc.naive(), reminder_type=1, reminder_destination=post.id)
         db.session.add(reminder)
         db.session.commit()
         flash(_('Reminder added for %(when)s', when=str(remind_at)))
@@ -1291,11 +1282,11 @@ def post_reply_reminder(post_reply_id: int):
     form = NewReminderForm()
     if form.validate_on_submit():
         import dateparser
-        import arrow
+        import pendulum
         remind_at = dateparser.parse(form.remind_at.data, settings={'RELATIVE_BASE': datetime.now(),
                                                                     "RETURN_AS_TIMEZONE_AWARE": True})
-        remind_at_utc = arrow.get(remind_at).to("UTC")
-        reminder = Reminder(user_id=current_user.id, remind_at=remind_at_utc.naive, reminder_type=2, reminder_destination=post_reply.id)
+        remind_at_utc = pendulum.instance(remind_at).in_tz("UTC")
+        reminder = Reminder(user_id=current_user.id, remind_at=remind_at_utc.naive(), reminder_type=2, reminder_destination=post_reply.id)
         db.session.add(reminder)
         db.session.commit()
         flash(_('Reminder added for %(when)s', when=str(remind_at)))
@@ -2349,7 +2340,8 @@ def post_check_ai(post_id):
                 return f'<div class="w-100 alert {result_type}">Detection blocked</div>'
             output = f'<div class="w-100 alert {result_type}">'
             output += 'Post: ' + is_ai_result['detection_result'].upper()
-            output += f' <a href="#" hx-post="/post/{post.id}/set_ai">' + _('Set AI flag on this post') + '</a>'
+            if result_type == 'alert-warning':
+                output += f' <a href="#" hx-post="/post/{post.id}/set_ai">' + _('Set AI flag on this post') + '</a>'
             output += '<br>'
             output += f"{int(is_ai_result['confidence'] * 100)}% confident"
             output += '</div>'

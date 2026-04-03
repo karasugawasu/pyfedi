@@ -18,6 +18,7 @@ from app import db, cache, celery, httpx_client, limiter, plugins
 from app.activitypub.signature import RsaKeys, send_post_request
 from app.activitypub.util import extract_domain_and_actor, find_actor_or_create
 from app.activitypub.actor import schedule_actor_refresh
+from app.api.alpha.views import cached_modlist_for_community, cached_modlist_for_user
 from app.community.forms import SearchRemoteCommunity, CreateDiscussionForm, CreateImageForm, CreateLinkForm, \
     ReportCommunityForm, \
     DeleteCommunityForm, AddCommunityForm, EditCommunityForm, AddModeratorForm, BanUserCommunityForm, \
@@ -27,7 +28,8 @@ from app.community.forms import SearchRemoteCommunity, CreateDiscussionForm, Cre
 from app.community.util import search_for_community, actor_to_community, \
     save_icon_file, save_banner_file, \
     delete_post_from_community, delete_post_reply_from_community, \
-    find_potential_moderators, hashtags_used_in_community, publicize_community
+    find_potential_moderators, hashtags_used_in_community, publicize_community, \
+    community_theme_list
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, POST_TYPE_LINK, POST_TYPE_ARTICLE, POST_TYPE_IMAGE, \
     SUBSCRIPTION_PENDING, SUBSCRIPTION_MODERATOR, REPORT_STATE_NEW, REPORT_STATE_ESCALATED, REPORT_STATE_RESOLVED, \
     REPORT_STATE_DISCARDED, POST_TYPE_VIDEO, NOTIF_COMMUNITY, NOTIF_POST, POST_TYPE_POLL, MICROBLOG_APPS, SRC_WEB, \
@@ -89,6 +91,7 @@ def add_local():
         form.nsfw.render_kw = {'disabled': True}
 
     form.languages.choices = languages_for_form(all_languages=True)
+    form.theme.choices = community_theme_list()
 
     if form.validate_on_submit():
         if form.url.data.strip().lower().startswith('/c/'):
@@ -111,6 +114,7 @@ def add_local():
             form.invitations.data = 0
         community = Community(title=form.community_name.data, name=form.url.data,
                               description=piefed_markdown_to_lemmy_markdown(form.description.data),
+                              theme=form.theme.data,
                               nsfw=form.nsfw.data, private_key=private_key,
                               public_key=public_key, description_html=markdown_to_html(form.description.data),
                               local_only=form.local_only.data, posting_warning=form.posting_warning.data,
@@ -1192,6 +1196,7 @@ def community_edit(community_id: int):
     if community.is_owner() or current_user.is_admin() or community.is_moderator():
         form = EditCommunityForm()
         form.topic.choices = topics_for_form(0)
+        form.theme.choices = community_theme_list()
         form.languages.choices = languages_for_form(all_languages=True)
         if g.site.enable_nsfw is False:
             form.nsfw.render_kw = {'disabled': True}
@@ -1207,6 +1212,7 @@ def community_edit(community_id: int):
             community.title = form.title.data
             community.description = piefed_markdown_to_lemmy_markdown(form.description.data)
             community.description_html = markdown_to_html(form.description.data, anchors_new_tab=False)
+            community.theme = form.theme.data
             community.posting_warning = form.posting_warning.data
             community.nsfw = form.nsfw.data
             community.ai_generated = form.ai_generated.data
@@ -1267,6 +1273,7 @@ def community_edit(community_id: int):
         else:
             form.title.data = community.title
             form.description.data = community.description
+            form.theme.data = community.theme
             form.posting_warning.data = community.posting_warning
             form.nsfw.data = community.nsfw
             form.ai_generated.data = community.ai_generated
@@ -1397,7 +1404,10 @@ def community_make_owner(community_id: int, user_id: int):
 
         cache.delete_memoized(community_moderators, community_id)
         cache.delete_memoized(Community.moderators, community)
-    
+
+        cache.delete_memoized(cached_modlist_for_community)
+        cache.delete_memoized(cached_modlist_for_user, user)
+
     else:
         abort(401)
     
@@ -1436,6 +1446,9 @@ def community_remove_owner(community_id: int, user_id: int):
 
             cache.delete_memoized(community_moderators, community_id)
             cache.delete_memoized(Community.moderators, community)
+
+            cache.delete_memoized(cached_modlist_for_community)
+            cache.delete_memoized(cached_modlist_for_user, user)
 
     else:
         abort(401)
