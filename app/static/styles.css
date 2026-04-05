@@ -2183,7 +2183,6 @@ details {
 }
 .comment .comment_actions .dropdown-menu.show {
   z-index: 1001;
-  background-color: var(--bs-body-bg);
 }
 .comment .comment_actions .dropdown-item {
   white-space: unset;
