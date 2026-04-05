@@ -7,7 +7,7 @@
         {% endif -%}
         <span class="score" title="{{ post.up_votes }}, {{ post.down_votes }}" aria-live="assertive" aria-label="{{ _('Score: %(score)s', score=shorten_number(post.up_votes - post.down_votes)) }}.">{{ shorten_number(post.up_votes - post.down_votes) }}</span>
         {%- if (can_downvote_here or can_downvote(current_user, post.community, communities_banned_from_list)) and not disable_voting -%}
-                <div class="downvote_button {{ 'voted_down' if in_sorted_list(recently_downvoted, post.id) }}" role="button" aria-label="{{ _('DownVote button, %(num)d downvotes so far.', mi,=post.down_votes) }}" aria-live="assertive"
+                <div class="downvote_button {{ 'voted_down' if in_sorted_list(recently_downvoted, post.id) }}" role="button" aria-label="{{ _('DownVote button, %(num)d downvotes so far.', num=post.down_votes) }}" aria-live="assertive"
                  hx-post="/post/{{ post.id }}/downvote/default" hx-trigger="click throttle:1s" hx-target="closest .voting_buttons_new" tabindex="0">
                         <span class="fe {{ 'fe-arrow-down-circle' if in_sorted_list(recently_downvoted, post.id) else 'fe-arrow-down' }}"></span>
                 </div>
