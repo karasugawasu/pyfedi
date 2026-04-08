@@ -293,6 +293,7 @@ def admin_misc():
         set_setting('cache_remote_images_locally', form.cache_remote_images_locally.data)
         set_setting('allow_video_file_uploads', form.allow_video_file_uploads.data)
         set_setting('enable_report_em_dash_replies', form.enable_report_em_dash_replies.data)
+        set_setting('limit_one_em_report_per_user', form.limit_one_em_report_per_user.data)
         flash(_('Settings saved.'))
     elif request.method == 'GET':
         form.enable_downvotes.data = site.enable_downvotes
@@ -330,6 +331,7 @@ def admin_misc():
         form.cache_remote_images_locally.data = get_setting('cache_remote_images_locally', True)
         form.allow_video_file_uploads.data = get_setting('allow_video_file_uploads', 'no')
         form.enable_report_em_dash_replies.data = get_setting('enable_report_em_dash_replies', True)
+        form.limit_one_em_report_per_user.data = get_setting('limit_one_em_report_per_user', False)
     return render_template('admin/misc.html', title=_('Misc settings'), form=form, close_form=close_form)
 
 
@@ -1932,6 +1934,7 @@ def admin_instance_edit(instance_id):
         instance.gone_forever = form.gone_forever.data
         instance.trusted = form.trusted.data
         instance.posting_warning = form.posting_warning.data
+        instance.popular = form.popular.data
         instance.admin_note = form.admin_note.data
         instance.inbox = form.inbox.data
 
@@ -1950,6 +1953,7 @@ def admin_instance_edit(instance_id):
         form.gone_forever.data = instance.gone_forever
         form.trusted.data = instance.trusted
         form.posting_warning.data = instance.posting_warning
+        form.popular.data = instance.popular
         form.admin_note.data = instance.admin_note
         form.inbox.data = instance.inbox
         if instance.software == 'piefed':

@@ -21,13 +21,13 @@ from typing import List, Tuple, Optional
 from urllib.parse import urlparse, parse_qs, urlencode
 from zoneinfo import available_timezones
 
-import arrow
+import pendulum
 import flask
 import httpx
 import jwt
 import markdown2
 import redis
-from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, NavigableString
 from babel.numbers import format_compact_decimal
 import orjson
 
@@ -59,7 +59,7 @@ from captcha.image import ImageCaptcha
 from app.models import Settings, Domain, Instance, BannedInstances, User, Community, DomainBlock, IpBan, \
     Site, Post, utcnow, Filter, CommunityMember, InstanceBlock, CommunityBan, Topic, UserBlock, Language, \
     File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair, CommunityJoinRequest, Notification, UserNote, \
-    PostReply, PostReplyBookmark, AllowedInstances, InstanceBan, Tag, Emoji, UserExtraField
+    PostReply, PostReplyBookmark, AllowedInstances, InstanceBan, Tag, Emoji, UserExtraField, ArchivedPostReply
 
 
 # Flask's render_template function, with support for themes added
@@ -305,7 +305,7 @@ LINK_PATTERN = re.compile(
             (?:https?://|(?<!//)www\.)    # prefix - https:// or www.
             \w[\w_\-]*(?:\.\w[\w_\-]*)*   # host
             [^<>\s\"']*                   # rest of url
-            (?<![?!.,:*_~);])             # exclude trailing punctuation
+            (?<![?!.,:*_~;])(?<!\)\))     # exclude trailing punctuation
             (?=[?!.,:*_~);]?(?:[<\s]|$))  # make sure that we're not followed by " or ', i.e. we're outside of href="...".
         )
     """,
@@ -411,6 +411,8 @@ def allowlist_html(html: str, a_target='_blank', test_env=False) -> str:
         # Handle closing tags by removing the leading slash before extracting tag name
         if tag_content.startswith('/'):
             tag_name = tag_content[1:].split()[0]
+        elif tag_content.endswith('/'):
+            tag_name = tag_content[:-1].split()[0]
         else:
             tag_name = tag_content.split()[0]
         
@@ -829,6 +831,43 @@ def handle_blockquotes(text: str) -> str:
     return text
 
 
+def links_with_parens(text: str) -> str:
+    """Try to fix links that have trailing parentheses"""
+
+    soup = BeautifulSoup(text, 'html.parser')
+
+    for link in soup.find_all("a"):
+        target_url = link.get("href")
+        contents = link.text
+        following_text = link.next_sibling
+
+        num_left_paren = target_url.count("(")
+        num_right_paren = target_url.count(")")
+
+        if following_text and isinstance(following_text, NavigableString) and following_text.startswith(")"):
+            if num_left_paren - num_right_paren == 1:
+                # Link dropped the trailing paren, add it back and remove it from trailing text
+                link['href'] = link['href'] + ")"
+                following_text.replace_with(following_text[1:])
+                link.string = contents + ")"
+        elif target_url.endswith(")"):
+            if num_right_paren - num_left_paren == 1:
+                # Trailing paren added to link, strip it and add it to trailing text
+                link['href'] = link['href'][:-1]
+                link.string = contents[:-1]
+                if not following_text or not isinstance(following_text, NavigableString):
+                    link.insert_after(")")
+                else:
+                    following_text.replace_with(")" + following_text)
+    
+    better_html = str(soup)
+
+    # This escapes <hr/> for some reason, so need to fix that
+    better_html.replace("<hr/>;", "<hr />")
+
+    return better_html
+
+
 # use this for Markdown irrespective of origin, as it can deal with both soft break newlines ('\n' used by PieFed) and hard break newlines ('  \n' or ' \\n')
 # ' \\n' will create <br /><br /> instead of just <br />, but hopefully that's acceptable.
 def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_target="_blank", test_env=False) -> str:
@@ -890,6 +929,7 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
         
         raw_html = handle_lemmy_spoilers(raw_html)
         raw_html = make_quotes_straight(raw_html)
+        raw_html = links_with_parens(raw_html)
 
         return allowlist_html(raw_html, a_target=a_target if anchors_new_tab else '', test_env=test_env)
     else:
@@ -1834,6 +1874,9 @@ def can_create_post(user, content: Community) -> bool:
         return False
 
     if content.id in communities_banned_from(user.id):
+        return False
+
+    if content.instance_id in banned_instances(user.id):
         return False
 
     return True
@@ -3285,7 +3328,7 @@ def post_ids_to_models(post_ids: List[int], sort: str):
     elif sort == 'scaled':
         posts = posts.order_by(desc(Post.ranking_scaled)).order_by(desc(Post.ranking)).order_by(desc(Post.posted_at))
     elif sort.startswith('top'):
-        posts = posts.order_by(desc(Post.up_votes - Post.down_votes))
+        posts = posts.order_by(desc(Post.score))
     elif sort == 'new':
         posts = posts.order_by(desc(Post.posted_at))
     elif sort == 'old':
@@ -3443,32 +3486,44 @@ def move_file_to_s3(file_id, s3):
                     db.session.commit()
 
 
-def days_to_add_for_next_month(today):
+def days_to_add_for_next_month(start_date):
+    """
+    Calculate days to add to get to the same day next month.
+    Uses the "try and backtrack" approach:
+    1. Try to use the same day as start_date
+    2. If that's invalid (e.g., Feb 31), subtract a day and try again
+    3. Repeat until we find a valid date
+    
+    This ensures that posts scheduled for the 31st will:
+    - Use the 31st in months that have 31 days
+    - Use the last day (28-30) in months that don't have 31 days
+    - Return to the 31st in subsequent months that have 31 days
+    """
     # Calculate the new month and year
-    new_month = today.month + 1
-    new_year = today.year
+    new_month = start_date.month + 1
+    new_year = start_date.year
 
     if new_month > 12:
         new_month = 1
         new_year += 1
 
-    # Get the last day of the new month
-    if new_month in {1, 3, 5, 7, 8, 10, 12}:
-        last_day = 31
-    elif new_month in {4, 6, 9, 11}:
-        last_day = 30
-    else:  # February
-        # Check for leap year
-        if (new_year % 4 == 0 and new_year % 100 != 0) or (new_year % 400 == 0):
-            last_day = 29
-        else:
-            last_day = 28
-
-    # Calculate the new day
-    new_day = min(today.day, last_day)
+    # Try to use the same day as start_date, backing off if needed
+    new_day = start_date.day
+    
+    # Try to create the date, backing off one day at a time if invalid
+    while True:
+        try:
+            target_date = datetime(new_year, new_month, new_day)
+            break  # Success!
+        except ValueError:
+            # Invalid date (e.g., Feb 31), try the previous day
+            new_day -= 1
+            if new_day < 1:
+                # Should never happen, but just in case
+                new_day = 1
 
     # Calculate the number of days to add
-    days_to_add = (datetime(new_year, new_month, new_day) - today).days + 1
+    days_to_add = (target_date - start_date).days
 
     return days_to_add
 
@@ -3480,7 +3535,7 @@ def find_next_occurrence(post: Post) -> timedelta:
         elif post.repeat == 'weekly':
             return timedelta(days=7)
         elif post.repeat == 'monthly':
-            days_to_add = days_to_add_for_next_month(utcnow())
+            days_to_add = days_to_add_for_next_month(post.scheduled_for)
             return timedelta(days=days_to_add)
 
     return timedelta(seconds=0)
@@ -3510,6 +3565,8 @@ def notif_id_to_string(notif_id) -> str:
         return _('Admin')
     if notif_id == NOTIF_NEW_MOD:
         return _('Admin')
+    if notif_id == NOTIF_ANSWER:
+        return _('Answer')
 
     # --- mod/admin level ---
     if notif_id == NOTIF_REPORT:
@@ -3613,13 +3670,14 @@ def notify_admin(title, url, author_id, notif_type, subtype, targets):
     db.session.commit()
 
 
-def reported_posts(user_id, admin_ids) -> List[int]:
+@cache.memoize(timeout=60)
+def reported_posts(user_id: int, is_admin: bool) -> List[int]:
     if user_id is None:
         return []
-    if user_id in admin_ids:
+    if is_admin:
         post_ids = list(db.session.execute(text('SELECT id FROM "post" WHERE reports > 0')).scalars())
     else:
-        community_ids = [community.id for community in moderating_communities(user_id)]
+        community_ids = moderating_communities_ids(user_id)
         if len(community_ids) > 0:
             post_ids = list(db.session.execute(text('SELECT id FROM "post" WHERE reports > 0 AND community_id IN :community_ids'),
                                                {'community_ids': tuple(community_ids)}).scalars())
@@ -3674,6 +3732,7 @@ def possible_communities():
     return which_community
 
 
+@cache.memoize(timeout=300)
 def user_notes(user_id):
     if user_id is None:
         return {}
@@ -4090,10 +4149,12 @@ def archive_post(post_id: int):
                 )
 
                 for reply in session.query(PostReply).filter(PostReply.post_id == post.id).order_by(desc(PostReply.created_at)):
+                    session.add(ArchivedPostReply(user_id=reply.user_id, post_id=post.id, post_reply_id=reply.id,
+                                                  created_at=reply.created_at))
                     if reply.id not in bookmarked_reply_ids:
                         reply.delete_dependencies()
                         session.delete(reply)
-                        session.commit()
+                    session.commit()
 
     except Exception:
         session.rollback()
@@ -4300,6 +4361,16 @@ def humanize_number(value):
     return format_compact_decimal(value, locale=g.locale)
 
 
+def round_invisible_digits(value):
+    """
+    Ensure 1.0k Users always uses the 'many' plural form, but for smaller numbers
+    like 123 Users, respect the usual language rules.
+    """
+    if format_compact_decimal(value, locale=g.locale) == str(value):
+        return value
+    return int(value / 1000) * 1000
+
+
 def debug_checkpoint(name: str):
     """
     record a named debug checkpoint.
@@ -4327,9 +4398,9 @@ def get_site_as_dict() -> dict:
 
 def localize_datetime(inp, locale='en'):
     try:
-        return arrow.get(inp).humanize(locale=locale)
+        return pendulum.instance(inp).diff_for_humans(locale=locale)
     except ValueError:
-        return arrow.get(inp).humanize(locale='en')
+        return pendulum.instance(inp).diff_for_humans(locale='en')
 
 
 def show_reason_why_no_federation(instance_id):
@@ -4340,5 +4411,5 @@ def show_reason_why_no_federation(instance_id):
 
     if instance_id in banned_instances(current_user.get_id()):
         instance = Instance.query.get(instance_id)
-        flash(_('You have been banned from %(instance_name)s which hosts this community so none of your posts or comments will be accepted by them.',
+        flash(_('You have been banned from %(instance_name)s which hosts this community.',
                 instance_name=instance.domain), 'warning')

@@ -13,7 +13,7 @@ from typing import List, Union
 from urllib.parse import urlparse, parse_qs, urlencode
 from zoneinfo import ZoneInfo
 
-import arrow
+import pendulum
 import jwt
 from flask import current_app, g, json
 from flask_babel import _, lazy_gettext as _l
@@ -97,6 +97,7 @@ class Instance(db.Model):
     posting_warning = db.Column(db.String(512))
     nodeinfo_href = db.Column(db.String(100))
     admin_note = db.Column(db.Text)
+    popular = db.Column(db.Boolean, default=True)  # New communities from here have their popular flag set
 
     __table_args__ = (
         Index('ix_instance_created_at_active', created_at.desc(),
@@ -532,6 +533,7 @@ class Community(db.Model):
     title = db.Column(db.String(256))
     description = db.Column(db.Text)  # markdown
     description_html = db.Column(db.Text)  # html equivalent of above markdown
+    theme = db.Column(db.String(20), default='')
     rules = db.Column(db.Text)  # this is unused but do not remove, it breaks everything
     content_warning = db.Column(db.Text)  # "Are you sure you want to view this community?"
     subscriptions_count = db.Column(db.Integer, default=0)  # Local subscribers
@@ -773,6 +775,7 @@ class Community(db.Model):
 
     def humanize_subscribers(self, total=True, **kwargs):
         """Return an abbreviated, human readable number of followers (e.g. 1.2k instead of 1215)"""
+        from app.utils import humanize_number
 
         if "value" in kwargs:
             subscribers = kwargs.get("value")
@@ -781,14 +784,8 @@ class Community(db.Model):
                 subscribers = self.total_subscriptions_count if self.total_subscriptions_count else self.subscriptions_count
             else:
                 subscribers = self.subscriptions_count
-        
-        if not subscribers:
-            return "0"
 
-        if subscribers < 1000:
-            return str(subscribers)
-        else:
-            return str(int(subscribers / 100) / 10) + "k"
+        return humanize_number(subscribers)
     
     def notify_new_posts(self, user_id: int) -> bool:
         existing_notification = db.session.query(NotificationSubscription).\
@@ -984,6 +981,7 @@ class User(UserMixin, db.Model):
     bot_override = db.Column(db.Boolean, default=False, index=True)
     suppress_crossposts = db.Column(db.Boolean, default=False, index=True)
     vote_privately = db.Column(db.Boolean, default=False)
+    finished_onboarding = db.Column(db.Boolean, default=False)
     ignore_bots = db.Column(db.Integer, default=0)
     unread_notifications = db.Column(db.Integer, default=0)
     ip_address = db.Column(db.String(50))
@@ -995,6 +993,7 @@ class User(UserMixin, db.Model):
     default_filter = db.Column(db.String(25), default='subscribed')
     theme = db.Column(db.String(20), default='')
     font = db.Column(db.String(25), default='')
+    allow_community_themes = db.Column(db.Boolean, default=True, server_default="1")
     community_keyword_filter = db.Column(db.String(150))
     referrer = db.Column(db.String(256))
     markdown_editor = db.Column(db.Boolean, default=True)
@@ -1423,6 +1422,7 @@ class User(UserMixin, db.Model):
         db.session.execute(text('DELETE FROM "hidden_posts" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.execute(text('DELETE FROM "read_posts" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.query(NotificationSubscription).filter(NotificationSubscription.user_id == self.id).delete()
+        db.session.query(ArchivedPostReply).filter(ArchivedPostReply.user_id == self.id).delete()
         db.session.query(Filter).filter(Filter.user_id == self.id).delete()
         db.session.query(UserFlair).filter(UserFlair.user_id == self.id).delete()
         db.session.query(UserFollower).filter(or_(UserFollower.local_user_id == self.id, UserFollower.remote_user_id == self.id)).delete()
@@ -1581,7 +1581,7 @@ class Post(db.Model):
     from_bot = db.Column(db.Boolean, default=False, index=True)
     created_at = db.Column(db.DateTime, index=True, default=utcnow)  # this is when the content arrived here
     posted_at = db.Column(db.DateTime, index=True, default=utcnow)  # this is when the original server created it
-    last_active = db.Column(db.DateTime, index=True, default=utcnow)
+    last_active = db.Column(db.DateTime, index=True)
     ip = db.Column(db.String(50))
     up_votes = db.Column(db.Integer, default=0)
     down_votes = db.Column(db.Integer, default=0)
@@ -2149,6 +2149,9 @@ class Post(db.Model):
                 if is_ai and is_ai.status_code == 200:
                     is_ai_result = is_ai.json()
                     if is_ai_result['confidence'] > 0.8:
+                        if is_ai_result['detection_result'] == 'ai':
+                            post.ai_generated = True
+                            db.session.commit()
                         # use redis to keep track of the posts this person has done in the last day and whether each is AI-generated
                         from app import redis_client
 
@@ -2270,6 +2273,7 @@ class Post(db.Model):
             db.session.query(Report).filter(Report.suspect_post_reply_id == reply.id).delete()
 
         if self.archived:
+            db.session.query(ArchivedPostReply).filter(ArchivedPostReply.post_id == self.id).delete()
             if self.archived.startswith(f'https://{current_app.config["S3_PUBLIC_URL"]}') and _store_files_in_s3():
                 from app.shared.tasks.maintenance import delete_from_s3
                 s3_path = self.archived.replace(f'https://{current_app.config["S3_PUBLIC_URL"]}/', '')
@@ -2404,9 +2408,9 @@ class Post(db.Model):
     def posted_at_localized(self, sort, locale):
         # some locales do not have a definition for 'weeks' so are unable to display some dates in some languages. Fall back to english for those languages.
         try:
-            return arrow.get(self.last_active if sort == 'active' else self.posted_at).humanize(locale=locale)
+            return pendulum.instance(self.last_active if sort == 'active' else self.posted_at).diff_for_humans(locale=locale)
         except ValueError:
-            return arrow.get(self.last_active if sort == 'active' else self.posted_at).humanize(locale='en')
+            return pendulum.instance(self.last_active if sort == 'active' else self.posted_at).diff_for_humans(locale='en')
 
     def notify_new_replies(self, user_id: int) -> bool:
         existing_notification = db.session.query(NotificationSubscription).\
@@ -2845,19 +2849,32 @@ class PostReply(db.Model):
 
         # LLM Detection
         if reply.body and '—' in reply.body and user.created_very_recently() and get_setting('enable_report_em_dash_replies', True):
-            # usage of em-dash is highly suspect.
-            from app.utils import notify_admin
-            # notify admin
-            targets_data = {'gen': '0',
-                            'suspect_user_id': user.id,
-                            'suspect_user_user_name': user.ap_id if user.ap_id else user.user_name,
-                            'source_instance_id': 1,
-                            'source_instance_domain': '',
-                            'reporter_id': 1,
-                            'reporter_user_name': 'automated'
-                            }
-            notify_admin('Used em-dash in comment - likely AI', f'/u/{user.link()}', 1,
-                         NOTIF_REPORT, 'user_reported', targets_data)
+            # Check if this user has already been reported
+            if get_setting('limit_one_em_report_per_user', False):
+                cache_report = True
+                previous_report = cache.get(f'em-dash_used_by_{repr(reply.author)}')
+            else:
+                cache_report = False
+                previous_report = None
+            
+            if not previous_report:
+                # usage of em-dash is highly suspect.
+                from app.utils import notify_admin
+                # notify admin
+                targets_data = {'gen': '0',
+                                'suspect_user_id': user.id,
+                                'suspect_user_user_name': user.ap_id if user.ap_id else user.user_name,
+                                'source_instance_id': 1,
+                                'source_instance_domain': '',
+                                'reporter_id': 1,
+                                'reporter_user_name': 'automated'
+                                }
+                notify_admin('Used em-dash in comment - likely AI', f'/u/{user.link()}', 1,
+                            NOTIF_REPORT, 'user_reported', targets_data)
+                
+                # Store this in redis for a day so that duplicate reports aren't created if that setting is enabled
+                if cache_report:
+                    cache.set(f'em-dash_used_by_{repr(reply.author)}', True, timeout=86400)
         elif current_app.config['DETECT_AI_ENDPOINT'] and user.created_very_recently() and len(reply.body) >= 250:
             # Use API to check new accounts to see if their comments are AI generated
             from app.utils import get_request, notify_admin
@@ -2940,9 +2957,9 @@ class PostReply(db.Model):
 
     def posted_at_localized(self, locale):
         try:
-            return arrow.get(self.posted_at).humanize(locale=locale)
+            return pendulum.instance(self.posted_at).diff_for_humans(locale=locale)
         except ValueError:
-            return arrow.get(self.posted_at).humanize(locale='en')
+            return pendulum.instance(self.posted_at).diff_for_humans(locale='en')
 
     # the ap_id of the parent object, whether it's another PostReply or a Post
     def in_reply_to(self):
@@ -3666,7 +3683,7 @@ class Site(db.Model):
     allowlist = db.Column(db.Text, default='')
     blocklist = db.Column(db.Text, default='')
     blocked_phrases = db.Column(db.Text, default='')  # discard incoming content with these phrases
-    auto_decline_referrers = db.Column(db.Text, default='rdrama.net\nahrefs.com\nkiwifarms.sh')  # automatically decline registration requests if the referrer is one of these
+    auto_decline_referrers = db.Column(db.Text, default='rdrama.net\nahrefs.com\nkiwifarms.sh\nkiwifarms.st')  # automatically decline registration requests if the referrer is one of these
     created_at = db.Column(db.DateTime, default=utcnow)
     updated = db.Column(db.DateTime, default=utcnow)
     last_active = db.Column(db.DateTime, default=utcnow)
@@ -4073,6 +4090,14 @@ class Emoji(db.Model):
     category = db.Column(db.String(20))
     aliases = db.Column(db.String(100), index=True)
     instance_id = db.Column(db.Integer, index=True)
+
+
+class ArchivedPostReply(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
+    post_id = db.Column(db.Integer, index=True)
+    post_reply_id = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime)
 
 
 def _large_community_subscribers() -> float:

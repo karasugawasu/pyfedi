@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 from datetime import datetime
 
 import boto3
-import arrow
 from PIL import Image, ImageOps
 from flask import flash, request, current_app, g
 from flask_babel import _, force_locale, gettext
@@ -738,7 +737,7 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
 
 
 # just for deletes by owner (mod deletes are classed as 'remove')
-def delete_post(post_id: int, src, auth):
+def delete_post(post_id: int, federate_deletion, src, auth):
     if src == SRC_API:
         user_id = authorise_api_user(auth)
     else:
@@ -747,17 +746,20 @@ def delete_post(post_id: int, src, auth):
         else:
             user_id = 1     # for remove_old_community_content()
 
-    post = db.session.query(Post).get(post_id)
-    if post.url:
-        post.calculate_cross_posts(delete_only=True)
+    from app import redis_client
+    with redis_client.lock(f"lock:post:{post_id}", timeout=10, blocking_timeout=6):
+        post = db.session.query(Post).get(post_id)
+        if post.url:
+            post.calculate_cross_posts(delete_only=True)
 
-    post.deleted = True
-    post.deleted_by = user_id
-    post.author.post_count -= 1
-    post.community.post_count -= 1
-    db.session.commit()
+        post.deleted = True
+        post.deleted_by = user_id
+        post.author.post_count -= 1
+        post.community.post_count -= 1
+        db.session.commit()
 
-    task_selector('delete_post', user_id=user_id, post_id=post.id)
+    if federate_deletion and post.status == POST_STATUS_PUBLISHED:
+        task_selector('delete_post', user_id=user_id, post_id=post.id)
 
     # remove any notifications about the post
     notifs = db.session.query(Notification).filter(Notification.targets.op("->>")("post_id").cast(Integer) == post.id)
@@ -1013,19 +1015,21 @@ def mod_remove_post(post_id: int, reason, src, auth):
     else:
         user = current_user
 
-    post = db.session.query(Post).get(post_id)
+    from app import redis_client
+    with redis_client.lock(f"lock:post:{post_id}", timeout=10, blocking_timeout=6):
+        post = db.session.query(Post).get(post_id)
 
-    if not post.community.is_moderator(user) and not user.is_admin_or_staff():
-        raise Exception('Does not have permission')
+        if not post.community.is_moderator(user) and not user.is_admin_or_staff():
+            raise Exception('Does not have permission')
 
-    if post.url:
-        post.calculate_cross_posts(delete_only=True)
+        if post.url:
+            post.calculate_cross_posts(delete_only=True)
 
-    post.deleted = True
-    post.deleted_by = user.id
-    post.author.post_count -= 1
-    post.community.post_count -= 1
-    db.session.commit()
+        post.deleted = True
+        post.deleted_by = user.id
+        post.author.post_count -= 1
+        post.community.post_count -= 1
+        db.session.commit()
 
     add_to_modlog('delete_post', actor=user, target_user=post.author, reason=reason,
                   community=post.community, post=post,
@@ -1054,18 +1058,20 @@ def mod_restore_post(post_id: int, reason, src, auth):
     else:
         user = current_user
 
-    post = db.session.query(Post).get(post_id)
-    if not post.community.is_moderator(user) and not user.is_admin_or_staff():
-        raise Exception('Does not have permission')
+    from app import redis_client
+    with redis_client.lock(f"lock:post:{post_id}", timeout=10, blocking_timeout=6):
+        post = db.session.query(Post).get(post_id)
+        if not post.community.is_moderator(user) and not user.is_admin_or_staff():
+            raise Exception('Does not have permission')
 
-    if post.url:
-        post.calculate_cross_posts()
+        if post.url:
+            post.calculate_cross_posts()
 
-    post.deleted = False
-    post.deleted_by = None
-    post.author.post_count += 1
-    post.community.post_count += 1
-    db.session.commit()
+        post.deleted = False
+        post.deleted_by = None
+        post.author.post_count += 1
+        post.community.post_count += 1
+        db.session.commit()
 
     add_to_modlog('restore_post', actor=user, target_user=post.author, reason=reason,
                   community=post.community, post=post,

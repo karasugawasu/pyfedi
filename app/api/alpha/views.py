@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 from flask import current_app, g
 from sqlalchemy import text, func, or_
@@ -13,9 +14,10 @@ from app.models import ChatMessage, Community, Language, Instance, Post, PostRep
     AllowedInstances, BannedInstances, utcnow, Site, Feed, FeedItem, Topic, CommunityFlair, \
     UserNote, Poll, Event, PollChoice
 from app.post.util import tags_to_string, flair_to_string
-from app.utils import blocked_communities, blocked_or_banned_instances, blocked_users, communities_banned_from, get_setting, \
+from app.utils import blocked_communities, blocked_or_banned_instances, blocked_users, communities_banned_from, \
+    get_setting, \
     num_topics, moderating_communities_ids, moderating_communities, joined_communities, \
-    moderating_communities_ids_all_users
+    moderating_communities_ids_all_users, community_membership_private
 from app.shared.community import get_comm_flair_list
 from app.shared.post import get_post_flair_list
 
@@ -24,7 +26,8 @@ from app.shared.post import get_post_flair_list
 
 
 def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, communities_moderating=None, banned_from=None,
-              bookmarked_posts=None, post_subscriptions=None, communities_joined=None, read_posts=None, content_filters=None) -> dict:
+              bookmarked_posts=None, post_subscriptions=None, communities_joined=None, read_posts=None, content_filters=None,
+              usernotes=None) -> dict:
     if isinstance(post, int):
         post = Post.query.get(post)
         if post is None:
@@ -104,8 +107,9 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
         counts = {'post_id': post.id, 'comments': post.reply_count, 'score': post.up_votes - post.down_votes, 'upvotes': post.up_votes,
                   'downvotes': post.down_votes,
                   'published': post.posted_at.isoformat(timespec="microseconds") + 'Z',
-                  'newest_comment_time': post.last_active.isoformat(timespec="microseconds") + 'Z',
+                  'newest_comment_time': post.last_active.isoformat(timespec="microseconds") + 'Z' if post.last_active else post.posted_at.isoformat(timespec="microseconds") + 'Z',
                   'cross_posts': len(post.cross_posts) if post.cross_posts else 0}
+        
         if user_id:
             if bookmarked_posts is None:
                 bookmarked = db.session.execute(
@@ -186,7 +190,7 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
         
         v2['flair_list'] = post_flair
 
-        creator = user_view(user=post.author, variant=1, stub=True, flair_community_id=post.community_id, user_id=user_id)
+        creator = user_view(user=post.author, variant=1, stub=True, flair_community_id=post.community_id, user_id=user_id, usernotes=usernotes)
         community = community_view(community=post.community, variant=1, stub=True)
         if user_id:
             if hasattr(g, 'user'):
@@ -280,6 +284,9 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
                 except NoResultFound:
                     continue
 
+        if post.community.private and post.community_id not in community_membership_private(user_id):
+            raise Exception('Private community - membership required')
+
         v3 = {'post_view': post_view(post=post, variant=2, user_id=user_id, communities_moderating=communities_moderating),
               'community_view': community_view(community=post.community, variant=2, user_id=user_id),
               'moderators': modlist,
@@ -305,7 +312,9 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
 
 
 # 'user' param can be anyone (including the logged in user), 'user_id' param belongs to the user making the request
-def user_view(user: User | int, variant, stub=False, user_id=None, flair_community_id=None) -> dict:
+@cache.memoize(timeout=600)
+def user_view(user: User | int, variant, stub=False, user_id=None, flair_community_id=None, usernotes=None) -> dict:
+
     if isinstance(user, int):
         user = User.query.get(user)
 
@@ -345,9 +354,15 @@ def user_view(user: User | int, variant, stub=False, user_id=None, flair_communi
                 user_field['text'] = field.text
                 v1['extra_fields'].append(user_field)
         if user_id:
-            usernote = UserNote.query.filter(UserNote.target_id == user.id, UserNote.user_id == user_id).first()
-            if usernote:
-                v1['note'] = usernote.body
+            usernote_body = None
+            if usernotes is not None:
+                usernote_body = usernotes.get(user.id, None)
+            else:
+                usernote = UserNote.query.filter(UserNote.target_id == user.id, UserNote.user_id == user_id).first()
+                if usernote:
+                    usernote_body = usernote.body
+            if usernote_body:
+                v1['note'] = usernote_body
 
         return v1
 
@@ -976,7 +991,7 @@ def feed_view(feed: Feed | int, variant: int, user_id, subscribed, include_commu
 
         v1['communities'] = []
         if include_communities:
-            for community in Community.query.filter(Community.banned == False).\
+            for community in Community.query.filter(Community.banned == False, Community.private == False).\
                 join(FeedItem, FeedItem.community_id == Community.id).filter(FeedItem.feed_id == feed.id):
                 if community.id not in blocked_community_ids and \
                         community.instance_id not in blocked_instance_ids and \
@@ -1091,7 +1106,7 @@ def topic_view(topic: Topic | int, variant: int, communities_moderating, banned_
 
         v1['communities'] = []
         if include_communities:
-            for community in Community.query.filter(Community.banned == False, Community.topic_id == topic.id):
+            for community in Community.query.filter(Community.banned == False, Community.topic_id == topic.id, Community.private == False):
                 if community.id not in blocked_community_ids and \
                         community.instance_id not in blocked_instance_ids and \
                         community.id not in banned_from:
@@ -1240,7 +1255,7 @@ def federated_instances_view():
     return v1
 
 
-@cache.memoize(timeout=60)
+@cache.memoize(timeout=3000)
 def cached_modlist_for_community(community_id):
     moderator_ids = db.session.execute(
         text('SELECT user_id FROM "community_member" WHERE community_id = :community_id and (is_moderator = True or is_owner = True)'),
@@ -1255,7 +1270,7 @@ def cached_modlist_for_community(community_id):
     return modlist
 
 
-@cache.memoize(timeout=60)
+@cache.memoize(timeout=3000)
 def cached_modlist_for_user(user):
     community_ids = db.session.execute(
         text('SELECT community_id FROM "community_member" WHERE user_id = :user_id and (is_moderator = True or is_owner = True)'),

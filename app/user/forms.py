@@ -60,9 +60,9 @@ class SettingsForm(FlaskForm):
                                         render_kw={'class':'form-multicheck-columns'})
     newsletter = BooleanField(_l('Subscribe to email newsletter'))
     email_unread = BooleanField(_l('Receive email about missed notifications'))
-    ignore_bots = BooleanField(_l('Hide posts by bots'))
-    nsfw = BooleanField(_l('Show NSFW posts'))
-    nsfl = BooleanField(_l('Show NSFL posts'))
+    ignore_bots = BooleanField(_l('Posts by bots'))
+    nsfw = BooleanField(_l('NSFW posts'))
+    nsfl = BooleanField(_l('NSFL posts'))
     reply_collapse_threshold = IntegerField(_l('Reply collapse threshold'), validators=[Optional()])
     reply_hide_threshold = IntegerField(_l('Reply hide threshold'), validators=[Optional()])
     markdown_editor = BooleanField(_l('Use markdown editor GUI when writing'))
@@ -112,7 +112,8 @@ class SettingsForm(FlaskForm):
              ('roboto', _l('Roboto - pretty')),
              ]
     font = SelectField(_l('Font'), choices=fonts, validators=[Optional()], coerce=str,
-                               render_kw={'class': 'form-select'})
+                       render_kw={'class': 'form-select'})
+    allow_community_themes = BooleanField(_l('Allow community themes'))
     code_styles = ['autumn', 'borland', 'bw', 'colorful', 'default', 'emacs', 'friendly', 'fruity', 'manni', 'monokai',
                    'murphy', 'native', 'pastie', 'perldoc', 'tango', 'trac', 'vim', 'vs']
     code_style = SelectField(_l('Code syntax highlighting color scheme'), choices=code_styles, coerce=str,
@@ -124,7 +125,16 @@ class SettingsForm(FlaskForm):
         ('3', _l('All instances')),
     ]
     accept_private_messages = SelectField(_l('Accept private messages from'), choices=accept_from, coerce=int, render_kw={'class': 'form-select'})
-    max_hours_per_day = IntegerField(_l('Warn me after using PieFed for this many hours per day'), validators=[Optional()])
+    max_hours_per_day = IntegerField(_l('Stop me from using PieFed after this many hours per day'), validators=[Optional()])
+    max_hours_change_restriction = SelectField(_l('When changes to this limit will be possible'),
+                                               choices=[
+                                                  ('anytime', _l('Anytime')),
+                                                  ('1day', _l('In 1 day')),
+                                                  ('1month', _l('In 1 month')),
+                                                  ('2months', _l('In 2 months'))
+                                               ],
+                                               coerce=str,
+                                               render_kw={'class': 'form-select'})
     additional_css = TextAreaField(_l('Additional CSS'))
     submit = SubmitField(_l('Save settings'))
 
@@ -191,13 +201,13 @@ class FilterForm(FlaskForm):
                          (1, _l('Hide completely')),
                          (2, _l('Label as AI')),
                          (3, _l('Make post semi-transparent'))]
-    ignore_bots = SelectField(_l('Hide posts by bots'), choices=hide_type_choices,
+    ignore_bots = SelectField(_l('Posts by bots'), choices=hide_type_choices,
                               default=0, coerce=int, render_kw={'class': 'form-select'})
-    hide_nsfw = SelectField(_l('Show NSFW posts'), choices=hide_type_choices,
+    hide_nsfw = SelectField(_l('NSFW posts'), choices=hide_type_choices,
                             default=1, coerce=int, render_kw={'class': 'form-select'})
-    hide_nsfl = SelectField(_l('Show NSFL posts'), choices=hide_type_choices,
+    hide_nsfl = SelectField(_l('NSFL posts'), choices=hide_type_choices,
                             default=1, coerce=int, render_kw={'class': 'form-select'})
-    hide_gen_ai = SelectField(_l('Show AI-generated posts'), choices=ai_hide_type_choices,
+    hide_gen_ai = SelectField(_l('AI-generated posts'), choices=ai_hide_type_choices,
                             default=0, coerce=int, render_kw={'class': 'form-select'})
     reply_collapse_threshold = IntegerField(_l('Reply collapse threshold'))
     reply_hide_threshold = IntegerField(_l('Reply hide threshold'))

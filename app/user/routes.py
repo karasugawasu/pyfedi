@@ -1,6 +1,5 @@
 import json as python_json
 import os
-import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -23,7 +22,7 @@ from app.ldap_utils import sync_user_to_ldap
 from app.models import Post, Community, CommunityMember, User, PostReply, PostVote, Notification, utcnow, File, Site, \
     Instance, Report, UserBlock, CommunityBan, CommunityJoinRequest, CommunityBlock, Filter, Domain, DomainBlock, \
     InstanceBlock, NotificationSubscription, PostBookmark, PostReplyBookmark, read_posts, Topic, UserNote, \
-    UserExtraField, Feed, FeedMember, IpBan, user_file
+    UserExtraField, Feed, FeedMember, IpBan, user_file, ArchivedPostReply
 from app.shared.site import block_remote_instance
 from app.shared.tasks import task_selector
 from app.shared.upload import process_file_delete, process_upload
@@ -32,7 +31,9 @@ from app.user import bp
 from app.user.forms import ProfileForm, SettingsForm, DeleteAccountForm, ReportUserForm, \
     FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm, UserNoteForm, BanUserForm, DeleteFileForm, \
     UploadFileForm, BlockUserForm, BlockCommunityForm, BlockDomainForm, BlockInstanceForm, UnsubAllForm
-from app.user.utils import purge_user_then_delete, unsubscribe_from_community, search_for_user
+from app.user.utils import purge_user_then_delete, unsubscribe_from_community, search_for_user, _get_user_moderates, \
+    _get_user_upvoted_posts, _get_user_subscribed_communities, _get_user_posts, _get_user_post_replies, \
+    _get_user_archived_replies, _get_user_posts_and_replies, _get_user_same_ip
 from app.utils import render_template, markdown_to_html, user_access, markdown_to_text, shorten_string, \
     gibberish, file_get_contents, community_membership, user_filters_home, \
     user_filters_posts, user_filters_replies, theme_list, \
@@ -59,129 +60,6 @@ def show_profile_by_id(user_id):
     return show_profile(user)
 
 
-def _get_user_posts(user, post_page):
-    """Get posts for a user based on current user's permissions."""
-    base_query = Post.query.filter_by(user_id=user.id).filter(Post.community_id.not_in(community_membership_private(user.id)))
-
-    if current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff()):
-        # Admins see everything
-        return base_query.order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
-    elif current_user.is_authenticated and current_user.id == user.id:
-        # Users see their own posts including soft-deleted ones they deleted
-        return base_query.filter(
-            or_(Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Post.deleted_by == user.id)
-        ).order_by(desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
-    else:
-        # Everyone else sees only public, non-deleted posts
-        return base_query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING).order_by(
-            desc(Post.posted_at)).paginate(page=post_page, per_page=20, error_out=False)
-
-
-def _get_user_post_replies(user, replies_page):
-    """Get post replies for a user based on current user's permissions."""
-    base_query = PostReply.query.filter_by(user_id=user.id).filter(PostReply.community_id.not_in(community_membership_private(user.id)))
-
-    if current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff()):
-        # Admins see everything
-        return base_query.order_by(desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
-    elif current_user.is_authenticated and current_user.id == user.id:
-        # Users see their own replies including soft-deleted ones they deleted
-        return base_query.filter(or_(PostReply.deleted == False, PostReply.deleted_by == user.id)).order_by(
-            desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
-    else:
-        # Everyone else sees only non-deleted replies
-        return base_query.filter(PostReply.deleted == False).order_by(
-            desc(PostReply.posted_at)).paginate(page=replies_page, per_page=20, error_out=False)
-
-
-def _get_user_posts_and_replies(user, page):
-    """Get list of posts and replies in reverse chronological order based on current user's permissions"""
-    returned_list = []
-    user_id = user.id
-    per_page = 20
-    offset_val = (page - 1) * per_page
-    next_page = False
-
-    private = ','.join(intlist_to_strlist(community_membership_private(user_id)))
-    if current_user.is_authenticated and (current_user.is_admin() or current_user.is_staff()):
-        # Admins see everything
-        post_select = f"SELECT id, posted_at, 'post' AS type FROM post WHERE user_id = {user_id}"
-        reply_select = f"SELECT id, posted_at, 'reply' AS type FROM post_reply WHERE user_id = {user_id}"
-        if private:
-            post_select += f" AND community_id NOT IN ({private})"
-            reply_select += f" AND community_id NOT IN ({private})"
-    elif current_user.is_authenticated and current_user.id == user_id:
-        # Users see their own posts/replies including soft-deleted ones they deleted
-        post_select = f"SELECT id, posted_at, 'post' AS type FROM post WHERE user_id = {user_id} AND (deleted = 'False' OR deleted_by = {user_id})"
-        reply_select = f"SELECT id, posted_at, 'reply' AS type FROM post_reply WHERE user_id={user_id} AND (deleted = 'False' OR deleted_by = {user_id})"
-        if private:
-            post_select += f" AND community_id NOT IN ({private})"
-            reply_select += f" AND community_id NOT IN ({private})"
-    else:
-        # Everyone else sees only non-deleted posts/replies
-        post_select = f"SELECT id, posted_at, 'post' AS type FROM post WHERE user_id = {user_id} AND deleted = 'False' and status > {POST_STATUS_REVIEWING}"
-        reply_select = f"SELECT id, posted_at, 'reply' AS type FROM post_reply WHERE user_id={user_id} AND deleted = 'False'"
-        if private:
-            post_select += f" AND community_id NOT IN ({private})"
-            reply_select += f" AND community_id NOT IN ({private})"
-
-    full_query = post_select + " UNION " + reply_select + f" ORDER BY posted_at DESC LIMIT {per_page + 1} OFFSET {offset_val};"
-    query_result = db.session.execute(text(full_query))
-
-    for row in query_result:
-        if row.type == "post":
-            returned_list.append(Post.query.get(row.id))
-        elif row.type == "reply":
-            returned_list.append(PostReply.query.get(row.id))
-
-    if len(returned_list) > per_page:
-        next_page = True
-        returned_list = returned_list[:-1]
-
-    return (returned_list, next_page)
-
-
-def _get_user_moderates(user):
-    """Get communities moderated by user."""
-
-    moderates = Community.query.filter_by(banned=False).join(CommunityMember).filter(
-        CommunityMember.user_id == user.id). \
-        filter(or_(CommunityMember.is_moderator, CommunityMember.is_owner)). \
-        order_by(Community.name)
-
-    # Hide private mod communities unless user is admin or viewing their own profile
-    if current_user.is_anonymous or (user.id != current_user.id and not current_user.is_admin()):
-        moderates = moderates.filter(Community.private_mods == False)
-
-    return moderates.all()
-
-
-def _get_user_same_ip(user):
-    """Get users that have the same IP address as this user"""
-
-    if current_user.is_anonymous or user.ip_address is None or user.ip_address == '':
-        return []
-
-    return User.query.filter_by(ip_address=user.ip_address).filter(User.ap_id == None, User.id != user.id).all()
-
-
-def _get_user_upvoted_posts(user):
-    """Get posts upvoted by user (only for user themselves or admins)."""
-    if current_user.is_authenticated and (user.id == current_user.get_id() or current_user.is_admin()):
-        return Post.query.join(PostVote, PostVote.post_id == Post.id).filter(PostVote.effect > 0, PostVote.user_id == user.id). \
-            order_by(desc(PostVote.created_at)).limit(10).all()
-    return []
-
-
-def _get_user_subscribed_communities(user):
-    """Get communities subscribed to by user."""
-    if current_user.is_authenticated and (user.id == current_user.get_id()
-                                          or current_user.is_staff() or current_user.is_admin()
-                                          or user.show_subscribed_communities):
-        return Community.query.filter_by(banned=False).join(CommunityMember).filter(CommunityMember.user_id == user.id).order_by(Community.name).all()
-    return []
-
-
 @login_required_if_private_instance
 def show_profile(user):
     if (user.deleted or user.banned) and current_user.is_anonymous:
@@ -196,12 +74,13 @@ def show_profile(user):
     replies_page = request.args.get('replies_page', 1, type=int)
     overview_page = request.args.get('overview_page', 1, type=int)
 
-    # Get data using helper functions
+    # posts and replies
     moderates = _get_user_moderates(user)
     upvoted = _get_user_upvoted_posts(user)
     subscribed = _get_user_subscribed_communities(user)
     posts = _get_user_posts(user, post_page)
     post_replies = _get_user_post_replies(user, replies_page)
+    archived_post_replies = _get_user_archived_replies(user)
     overview_items, overview_has_next_page = _get_user_posts_and_replies(user, overview_page)
     same_ip_address = _get_user_same_ip(user)
 
@@ -249,7 +128,8 @@ def show_profile(user):
                            rss_feed_name=f"{user.display_name()} on {g.site.name}" if user.post_count > 0 else None,
                            user_has_public_feeds=user_has_public_feeds, user_public_feeds=user_public_feeds,
                            overview_items=overview_items, overview_next_url=overview_next_url,
-                           overview_prev_url=overview_prev_url, same_ip_address=same_ip_address)
+                           overview_prev_url=overview_prev_url, same_ip_address=same_ip_address,
+                           archived_post_replies=archived_post_replies)
 
 
 @bp.route('/u/<actor>/profile', methods=['GET', 'POST'])
@@ -342,6 +222,8 @@ def edit_profile(actor):
             current_app.logger.error(f"LDAP sync failed for user {current_user.user_name}: {e}")
 
         cache.delete_memoized(user_pronouns)
+        from app.api.alpha.views import user_view
+        cache.delete_memoized(user_view)
         flash(_('Your changes have been saved.'), 'success')
 
         return redirect(url_for('user.edit_profile', actor=actor))
@@ -576,6 +458,7 @@ def user_settings():
         current_user.default_comment_sort = form.default_comment_sort.data
         current_user.default_filter = form.default_filter.data
         current_user.theme = form.theme.data
+        current_user.allow_community_themes = form.allow_community_themes.data
         current_user.email_unread = form.email_unread.data
         current_user.markdown_editor = form.markdown_editor.data
         current_user.interface_language = form.interface_language.data
@@ -595,14 +478,58 @@ def user_settings():
                                 'indexable': current_user.indexable})
 
         db.session.commit()
+        from app.api.alpha.views import user_view
+        cache.delete_memoized(user_view)
 
         flash(_('Your changes have been saved.'), 'success')
 
         resp = make_response(redirect(url_for('user.user_settings')))
-        if form.max_hours_per_day.data:
-            resp.set_cookie('max_hours_per_day', str(form.max_hours_per_day.data), expires=datetime(year=2099, month=12, day=30))
+        
+        # Handle max_hours_per_day changes with restriction logic
+        current_max_hours = request.cookies.get('max_hours_per_day', '')
+        new_max_hours = form.max_hours_per_day.data
+        new_restriction_setting = form.max_hours_change_restriction.data
+        
+        resp.set_cookie('max_hours_change_restriction', new_restriction_setting,
+                        expires=datetime(year=2099, month=12, day=30))
+        
+        # Only handle restriction date logic if max_hours_per_day has actually changed
+        if str(new_max_hours) != str(current_max_hours):
+            restriction_cookie = request.cookies.get('max_hours_restriction_date')
+            current_date = datetime.now()
+            
+            if restriction_cookie and current_max_hours and int(current_max_hours) > 0:
+                restriction_date = datetime.fromisoformat(restriction_cookie)
+
+                # Check if restriction period has passed
+                if current_date < restriction_date:
+                    # Still restricted, don't allow change
+                    flash(_('You cannot change the daily usage limit until %(date)s',
+                           date=restriction_date.strftime('%Y-%m-%d %H:%M')), 'warning')
+                    # Revert to old value
+                    new_max_hours = current_max_hours
+                else:
+                    # Restriction period has passed, allow change and set new restriction
+                    if new_restriction_setting != 'anytime':
+                        future_date = _calculate_future_date(new_restriction_setting)
+                        resp.set_cookie('max_hours_restriction_date', future_date.isoformat(),
+                                        expires=datetime(year=2099, month=12, day=30))
+            else:
+                # No current restriction or no current limit set, set restriction if needed
+                if new_restriction_setting != 'anytime' and new_max_hours and int(new_max_hours) > 0:
+                    future_date = _calculate_future_date(new_restriction_setting)
+                    resp.set_cookie('max_hours_restriction_date', future_date.isoformat(), 
+                                    expires=datetime(year=2099, month=12, day=30))
+        
+        # Set the max_hours_per_day cookie (either new value or reverted old value)
+        if new_max_hours:
+            resp.set_cookie('max_hours_per_day', str(new_max_hours), expires=datetime(year=2099, month=12, day=30))
         else:
             resp.set_cookie('max_hours_per_day', '', expires=datetime.min)
+            # Clear restriction cookies if no limit is set
+            resp.set_cookie('max_hours_restriction_date', '', expires=datetime.min)
+            resp.set_cookie('max_hours_change_restriction', '', expires=datetime.min)
+        
         resp.set_cookie('compact_level', form.compaction.data, expires=datetime(year=2099, month=12, day=30))
         resp.set_cookie('low_bandwidth', '1' if form.low_bandwidth_mode.data else '0',
                         expires=datetime(year=2099, month=12, day=30))
@@ -618,6 +545,7 @@ def user_settings():
         form.default_comment_sort.data = current_user.default_comment_sort
         form.default_filter.data = current_user.default_filter
         form.theme.data = current_user.theme
+        form.allow_community_themes.data = current_user.allow_community_themes
         form.markdown_editor.data = current_user.markdown_editor
         form.low_bandwidth_mode.data = request.cookies.get('low_bandwidth', '0') == '1'
         form.interface_language.data = current_user.interface_language
@@ -635,6 +563,7 @@ def user_settings():
         form.additional_css.data = current_user.additional_css
         form.show_subscribed_communities.data = current_user.show_subscribed_communities
         form.max_hours_per_day.data = request.cookies.get('max_hours_per_day', '')
+        form.max_hours_change_restriction.data = request.cookies.get('max_hours_change_restriction', 'anytime')
 
     return render_template('user/edit_settings.html', title=_('Change settings'), form=form, user=current_user)
 
@@ -1121,7 +1050,9 @@ def notifications():
     notification_links = defaultdict(set)
     notification_list = Notification.query.filter_by(user_id=current_user.id).order_by(
         desc(Notification.created_at)).limit(50).all()
+
     # Build a list of the types of notifications this person has, by going through all their notifications
+    unread = 0
     for notification in notification_list:
         has_notifications = True
         if notification.notif_type != NOTIF_DEFAULT:
@@ -1129,15 +1060,23 @@ def notifications():
                 notification_types[notif_id_to_string(notification.notif_type)] += 0
             else:
                 notification_types[notif_id_to_string(notification.notif_type)] += 1
+                unread += 1
             notification_links[notif_id_to_string(notification.notif_type)].add(notification.notif_type)
 
+    notification_list = Notification.query.filter_by(user_id=current_user.id)
+
+    # filter by type
     if type_:
-        type_ = tuple(int(x.strip()) for x in type_.strip('{}').split(','))  # convert '{41, 10}' to a tuple containing 41 and 10
-        notification_list = Notification.query.filter_by(user_id=current_user.id).filter(
-            Notification.notif_type.in_(type_)).order_by(desc(Notification.created_at)).all()
+        if type_ == 'Unread':
+            notification_list = notification_list.filter(Notification.read == False)
+        else:
+            type_ = tuple(int(x.strip()) for x in type_.strip('{}').split(','))  # convert '{41, 10}' to a tuple containing 41 and 10
+            notification_list = notification_list.filter(Notification.notif_type.in_(type_))
+
+    notification_list = notification_list.order_by(desc(Notification.created_at)).limit(50)
 
     return render_template('user/notifications.html', title=_('Notifications'), notifications=notification_list,
-                           notification_types=notification_types, has_notifications=has_notifications,
+                           notification_types=notification_types, has_notifications=has_notifications, unread=unread,
                            user=current_user, notification_links=notification_links, current_filter=current_filter,
                            site=g.site, markdown_to_html=markdown_to_html,
                            )
@@ -1206,7 +1145,7 @@ def notification_unread(notification_id):
 def notifications_all_read():
     notif_type = request.args.get('type', '')
     original_notif_type = notif_type
-    if notif_type == '':
+    if notif_type == '' or notif_type == 'Unread':
         db.session.execute(text('UPDATE notification SET read=true WHERE user_id = :user_id'),
                            {'user_id': current_user.id})
     else:
@@ -1315,6 +1254,8 @@ def import_settings_task(user_id, redis_key):
                     if note_target:
                         session.add(UserNote(user_id=user.id, target_id=note_target.id, body=user_note['body']))
 
+                cache.delete_memoized(user_notes, user.id)
+
                 for instance_domain in contents_json['blocked_instances'] if 'blocked_instances' in contents_json else []:
                     instance = Instance.query.filter(Instance.domain == instance_domain).first()
                     if instance:
@@ -1345,6 +1286,8 @@ def import_settings_task(user_id, redis_key):
                 cache.delete_memoized(blocked_or_banned_instances, user.id)
                 cache.delete_memoized(blocked_users, user.id)
                 cache.delete_memoized(blocked_domains, user.id)
+                from app.api.alpha.views import user_view
+                cache.delete_memoized(user_view)
 
                 redis_client.delete(redis_key)
 
@@ -1939,6 +1882,9 @@ def edit_user_note(actor):
             usernote = UserNote(target_id=user.id, user_id=current_user.id, body=text)
             db.session.add(usernote)
         db.session.commit()
+        from app.api.alpha.views import user_view
+        cache.delete_memoized(user_view)
+        cache.delete_memoized(user_notes, current_user.id)
 
         flash(_('Your changes have been saved.'), 'success')
         if return_to:
@@ -2214,3 +2160,26 @@ def user_file_upload():
     form.referrer.data = referrer(url_for('user.user_files'))
 
     return render_template('user/file_upload.html', form=form, user=current_user)
+
+
+def _calculate_future_date(restriction_setting):
+    """Calculate future date based on restriction setting"""
+    current_date = datetime.now()
+    if restriction_setting == '1day':
+        return current_date + timedelta(days=1)
+    elif restriction_setting == '1month':
+        # Add 1 month by getting same day next month
+        if current_date.month == 12:
+            return current_date.replace(year=current_date.year + 1, month=1)
+        else:
+            return current_date.replace(month=current_date.month + 1)
+    elif restriction_setting == '2months':
+        # Add 2 months
+        new_month = current_date.month + 2
+        new_year = current_date.year
+        if new_month > 12:
+            new_month -= 12
+            new_year += 1
+        return current_date.replace(year=new_year, month=new_month)
+    else:
+        return current_date

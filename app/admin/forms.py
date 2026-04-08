@@ -53,7 +53,7 @@ class SiteMiscForm(FlaskForm):
     registration_approved_email = TextAreaField(_l('Registration approved email'), render_kw={'rows': '5'})
 
     choose_topics = BooleanField(_l('Provide a list of topics to subscribe to'))
-    filter_selection = BooleanField(_l('Trump Musk filter setup'))
+    filter_selection = BooleanField(_l('Filter setup during onboarding'))
     auto_decline_countries = TextAreaField(_l('Ignore registrations from these countries'))
     auto_decline_referrers = TextAreaField(_l('Block registrations from these referrers (one per line)'))
     ban_check_servers = TextAreaField(_l('Warn if new account banned from these instances'))
@@ -69,6 +69,7 @@ class SiteMiscForm(FlaskForm):
                                  render_kw={'class': 'form-select'})
     cache_remote_images_locally = BooleanField(_l('Cache remote images locally'))
     enable_report_em_dash_replies = BooleanField(_l('Report comments containing an em dash (—) from newly created users - likely spam / AI.'))
+    limit_one_em_report_per_user = BooleanField(_l('Limit em dash reports to just the first occurence per user'))
     log_activitypub_json = BooleanField(_l('Log ActivityPub JSON for debugging'))
     public_modlog = BooleanField(_l('Show moderation actions publicly'))
     private_instance = BooleanField(_l('Private instance - require login to browse'))
@@ -206,6 +207,7 @@ class EditInstanceForm(FlaskForm):
     gone_forever = BooleanField(_l('Gone forever'))
     trusted = BooleanField(_l('Trusted'))
     hide = BooleanField(_l('Hide from instance chooser'))
+    popular = BooleanField(_l('Communities become popular when added'))
     posting_warning = TextAreaField(_l('Posting warning'))
     admin_note = TextAreaField(_l('Notes about this instance (only visible to other admins)'))
     inbox = StringField(_l('Inbox'))
@@ -251,11 +253,11 @@ class AddUserForm(FlaskForm):
                          (1, _l('Hide completely')),
                          (2, _l('Blur')),
                          (3, _l('Make semi-transparent'))]
-    ignore_bots = SelectField(_l('Hide posts by bots'), choices=hide_type_choices,
+    ignore_bots = SelectField(_l('Posts by bots'), choices=hide_type_choices,
                                  default=0, coerce=int, render_kw={'class': 'form-select'})
-    hide_nsfw = SelectField(_l('Show NSFW posts'), choices=hide_type_choices, default=1,
+    hide_nsfw = SelectField(_l('NSFW posts'), choices=hide_type_choices, default=1,
                             coerce=int, render_kw={'class': 'form-select'})
-    hide_nsfl = SelectField(_l('Show NSFL posts'), choices=hide_type_choices, default=1,
+    hide_nsfl = SelectField(_l('NSFL posts'), choices=hide_type_choices, default=1,
                             coerce=int, render_kw={'class': 'form-select'})
 
     role_options = [(2, _l('User')),
@@ -316,9 +318,9 @@ class EditUserForm(FlaskForm):
                          (1, _l('Hide completely')),
                          (2, _l('Blur')),
                          (3, _l('Make semi-transparent'))]
-    hide_nsfw = SelectField(_l('Show NSFW posts'), choices=hide_type_choices, default=1,
+    hide_nsfw = SelectField(_l('NSFW posts'), choices=hide_type_choices, default=1,
                             coerce=int, render_kw={'class': 'form-select'})
-    hide_nsfl = SelectField(_l('Show NSFL posts'), choices=hide_type_choices, default=1,
+    hide_nsfl = SelectField(_l('NSFL posts'), choices=hide_type_choices, default=1,
                             coerce=int, render_kw={'class': 'form-select'})
     role_options = [(2, _l('User')),
                (3, _l('Staff')),

@@ -18,6 +18,7 @@ from app import db, cache, celery, httpx_client, limiter, plugins
 from app.activitypub.signature import RsaKeys, send_post_request
 from app.activitypub.util import extract_domain_and_actor, find_actor_or_create
 from app.activitypub.actor import schedule_actor_refresh
+from app.api.alpha.views import cached_modlist_for_community, cached_modlist_for_user
 from app.community.forms import SearchRemoteCommunity, CreateDiscussionForm, CreateImageForm, CreateLinkForm, \
     ReportCommunityForm, \
     DeleteCommunityForm, AddCommunityForm, EditCommunityForm, AddModeratorForm, BanUserCommunityForm, \
@@ -27,7 +28,8 @@ from app.community.forms import SearchRemoteCommunity, CreateDiscussionForm, Cre
 from app.community.util import search_for_community, actor_to_community, \
     save_icon_file, save_banner_file, \
     delete_post_from_community, delete_post_reply_from_community, \
-    find_potential_moderators, hashtags_used_in_community, publicize_community
+    find_potential_moderators, hashtags_used_in_community, publicize_community, \
+    community_theme_list
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, POST_TYPE_LINK, POST_TYPE_ARTICLE, POST_TYPE_IMAGE, \
     SUBSCRIPTION_PENDING, SUBSCRIPTION_MODERATOR, REPORT_STATE_NEW, REPORT_STATE_ESCALATED, REPORT_STATE_RESOLVED, \
     REPORT_STATE_DISCARDED, POST_TYPE_VIDEO, NOTIF_COMMUNITY, NOTIF_POST, POST_TYPE_POLL, MICROBLOG_APPS, SRC_WEB, \
@@ -56,7 +58,7 @@ from app.utils import get_setting, render_template, markdown_to_html, validation
     possible_communities, reported_posts, user_notes, login_required, get_task_session, patch_db_session, \
     approval_required, permission_required, aged_account_required, communities_banned_from_all_users, \
     moderating_communities_ids_all_users, block_honey_pot, user_pronouns, community_membership_private, \
-    show_reason_why_no_federation
+    show_reason_why_no_federation, can_upload_video, banned_instances
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
 from app.shared.community import leave_community
@@ -89,6 +91,7 @@ def add_local():
         form.nsfw.render_kw = {'disabled': True}
 
     form.languages.choices = languages_for_form(all_languages=True)
+    form.theme.choices = community_theme_list()
 
     if form.validate_on_submit():
         if form.url.data.strip().lower().startswith('/c/'):
@@ -111,6 +114,7 @@ def add_local():
             form.invitations.data = 0
         community = Community(title=form.community_name.data, name=form.url.data,
                               description=piefed_markdown_to_lemmy_markdown(form.description.data),
+                              theme=form.theme.data,
                               nsfw=form.nsfw.data, private_key=private_key,
                               public_key=public_key, description_html=markdown_to_html(form.description.data),
                               local_only=form.local_only.data, posting_warning=form.posting_warning.data,
@@ -157,6 +161,8 @@ def add_local():
         cache.delete_memoized(joined_communities, current_user.id)
         cache.delete_memoized(moderating_communities, current_user.id)
         cache.delete_memoized(community_membership_private, current_user.id)
+        from app.main.util import sidebar_new_communities
+        cache.delete_memoized(sidebar_new_communities, current_user.id)
         return redirect('/c/' + community.name)
     else:
         form.publicize.data = not current_app.debug and not current_app.config['CONTENT_WARNING']
@@ -205,6 +211,8 @@ def add_remote():
                 flash(_('Community not found. If you are searching for a nsfw community it is blocked by this instance.'),
                       'warning')
         else:
+            from app.main.util import sidebar_new_communities
+            cache.delete_memoized(sidebar_new_communities, current_user.id)
             if new_community.banned:
                 flash(_('That community is banned from %(site)s.', site=g.site.name), 'warning')
 
@@ -327,6 +335,9 @@ def show_community(community: Community):
                 flash(_('You have been banned from this community until %(when)s.', when=ban_details.ban_until.date()))
             else:
                 flash(_('You have been banned from this community.'))
+
+    if current_user.is_authenticated and community.instance_id in banned_instances(current_user.id):
+        banned_from_community = True
 
     # Build list of moderators and set un-moderated flag
     mod_user_ids = [mod.user_id for mod in mods]
@@ -463,7 +474,7 @@ def show_community(community: Community):
             per_page = 300
         posts = posts.paginate(page=page, per_page=per_page, error_out=False)
         sticky_posts = sticky_posts.all()
-    else:
+    else:   # comments
         content_filters = {}
         comments = community.replies
 
@@ -1057,7 +1068,12 @@ def add_post(actor, type=None):
             }
             plugins.fire_hook('before_post_create', post_data)
 
-            uploaded_file = request.files['image_file'] if type == 'image' or type == 'event' or type == 'video' else None
+            if type == 'image' or type == 'event':
+                uploaded_file = request.files['image_file']
+            elif type == 'video' and can_upload_video():
+                uploaded_file = request.files['image_file']
+            else:
+                uploaded_file = None
             post = make_post(form, community, post_type, SRC_WEB, uploaded_file=uploaded_file)
         except Exception as ex:
             flash(_('Your post was not accepted because %(reason)s', reason=str(ex)), 'error')
@@ -1186,6 +1202,7 @@ def community_edit(community_id: int):
     if community.is_owner() or current_user.is_admin() or community.is_moderator():
         form = EditCommunityForm()
         form.topic.choices = topics_for_form(0)
+        form.theme.choices = community_theme_list()
         form.languages.choices = languages_for_form(all_languages=True)
         if g.site.enable_nsfw is False:
             form.nsfw.render_kw = {'disabled': True}
@@ -1201,6 +1218,7 @@ def community_edit(community_id: int):
             community.title = form.title.data
             community.description = piefed_markdown_to_lemmy_markdown(form.description.data)
             community.description_html = markdown_to_html(form.description.data, anchors_new_tab=False)
+            community.theme = form.theme.data
             community.posting_warning = form.posting_warning.data
             community.nsfw = form.nsfw.data
             community.ai_generated = form.ai_generated.data
@@ -1261,6 +1279,7 @@ def community_edit(community_id: int):
         else:
             form.title.data = community.title
             form.description.data = community.description
+            form.theme.data = community.theme
             form.posting_warning.data = community.posting_warning
             form.nsfw.data = community.nsfw
             form.ai_generated.data = community.ai_generated
@@ -1391,7 +1410,10 @@ def community_make_owner(community_id: int, user_id: int):
 
         cache.delete_memoized(community_moderators, community_id)
         cache.delete_memoized(Community.moderators, community)
-    
+
+        cache.delete_memoized(cached_modlist_for_community)
+        cache.delete_memoized(cached_modlist_for_user, user)
+
     else:
         abort(401)
     
@@ -1430,6 +1452,9 @@ def community_remove_owner(community_id: int, user_id: int):
 
             cache.delete_memoized(community_moderators, community_id)
             cache.delete_memoized(Community.moderators, community)
+
+            cache.delete_memoized(cached_modlist_for_community)
+            cache.delete_memoized(cached_modlist_for_user, user)
 
     else:
         abort(401)

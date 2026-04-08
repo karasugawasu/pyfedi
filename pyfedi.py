@@ -4,12 +4,12 @@ from datetime import datetime
 import os
 
 import flask
-from flask_babel import get_locale
+from flask_babel import get_locale, ngettext
 from flask_login import current_user
 from flask_wtf.csrf import generate_csrf
 
 from app import create_app, db, cli
-import arrow
+import pendulum
 from flask import session, g, json, request, current_app
 from sqlalchemy import text
 from app.constants import POST_TYPE_LINK, POST_TYPE_IMAGE, POST_TYPE_ARTICLE, POST_TYPE_VIDEO, POST_TYPE_POLL, \
@@ -20,7 +20,7 @@ from app.utils import getmtime, gibberish, shorten_string, shorten_url, digits, 
     can_create_post, can_upvote, can_downvote, shorten_number, ap_datetime, current_theme, community_link_to_href, \
     in_sorted_list, role_access, first_paragraph, person_link_to_href, feed_membership, html_to_text, remove_images, \
     notif_id_to_string, feed_link_to_href, get_setting, set_setting, show_explore, human_filesize, can_upload_video, \
-    debug_checkpoint, compaction_level, humanize_number, get_site_as_dict, localize_datetime
+    debug_checkpoint, compaction_level, humanize_number, round_invisible_digits, get_site_as_dict, localize_datetime
 
 app = create_app()
 cli.register(app)
@@ -29,7 +29,7 @@ cli.register(app)
 @app.context_processor
 def app_context_processor():
     return dict(getmtime=getmtime, instance_domain=current_app.config['SERVER_NAME'], debug_mode=current_app.debug,
-                arrow=arrow, locale=g.locale if hasattr(g, 'locale') else None, notif_server=current_app.config['NOTIF_SERVER'],
+                pendulum=pendulum, locale=g.locale if hasattr(g, 'locale') else None, notif_server=current_app.config['NOTIF_SERVER'],
                 site=g.site if hasattr(g, 'site') else None, nonce=g.nonce if hasattr(g, 'nonce') else None,
                 admin_ids=g.admin_ids if hasattr(g, 'admin_ids') else [], low_bandwidth=g.low_bandwidth if hasattr(g, 'low_bandwidth') else None,
                 can_translate=current_app.config['TRANSLATE_ENDPOINT'] != '', can_detect_ai=current_app.config['DETECT_AI_ENDPOINT'] != '',
@@ -65,11 +65,13 @@ with app.app_context():
     app.jinja_env.globals['theme'] = current_theme
     app.jinja_env.globals['file_exists'] = os.path.exists
     app.jinja_env.globals['first_paragraph'] = first_paragraph
+    app.jinja_env.globals['ngettext'] = ngettext
     app.jinja_env.globals['html_to_text'] = html_to_text
     app.jinja_env.globals['csrf_token'] = generate_csrf
     app.jinja_env.globals['debug_checkpoint'] = debug_checkpoint
     app.jinja_env.globals['compaction_level'] = compaction_level
     app.jinja_env.globals['humanize_number'] = humanize_number
+    app.jinja_env.globals['round_invisible_digits'] = round_invisible_digits
     app.jinja_env.globals['localize_datetime'] = localize_datetime
     app.jinja_env.filters['community_links'] = community_link_to_href
     app.jinja_env.filters['feed_links'] = feed_link_to_href

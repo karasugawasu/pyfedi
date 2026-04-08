@@ -46,6 +46,14 @@ def validate_color_code(text):
     except:
         raise ValidationError(f"Bad hex color code string: {text}")
 
+def validate_non_empty_string(text):
+    # Makes sure a string has length >0 after removing whitespace
+    stripped_title = re.sub(r'\s+', "", text, flags=re.U)
+    if len(stripped_title) >= 1:
+        return True
+    else:
+        raise ValidationError("Non-empty string required")
+
 
 class DefaultError(Schema):
     message = fields.String()
@@ -335,7 +343,7 @@ class MiniCrossPosts(DefaultSchema):
 
 class PostEvent(DefaultSchema):
     start = fields.String(required=True, validate=validate_datetime_string, metadata={"example": "2025-06-07T02:29:07.980084Z", "format": "datetime"})
-    end = fields.String(validate=validate_datetime_string, metadata={"example": "2025-06-07T02:29:07.980084Z", "format": "datetime"})
+    end = fields.String(required=True, validate=validate_datetime_string, metadata={"example": "2025-06-07T02:29:07.980084Z", "format": "datetime"})
     timezone = fields.String(metadata={"example": "America/New_York"})
     max_attendees = fields.Integer(metadata={"default": 0})
     participant_count = fields.Integer(metadata={"default": 0})
@@ -1162,6 +1170,7 @@ class ListCommentsRequest(DefaultSchema):
     limit = fields.Integer(metadata={"default": 10})
     page = fields.Integer(metadata={"default": 1})
     sort = fields.String(validate=validate.OneOf(comment_sort_list), metadata={"default": "New"})
+    type_ = fields.String(validate=validate.OneOf(listing_type_list), metadata={"default": "All"})
     liked_only = fields.Boolean()
     saved_only = fields.Boolean()
     person_id = fields.Integer()
@@ -1333,7 +1342,7 @@ class SubscribePostRequest(DefaultSchema):
 
 
 class CreatePostRequest(DefaultSchema):
-    title = fields.String(required=True)
+    title = fields.String(required=True, validate=validate_non_empty_string)
     community_id = fields.Integer(required=True)
     alt_text = fields.String(metadata={"description": "Will be used for image posts or link posts that point to images"})
     body = fields.String()

@@ -175,3 +175,5 @@ tmp/
 app/static/all_communities.json
 app/static/all_sfw_communities.json
 /app/plugins/piefed_onboarding/
+app/plugins/piefed_onboarding/
+app/static/styles.css.map

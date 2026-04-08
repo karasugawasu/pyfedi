@@ -13,7 +13,7 @@ from app.constants import *
 from app.models import Conversation, ChatMessage, Notification, PostReply, User, Post, Community, File, UserFlair, \
     user_file, UserExtraField, UserNote
 from app.shared.user import block_another_user, unblock_another_user, subscribe_user, ban_user, unban_user
-from app.utils import authorise_api_user, in_sorted_list, user_in_restricted_country, user_access
+from app.utils import authorise_api_user, in_sorted_list, user_in_restricted_country, user_access, user_notes
 
 
 def get_user(auth, data):
@@ -600,6 +600,8 @@ def put_user_save_user_settings(auth, data):
     # save the change to the db
     db.session.commit()
 
+    cache.delete_memoized(user_view)
+
     user_json = {"my_user": user_view(user=user, variant=6)}
     return user_json
 
@@ -925,7 +927,10 @@ def post_user_set_note(auth, data):
             db.session.delete(existing_note)
     
     db.session.commit()
-    
+
+    cache.delete_memoized(user_view)
+    cache.delete_memoized(user_notes, user.id)
+
     return user_view(user=target_user_id, variant=5, user_id=user.id)
 
 

@@ -1,9 +1,11 @@
 import os.path
 import json
+import time
 from datetime import timedelta, datetime
 from random import randint
 
 import flask
+from markupsafe import Markup
 from pyld import jsonld
 from sqlalchemy import or_, and_, func
 from ua_parser import parse as uaparse
@@ -25,8 +27,9 @@ from flask_babel import _
 from sqlalchemy import desc, text
 
 from app.main.forms import ShareLinkForm
+from app.main.util import sidebar_active_communities, sidebar_new_instances, sidebar_upcoming_events, \
+    sidebar_new_communities, _base_list_communities_context
 from app.post.routes import show_post
-from app.shared.tasks.maintenance import refresh_instance_chooser
 from app.translation import LibreTranslateAPI
 from app.utils import render_template, get_setting, request_etag_matches, return_304, blocked_domains, \
     ap_datetime, shorten_string, user_filters_home, \
@@ -38,7 +41,8 @@ from app.utils import render_template, get_setting, request_etag_matches, return
     get_redis_connection, subscribed_feeds, joined_or_modding_communities, login_required_if_private_instance, \
     pending_communities, retrieve_image_hash, possible_communities, remove_tracking_from_link, reported_posts, \
     moderating_communities_ids, user_notes, login_required, safe_order_by, filtered_out_communities, \
-    num_topics, referrer, block_honey_pot, user_pronouns, get_instance_stickies
+    num_topics, referrer, block_honey_pot, user_pronouns, get_instance_stickies, \
+    community_membership_private
 from app.models import Community, CommunityMember, Post, Site, User, utcnow, Topic, Instance, \
     Notification, Language, community_language, ModLog, Feed, FeedItem, CmsPage, BannedInstances
 from app.ldap_utils import test_ldap_connection, sync_user_to_ldap, login_with_ldap
@@ -89,8 +93,16 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
     low_quality_filter = 'AND c.low_quality is false' if current_user.is_authenticated and current_user.hide_low_quality else ''
     if current_user.is_authenticated:
         modded_communities = moderating_communities_ids(current_user.id)
+        pc = community_membership_private(current_user.id)
+        if len(pc) == 0:    # tuples must have at least 2 elements, I think?
+            private_communities = tuple([0, 0])
+        else:
+            private_communities = tuple(pc + [0])
     else:
         modded_communities = []
+        private_communities = ()
+    if len(private_communities) == 0:
+        private_communities = tuple([0, 0])
     enable_mod_filter = len(modded_communities) > 0
 
     if view_filter == 'subscribed' and current_user.is_authenticated:
@@ -103,14 +115,14 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
                 text(f'SELECT id FROM community as c WHERE c.private is false and c.instance_id = 1 {low_quality_filter}')).scalars()
         else:
             community_ids = db.session.execute(
-                text(f'SELECT id FROM community as c WHERE c.instance_id = 1 {low_quality_filter}')).scalars()
+                text(f'SELECT id FROM community as c WHERE (c.private is false OR c.id IN {private_communities}) AND c.instance_id = 1 {low_quality_filter}')).scalars()
     elif view_filter == 'popular':
         if current_user.is_anonymous:
             community_ids = db.session.execute(
                 text('SELECT id FROM community as c WHERE c.show_popular is true and c.private is false AND c.low_quality is false')).scalars()
         else:
             community_ids = db.session.execute(
-                text(f'SELECT id FROM community as c WHERE c.show_popular is true {low_quality_filter}')).scalars()
+                text(f'SELECT id FROM community as c WHERE (c.private is false OR c.id IN {private_communities}) AND c.show_popular is true {low_quality_filter}')).scalars()
     elif view_filter == 'all' or current_user.is_anonymous:
         community_ids = [-1]  # Special value to indicate 'All'
     elif view_filter == 'moderating':
@@ -140,49 +152,11 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
     prev_url = url_for('main.index', page=page - 1, sort=sort, view_filter=view_filter,
                        result_id=result_id) if page > 0 else None
 
-    # Active Communities
-    active_communities = Community.query.filter_by(banned=False).filter_by(nsfw=False).filter_by(nsfl=False).filter_by(private=False)
-    if current_user.is_authenticated:  # do not show communities current user is banned from
-        banned_from = communities_banned_from(current_user.id)
-        if banned_from:
-            active_communities = active_communities.filter(Community.id.not_in(banned_from))
-        community_ids = blocked_communities(current_user.id)
-        if community_ids:
-            active_communities = active_communities.filter(Community.id.not_in(community_ids))
-        active_communities = active_communities.filter(Community.instance_id.not_in(blocked_or_banned_instances(current_user.id)))
-
-    active_communities = active_communities.order_by(desc(Community.last_active)).limit(5).all()
-
-    # New Communities
-    cutoff = utcnow() - timedelta(days=30)
-    new_communities = Community.query.filter_by(banned=False).filter_by(nsfw=False).filter_by(nsfl=False).\
-        filter_by(private=False).filter(Community.created_at > cutoff)
-    if current_user.is_authenticated:  # do not show communities current user is banned from
-        banned_from = communities_banned_from(current_user.id)
-        if banned_from:
-            new_communities = new_communities.filter(Community.id.not_in(banned_from))
-        community_ids = blocked_communities(current_user.id)
-        if community_ids:
-            new_communities = new_communities.filter(Community.id.not_in(community_ids))
-        new_communities = new_communities.filter(Community.instance_id.not_in(blocked_or_banned_instances(current_user.id)))
-    new_communities = new_communities.order_by(desc(Community.first_federated_at)). \
-        order_by(desc(Community.created_at)).limit(5).all()
-
-    # New Instances
-    instances = db.session.query(Instance).\
-        outerjoin(BannedInstances, BannedInstances.domain == Instance.domain).\
-        filter(Instance.gone_forever == False, Instance.dormant == False,
-               BannedInstances.id == None,
-               or_(Instance.software == 'piefed', Instance.software == 'lemmy', Instance.software == 'mbin', Instance.software == 'nodebb')).\
-        order_by(desc(Instance.created_at)).limit(5).all()
-
-    # Upcoming events
-    upcoming_events = db.session.execute(text("""SELECT e.start, p.title, p.id FROM "event" e
-                                                 INNER JOIN post p on e.post_id = p.id
-                                                 WHERE e.start > now() AND p.deleted is false 
-                                                 AND p.status > :reviewing
-                                                 ORDER BY e.start LIMIT 5"""),
-                                         {'reviewing': POST_STATUS_REVIEWING}).all()
+    # Sidebar
+    active_communities = sidebar_active_communities(current_user.get_id())
+    new_communities = sidebar_new_communities(current_user.get_id())
+    instances = sidebar_new_instances()
+    upcoming_events = sidebar_upcoming_events()
 
     # Voting history and ban status
     if current_user.is_authenticated:
@@ -212,7 +186,7 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
                            moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            enable_mod_filter=enable_mod_filter,
-                           has_topics=num_topics() > 0,
+                           has_topics=num_topics() > 0, time=time,
                            user_pronouns=user_pronouns()
                            ))
     resp.headers.set('ETag', f"{sort}_{view_filter}_{hash(str(g.site.last_active))}")
@@ -236,25 +210,24 @@ def list_topics():
                            low_bandwidth=request.cookies.get('low_bandwidth', '0') == '1')
 
 
-def _base_list_communities_context():
-    create_admin_only = g.site.community_creation_admin_only
-    default_user_add_remote = get_setting("allow_default_user_add_remote_community", True) 
-
-    is_admin = current_user.is_authenticated and current_user.is_admin()
-    is_staff = current_user.is_authenticated and current_user.is_staff()
-    return {
-        "SUBSCRIPTION_PENDING": SUBSCRIPTION_PENDING,
-        "SUBSCRIPTION_MEMBER": SUBSCRIPTION_MEMBER,
-        "SUBSCRIPTION_OWNER": SUBSCRIPTION_OWNER,
-        "SUBSCRIPTION_MODERATOR": SUBSCRIPTION_MODERATOR,
-        "current_user": current_user,
-        "is_admin": is_admin,
-        "is_staff": is_staff,
-        "create_admin_only": create_admin_only,
-        "default_user_add_remote": default_user_add_remote,
-        "joined_communities": joined_or_modding_communities(current_user.get_id()),
-        "pending_communities": pending_communities(current_user.get_id())
-    } 
+@bp.route('/add_post', methods=['GET'])
+@login_required
+def add_post():
+    poss_communities = possible_communities()
+    if request.cookies.get('cross_post_community_id'):
+        default_community_id = int(request.cookies.get('cross_post_community_id'))
+    else:
+        default_community_id = -1
+        if "Joined communities" in poss_communities:
+            default_community_id = possible_communities()["Joined communities"][0][0]
+        elif "Moderating" in poss_communities:
+            default_community_id = possible_communities()["Moderating"][0][0]
+        elif "Others" in poss_communities:
+            default_community_id = possible_communities()["Others"][0][0]
+    if default_community_id == -1:
+        return ('', 204)
+    default_community = Community.query.get(default_community_id)
+    return redirect(url_for('community.add_post', actor=default_community.link()))
 
 
 @bp.route('/communities', methods=['GET'])
@@ -384,6 +357,8 @@ def list_communities():
                 communities = communities.filter(Community.nsfw == True)
         if current_user.hide_nsfl == 1:
             communities = communities.filter(Community.nsfl == False)
+        if blocked_community_ids := blocked_communities(current_user.id):
+            communities = communities.filter(Community.id.not_in(blocked_community_ids))
         instance_ids = blocked_or_banned_instances(current_user.id)
         if instance_ids:
             communities = communities.filter(or_(Community.instance_id.not_in(instance_ids), Community.instance_id == None))
@@ -862,7 +837,6 @@ def share():
 
     return render_template('share.html', form=form, title=request.args.get('title'), communities=communities)
 
-
 @bp.route('/protocol_handler')
 @login_required
 def protocol_handler():
@@ -1178,6 +1152,61 @@ def explore():
     return render_template('explore.html', topics=topics, menu_instance_feeds=menu_instance_feeds(),
                            menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
                            menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,)
+
+
+@bp.route('/r/random')
+@bp.route('/random')
+@login_required_if_private_instance
+def random():
+    if blocked := blocked_or_banned_instances(current_user.get_id()):
+        sql = """select c.id from "community" c
+                inner join instance i on c.instance_id = i.id
+                where c.banned is false and i.gone_forever is false and c.post_count > 0 and c.private is false
+                and i.id not in :blocked_instances and c.nsfw is false 
+                order by random()
+                limit 1"""
+        community_id = db.session.execute(text(sql), {'blocked_instances': tuple(blocked)}).scalar_one_or_none()
+    else:
+        sql = """select c.id from "community" c
+                        inner join instance i on c.instance_id = i.id
+                        where c.banned is false and i.gone_forever is false and c.post_count > 0 and c.private is false
+                        order by random()
+                        limit 1"""
+        community_id = db.session.execute(text(sql)).scalar_one_or_none()
+    if community_id:
+        community = Community.query.get(community_id)
+        flash(Markup(_('<a href="/r/random">Try another random community</a>')))
+        return redirect(url_for('activitypub.community_profile', actor=community.link()))
+    else:
+        return render_template('generic_message.html', title=_('Sorry'), message=_('No communities found.'))
+
+
+@bp.route('/r/randnsfw')
+@bp.route('/r/randomnsfw')
+@bp.route('/randomnsfw')
+@login_required_if_private_instance
+def random_nsfw():
+    if blocked := blocked_or_banned_instances(current_user.get_id()):
+        sql = """select c.id from "community" c
+                inner join instance i on c.instance_id = i.id
+                where c.banned is false and i.gone_forever is false and c.nsfw is true and c.post_count > 0 and c.private is false
+                and i.id not in :blocked_instances
+                order by random()
+                limit 1"""
+        community_id = db.session.execute(text(sql), {'blocked_instances': tuple(blocked)}).scalar_one_or_none()
+    else:
+        sql = """select c.id from "community" c
+                inner join instance i on c.instance_id = i.id
+                where c.banned is false and i.gone_forever is false and c.nsfw is true and c.post_count > 0 and c.private is false
+                order by random()
+                limit 1"""
+        community_id = db.session.execute(text(sql)).scalar_one_or_none()
+    if community_id:
+        community = Community.query.get(community_id)
+        flash(Markup(_('<a href="/r/randnsfw">Try another random community</a>')))
+        return redirect(url_for('activitypub.community_profile', actor=community.link()))
+    else:
+        return render_template('generic_message.html', title=_('Sorry'), message=_('No communities found.'))
 
 
 @bp.route('/content_warning')
