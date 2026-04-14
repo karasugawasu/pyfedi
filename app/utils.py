@@ -847,6 +847,57 @@ def links_with_parens(text: str) -> str:
     return better_html
 
 
+def handle_better_lists(text: str) -> str:
+    """Handles lists that don't have a blank line preceding them."""
+
+    placeholder = gibberish(10)
+
+    # Step 1: Extract inline and block code, replacing with placeholders
+    code_snippets, text = stash_code_html(text, placeholder)
+
+    # Step 2: Split the whole entry into each newline
+    text_list = text.splitlines()
+
+    # Step 3: Iterate through each line, doing stuff
+    # First, define regex for start of each list type line
+    re_numbered_list = re.compile(r'^\d+\.\s+')
+    re_bulleted_list = re.compile(r'^-\s+')
+    
+    # Make a new list to put processed text into line by line
+    new_text_list = []
+    
+    # Loop through the lines, inserting an extra entry where needed to help markdown processing
+    prev_line = ""
+    for line in text_list:
+        if not prev_line:
+            # First line in string
+            prev_line = line
+            new_text_list.append(line)
+            continue
+        
+        # Check for bulleted lists preceded by -
+        if re.search(re_bulleted_list, line) and not re.search(re_bulleted_list, prev_line):
+            # First line in a bulleted list, insert a blank line to make it render correctly
+            new_text_list.append("")
+        
+        # Check for numbered lists preceded by 1. or some other number and period followed by space
+        if re.search(re_numbered_list, line) and not re.search(re_numbered_list, prev_line):
+            # First line in a numbered list, insert a blank line to make it render correctly
+            new_text_list.append("")
+
+        # End of iteration, add to new output and set new prev_line
+        new_text_list.append(line)
+        prev_line = line
+
+    # Step 4: Join the lines
+    text = "\n".join(new_text_list)
+
+    # Step X: Restore code snippets
+    text = pop_code(code_snippets=code_snippets, text=text, placeholder=placeholder)
+
+    return text
+
+
 # use this for Markdown irrespective of origin, as it can deal with both soft break newlines ('\n' used by PieFed) and hard break newlines ('  \n' or ' \\n')
 # ' \\n' will create <br /><br /> instead of just <br />, but hopefully that's acceptable.
 def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_target="_blank", test_env=False) -> str:
@@ -860,6 +911,7 @@ def markdown_to_html(markdown_text, anchors_new_tab=True, allow_img=True, a_targ
 
         markdown_text = handle_blockquotes(markdown_text) # handle blockquotes ourselves to do it better in some cases
         markdown_text = handle_bold_em(markdown_text)  # Some preprocessing to better handle bold and italics
+        markdown_text = handle_better_lists(markdown_text)  # preprocessing to handle lists not preceded by blank line
         markdown_text = handle_lemmy_autocomplete(markdown_text)
         markdown_text = handle_naked_spoilers(markdown_text)
         markdown_text = handle_spoiler_spacing(markdown_text)
