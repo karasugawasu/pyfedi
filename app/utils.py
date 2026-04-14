@@ -858,15 +858,12 @@ def handle_better_lists(text: str) -> str:
     # Step 2: Split the whole entry into each newline
     text_list = text.splitlines()
 
-    # Step 3: Iterate through each line, doing stuff
-    # First, define regex for start of each list type line
+    # Step 3: Define regex for beginning of line of each list type
     re_numbered_list = re.compile(r'^\d+\.\s+')
     re_bulleted_list = re.compile(r'^-\s+')
     
-    # Make a new list to put processed text into line by line
-    new_text_list = []
-    
-    # Loop through the lines, inserting an extra entry where needed to help markdown processing
+    # Step 4: Loop through the lines, inserting an extra entry where needed to help markdown processing
+    new_text_list = []  # list that will store processed text, each item is a line of text
     prev_line = ""
     for line in text_list:
         if not prev_line:
@@ -875,24 +872,24 @@ def handle_better_lists(text: str) -> str:
             new_text_list.append(line)
             continue
         
-        # Check for bulleted lists preceded by -
+        # Check for bulleted lists preceded by hyphen and space
         if re.search(re_bulleted_list, line) and not re.search(re_bulleted_list, prev_line):
-            # First line in a bulleted list, insert a blank line to make it render correctly
+            # First line in a bulleted list, insert a blank line first to make it render correctly
             new_text_list.append("")
         
-        # Check for numbered lists preceded by 1. or some other number and period followed by space
+        # Check for numbered lists preceded by number(s), period, and then space
         if re.search(re_numbered_list, line) and not re.search(re_numbered_list, prev_line):
-            # First line in a numbered list, insert a blank line to make it render correctly
+            # First line in a numbered list, insert a blank line first to make it render correctly
             new_text_list.append("")
 
-        # End of iteration, add to new output and set new prev_line
+        # End of iteration, add line to processed output and set new prev_line
         new_text_list.append(line)
         prev_line = line
 
-    # Step 4: Join the lines
+    # Step 5: Join the lines into one string
     text = "\n".join(new_text_list)
 
-    # Step X: Restore code snippets
+    # Step 6: Restore code snippets
     text = pop_code(code_snippets=code_snippets, text=text, placeholder=placeholder)
 
     return text
