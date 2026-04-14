@@ -637,12 +637,7 @@ def honey_pot(whatever=None):
     if count >= 3:
         redis_client.set(f"ban:{ip}", 1, ex=86400 * 7 * 4)  # ban scraper for 4 weeks
 
-    if whatever:
-        try:
-            return show_post(int(whatever), 'hot', False, False)
-        except Exception:
-            pass
-    return ''
+    return gibberish(100)
 
 
 @bp.route('/test')
