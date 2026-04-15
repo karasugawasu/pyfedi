@@ -399,8 +399,9 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                     )
                 )
                 # SQL query building for hide_read_posts
-                post_query_criteria.append('p.id NOT IN :read_post_ids')
-                post_query_parameters['read_post_ids'] = tuple(u_rp_ids)
+                if len(u_rp_ids) > 0:
+                    post_query_criteria.append('p.id NOT IN :read_post_ids')
+                    post_query_parameters['read_post_ids'] = tuple(u_rp_ids)
 
         filtered_out_community_ids = filtered_out_communities(user)
         if len(filtered_out_community_ids):
