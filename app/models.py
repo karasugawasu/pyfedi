@@ -2367,9 +2367,9 @@ class Post(db.Model):
     def posted_at_localized(self, sort, locale):
         # some locales do not have a definition for 'weeks' so are unable to display some dates in some languages. Fall back to english for those languages.
         try:
-            return pendulum.instance(self.last_active if sort == 'active' else self.posted_at).diff_for_humans(locale=locale)
+            return pendulum.instance(self.last_active if sort == 'active' and self.last_active else self.posted_at).diff_for_humans(locale=locale)
         except ValueError:
-            return pendulum.instance(self.last_active if sort == 'active' else self.posted_at).diff_for_humans(locale='en')
+            return pendulum.instance(self.last_active if sort == 'active' and self.last_active else self.posted_at).diff_for_humans(locale='en')
 
     def notify_new_replies(self, user_id: int) -> bool:
         existing_notification = db.session.query(NotificationSubscription).\
