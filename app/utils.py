@@ -4047,6 +4047,7 @@ def archive_post(post_id: int):
                                 'down_votes': int(comment.down_votes) if comment.down_votes else 0,
                                 'child_count': int(comment.child_count) if comment.child_count else 0,
                                 'path': list(comment.path) if comment.path else [],
+                                'answer': bool(comment.answer),
                                 'author_name': str(comment.author.display_name()) if comment.author and comment.author.display_name() else 'Unknown',
                                 'author_id': int(comment.author.id) if comment.author and comment.author.id else None,
                                 'author_indexable': bool(comment.author.indexable) if comment.author else True,
