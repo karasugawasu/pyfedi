@@ -26,6 +26,7 @@ import pendulum
 import flask
 import httpx
 import jwt
+from jwt.exceptions import DecodeError
 import markdown2
 import redis
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, NavigableString
@@ -2783,7 +2784,11 @@ def authorise_api_user(auth, return_type=None, id_match=None) -> User | dict | i
         raise Exception('incorrect_login')
     token = auth[7:]  # remove 'Bearer '
 
-    decoded = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=["HS256"])
+    try:
+        decoded = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=["HS256"])
+    except DecodeError:
+        raise Exception('incorrect_login - problem decoding bearer token')
+
     if decoded:
         user_id = decoded['sub']
         user = User.query.get(user_id)
