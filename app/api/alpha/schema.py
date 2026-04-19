@@ -1894,3 +1894,31 @@ class GetRegistrationListResponse(DefaultSchema):
 class RegistrationApproveRequest(DefaultSchema):
     approve = fields.Boolean(required=True)
     user_id = fields.Integer(required=True)
+
+
+class UserRegistrationRequest(DefaultSchema):
+    username = fields.String(required=True)
+    password = fields.String(required=True)
+    password_verify = fields.String(required=True)
+    show_nsfw = fields.Boolean()
+    email = fields.String()
+    captcha_uuid = fields.String()
+    captcha_answer = fields.String()
+    honeypot = fields.String()
+    answer = fields.String()
+
+
+class UserRegistrationResponse(DefaultSchema):
+    jwt = fields.String()
+    registration_created = fields.Boolean()
+    verify_email_sent = fields.Boolean()
+
+
+class CaptchaFields(DefaultSchema):
+    png = fields.String()
+    wav = fields.String()
+    uuid = fields.String()
+
+
+class FetchCaptchaResponse(DefaultSchema):
+    ok = fields.List(fields.Nested(CaptchaFields))
