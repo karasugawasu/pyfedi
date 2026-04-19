@@ -106,9 +106,9 @@ def request_etag_matches(etag):
 
 def return_304(etag, content_type=None):
     resp = make_response('', 304)
-    resp.headers.add_header('ETag', request.headers['If-None-Match'])
     resp.headers.add_header('Cache-Control', 'no-cache, must-revalidate')
     if current_user.is_anonymous:
+        resp.headers.add_header('ETag', request.headers['If-None-Match'])
         resp.headers.add_header('Vary', 'Accept, Accept-Language')
     else:
         resp.headers.add_header('Vary', 'Accept, Cookie, Accept-Language')

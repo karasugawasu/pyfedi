@@ -339,8 +339,8 @@ def show_post(post_id: int, sort, low_bandwidth, autoplay):
                              f'<https://{current_app.config["SERVER_NAME"]}/post/{post.id}>; rel="alternate"; type="application/activity+json"')
         oembed_url = url_for('post.post_oembed', post_id=post.id, _external=True)
         response.headers.set('Link', f'<{oembed_url}>; rel="alternate"; type="application/json+oembed"')
-        response.headers.set('ETag', f"{post.id}{sort}_{hash(post.last_active)}")
         if current_user.is_anonymous:
+            response.headers.set('ETag', f"{post.id}{sort}_{hash(post.last_active)}")
             response.headers.set('Vary', 'Accept, Accept-Language')
             response.headers.set('Cache-Control', 'public, max-age=30')
         else:

@@ -189,8 +189,8 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
                            has_topics=num_topics() > 0, time=time,
                            user_pronouns=user_pronouns()
                            ))
-    resp.headers.set('ETag', f"{sort}_{view_filter}_{hash(str(g.site.last_active))}")
     if current_user.is_anonymous:
+        resp.headers.set('ETag', f"{sort}_{view_filter}_{hash(str(g.site.last_active))}")
         resp.headers.set('Vary', 'Accept, Accept-Language')
         resp.headers.set('Cache-Control', 'public, max-age=60')
     else:
