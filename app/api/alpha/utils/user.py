@@ -968,3 +968,11 @@ def post_user_unban(auth, data):
         abort(403)
 
     return user_view(user=target_user_id, variant=5, user_id=user.id)
+
+
+def post_user_register(data):
+    ...
+
+
+def get_user_captcha():
+    ...

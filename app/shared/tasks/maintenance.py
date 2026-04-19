@@ -231,7 +231,7 @@ def delete_old_soft_deleted_content():
                 )
 
                 for post_id in post_ids:
-                    with redis_client.lock(f"lock:post:{post_id}", timeout=10, blocking_timeout=6):
+                    with redis_client.lock(f"lock:post:{post_id}", timeout=30, blocking_timeout=30):
                         post = session.query(Post).get(post_id)
                         if post:  # Check if still exists
                             post.delete_dependencies()
@@ -247,7 +247,7 @@ def delete_old_soft_deleted_content():
                 )
 
                 for post_reply_id in post_reply_ids:
-                    with redis_client.lock(f"lock:post_reply:{post_reply_id}", timeout=10, blocking_timeout=6):
+                    with redis_client.lock(f"lock:post_reply:{post_reply_id}", timeout=30, blocking_timeout=30):
                         post_reply = session.query(PostReply).get(post_reply_id)
                         if post_reply:  # Check if still exists
                             post_reply.delete_dependencies()
