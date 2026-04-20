@@ -230,13 +230,28 @@ def delete_old_soft_deleted_content():
                     ).scalars()
                 )
 
+                # When a scheduled post re-occurs, it reuses the old image_id, resulting in there being > 1 post refering to one file.
+                # This makes deleting the post record fail when the image relationship tries to cascade the delete.
+                # Rather than fix this properly (cascade='all, delete-orphan' ??), let's just not hard delete those kinds of posts - there are not many.
+                # I'll come back to this later when I have the spoons for it.
+                posts_with_dupe_images = list(
+                    session.execute(
+                        text("""SELECT image_id
+                                FROM post
+                                WHERE image_id IS NOT NULL
+                                GROUP BY image_id
+                                HAVING COUNT(*) > 1""")
+                    ).scalars()
+                )
+
                 for post_id in post_ids:
-                    with redis_client.lock(f"lock:post:{post_id}", timeout=30, blocking_timeout=30):
-                        post = session.query(Post).get(post_id)
-                        if post:  # Check if still exists
-                            post.delete_dependencies()
-                            session.delete(post)
-                            session.commit()
+                    if post_id not in posts_with_dupe_images:
+                        with redis_client.lock(f"lock:post:{post_id}", timeout=30, blocking_timeout=30):
+                            post = session.query(Post).get(post_id)
+                            if post:  # Check if still exists
+                                post.delete_dependencies()
+                                session.delete(post)
+                                session.commit()
 
                 # Delete old post replies
                 post_reply_ids = list(
