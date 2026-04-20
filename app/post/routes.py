@@ -1037,7 +1037,7 @@ def post_edit(post_id: int):
         mod_user_ids = [mod.user_id for mod in mods]
         mod_list = User.query.filter(User.id.in_(mod_user_ids), User.deleted.is_(False)).all()
 
-    if post.user_id == current_user.id or post.community.is_moderator() or current_user.is_admin():
+    if post.user_id == current_user.id:
 
         if post.community.id in communities_banned_from(current_user.id):
             abort(403)
@@ -1862,7 +1862,7 @@ def post_reply_edit(post_id: int, comment_id: int):
         comment = None
     form = EditReplyForm()
     form.language_id.choices = languages_for_form()
-    if post_reply.user_id == current_user.id or post.community.is_moderator():
+    if post_reply.user_id == current_user.id:
         if form.validate_on_submit():
             edit_reply(form, post_reply, post, SRC_WEB)
             return redirect(post.slug if post.slug else url_for('activitypub.post_ap', post_id=post.id))
