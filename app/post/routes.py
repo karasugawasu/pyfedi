@@ -2069,6 +2069,7 @@ def post_reply_notification(post_reply_id: int):
 
 
 @bp.route('/post/<int:post_id>/cross_posts', methods=['GET'])
+@login_required_if_private_instance
 def post_cross_posts(post_id: int):
     post = Post.query.get_or_404(post_id)
     if post.cross_posts:
