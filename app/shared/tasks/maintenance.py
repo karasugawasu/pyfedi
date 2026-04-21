@@ -247,7 +247,7 @@ def delete_old_soft_deleted_content():
                 for post_id in post_ids:
                     with redis_client.lock(f"lock:post:{post_id}", timeout=30, blocking_timeout=30):
                         post = session.query(Post).get(post_id)
-                        if post and (post.image_is is None or post.image_id not in images_used_by_many_posts):
+                        if post and (post.image_id is None or post.image_id not in images_used_by_many_posts):
                             post.delete_dependencies()
                             session.delete(post)
                             session.commit()
