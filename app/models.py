@@ -676,10 +676,7 @@ class Community(db.Model):
             return f"{self.title}@{self.ap_domain}"
 
     def link(self) -> str:
-        if self.ap_id is None:
-            return self.name
-        else:
-            return self.ap_id.lower()
+        return self.name if self.ap_id is None else self.ap_id.lower()
 
     def lemmy_link(self) -> str:
         if self.ap_id is None:
@@ -2303,7 +2300,7 @@ class Post(db.Model):
                 slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
                 if slug:
                     self.ap_id = f'{current_app.config["SERVER_URL"]}/c/{community.name}/p/{self.id}/{slug}'
-                    self.slug = f'/c/{community.name}/p/{self.id}/{slug}'
+                    self.slug = f'/c/{community.link()}/p/{self.id}/{slug}'
                 else:
                     # Post title can't be slugified, fall back to old url structure
                     self.ap_id = f'{current_app.config["SERVER_URL"]}/post/{self.id}'
@@ -2321,7 +2318,7 @@ class Post(db.Model):
             if self.slug is None or self.slug == '':
                 slug = slugify(self.title, max_length=100 - len(current_app.config["SERVER_NAME"]))
                 if slug:
-                    self.slug = f'/c/{community.name}/p/{self.id}/{slug}'
+                    self.slug = f'/c/{community.link()}/p/{self.id}/{slug}'
                 else:
                     self.slug = f'/post/{self.id}'
         else:
