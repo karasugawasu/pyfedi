@@ -37,6 +37,14 @@ def example_new_registration_for_approval(application):
     return application
 
 
+@hook("webhook")
+def example_webhook(data):
+    """Hook that runs whenever a webhook is received by the instance"""
+    if int(os.environ.get('FLASK_DEBUG', '0')):
+        print(f"[PLUGIN DEBUG] Data received by webhook: {data}")
+    return data
+
+
 def plugin_info():
     """Plugin metadata"""
     return {
