@@ -3418,6 +3418,7 @@ form h5 {
 @media (min-width: 992px) {
   .h1, h1 {
     font-size: 2rem;
+    line-height: 1.3;
   }
 }
 
