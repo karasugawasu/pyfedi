@@ -3107,6 +3107,12 @@ h1 .warning_badge {
   object-fit: cover;
 }
 
+@media (min-width: 768px) {
+  table td .community_icon {
+    display: block;
+  }
+}
+
 .list-group-item .community_icon {
   vertical-align: middle;
 }
