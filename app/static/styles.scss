@@ -2310,6 +2310,13 @@ h1 .warning_badge {
   min-height: 80px;
   object-fit: cover;
   font-size: 0;
+  
+	@include breakpoint(phablet) {
+		width: 100%;
+		height: auto;
+		margin-top: calc(var(--bs-gutter-x) * .5);
+	}
+  
 }
 
 .community_icon_small {
