@@ -2914,7 +2914,7 @@ form {
           font-size: $fs17px;
 
           img {
-            margin-top: -(px2);
+            margin-top: calc(var(--spacing-4) * -1);
           }
         }
 

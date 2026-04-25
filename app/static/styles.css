@@ -3703,7 +3703,7 @@ form h5 {
 }
 
 .message_reactions .message_reaction .emoji img {
-  margin-top: -px2;
+  margin-top: calc(var(--spacing-4) * -1);
 }
 
 .message_reactions .message_reaction .emoji_alt_code {
