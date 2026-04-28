@@ -10,7 +10,7 @@ from pyld import jsonld
 from sqlalchemy import or_, and_, func
 from ua_parser import parse as uaparse
 
-from app import db, cache, limiter
+from app import db, cache, limiter, plugins
 from app.activitypub.util import users_total, active_month, local_posts, local_communities, \
     lemmy_site_data, is_activitypub_request
 from app.activitypub.signature import default_context, LDSignature, HttpSignature
@@ -1225,6 +1225,19 @@ def content_warning():
 @login_required
 def my_year_in_review(year):
     return render_template('generic_message.html', title=_('This page is intentionally left blank.'), message=_("We don't track you, so there's not much data to make graphs of."))
+
+
+@bp.route('/webhook', methods=['POST'])
+@limiter.limit("60 per 1 minutes", methods=['POST'])
+def receive_webhook():
+    payload = request.get_json()
+
+    if not payload:
+        return jsonify({"error": "no payload received"}), 400
+    
+    plugins.fire_hook("webhook", payload)
+
+    return '', 202
 
 
 @bp.route('/health', methods=['HEAD', 'GET'])
