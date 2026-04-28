@@ -482,13 +482,14 @@ def modlog():
 
     instances = {instance.id: instance.domain for instance in Instance.query.all()}
     communities = {community.id: community.display_name() for community in Community.query.filter(Community.banned == False).all()}
+    community_trusted = db.session.execute(text('SELECT c.id FROM "community" as c INNER JOIN "instance" as i on c.instance_id = i.id WHERE i.trusted is true or i.id = 1')).scalars()
 
     return render_template('modlog.html',
                            title=_('Moderation Log'), modlog_entries=modlog_entries, can_see_names=can_see_names,
                            next_url=next_url, prev_url=prev_url, low_bandwidth=low_bandwidth,
                            instances=instances, is_admin=is_admin, communities=communities,
                            mod_action=mod_action, suspect_user_name=suspect_user_name, community_id=community_id,
-                           user_name=user_name,
+                           user_name=user_name, community_trusted=list(community_trusted),
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            )
 
