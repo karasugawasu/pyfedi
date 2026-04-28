@@ -21,7 +21,7 @@ from furl import furl
 from sqlalchemy import text, Integer, update
 from sqlalchemy.exc import IntegrityError
 
-from app import db, cache, celery
+from app import db, cache, celery, plugins
 from app.activitypub.signature import signed_get_request, send_post_request, default_context
 from app.constants import *
 from app.models import User, Post, Community, File, PostReply, Instance, utcnow, \
@@ -1315,6 +1315,10 @@ def actor_json_to_model(activity_json, address, server):
             make_image_sizes(community.icon_id, 60, 250, 'communities')
         if community.image_id:
             make_image_sizes(community.image_id, 700, 1600, 'communities')
+
+        # Fire plugin hook for a new remote community
+        plugins.fire_hook("new_remote_community", community)
+
         return community
     elif activity_json['type'] == 'Feed':
         feed = db.session.query(Feed).filter(Feed.ap_profile_id == activity_json['id'].lower()).first()

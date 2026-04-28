@@ -151,6 +151,9 @@ def add_local():
         community.languages.append(Language.query.filter(Language.code == 'und').first())
         db.session.commit()
 
+        # Fire the plugin hook for a new local community
+        plugins.fire_hook("new_local_community", community)
+
         if not form.local_only.data and form.publicize.data and 'test' not in community.title.lower():
             publicize_community(community)
 
