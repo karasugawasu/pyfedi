@@ -1089,6 +1089,7 @@ class UserSaveSettingsRequest(DefaultSchema):
     cover = fields.String(allow_none=True, metadata={"format": "url", "description": "Pass a null value to remove the image"})
     default_comment_sort_type = fields.String(validate=validate.OneOf(default_comment_sorts_list))
     default_sort_type = fields.String(validate=validate.OneOf(default_sorts_list))
+    display_name = fields.String(allow_none=True, validate=validate.Length(max=255), metadata={"description": "Pass a null value to remove the display name"})
     email_unread = fields.Boolean(metadata={"description": "Receive email about missed notifications (if set up by local admin)"})
     extra_fields = fields.List(fields.Nested(NewUserExtraField),
                                metadata={"description": "A user can't have more than four total extra fields."})
