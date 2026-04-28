@@ -1560,7 +1560,7 @@ def admin_content():
                            posts=posts, post_replies=post_replies,
                            user_notes=user_notes(current_user.get_id()),
                            posts_replies=posts_replies, show=show, days=days,
-                           reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                           reported_posts=reported_posts(current_user.get_id(), current_user.get_id() in g.admin_ids),
                            moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                            )
 

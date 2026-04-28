@@ -1435,6 +1435,7 @@ ul.form-multicheck-columns li {
   font-size: 110%;
   margin-top: var(--spacing-4);
   margin-bottom: 0;
+  padding-bottom: var(--spacing-2);
   overflow: hidden;
 }
 .post_list .post_teaser .meta_row a, .post_list .post_teaser .main_row a, .post_list .post_teaser .utilities_row a {
@@ -2806,6 +2807,11 @@ h1 .warning_badge {
   object-fit: cover;
 }
 
+@media (min-width: 768px) {
+  table td .community_icon {
+    display: block;
+  }
+}
 .list-group-item .community_icon {
   vertical-align: middle;
 }
@@ -2820,7 +2826,19 @@ h1 .warning_badge {
   object-fit: cover;
   font-size: 0;
 }
+@media (min-width: 768px) {
+  .community_icon_big {
+    width: 100%;
+    height: auto;
+    margin-top: calc(var(--bs-gutter-x) * 0.5);
+  }
+}
 
+@media (min-width: 768px) {
+  .col-md-10 {
+    padding-left: 0;
+  }
+}
 .community_icon_small {
   width: var(--spacing-20);
   height: var(--spacing-20);
@@ -3083,6 +3101,7 @@ form h5 {
 @media (min-width: 992px) {
   .h1, h1 {
     font-size: 2rem;
+    line-height: 1.3;
   }
 }
 
@@ -3339,7 +3358,7 @@ form h5 {
   font-size: 17px;
 }
 .message_reactions .message_reaction .emoji img {
-  margin-top: -px2;
+  margin-top: calc(var(--spacing-4) * -1);
 }
 .message_reactions .message_reaction .emoji_alt_code {
   margin: var(--spacing-2) var(--spacing-4);

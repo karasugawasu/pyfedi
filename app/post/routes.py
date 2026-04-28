@@ -709,6 +709,7 @@ def continue_discussion(post_id, comment_id):
     for u_flair in UserFlair.query.filter(UserFlair.community_id == post.community_id):
         user_flair[u_flair.user_id] = u_flair.flair
 
+
     response = render_template('post/continue_discussion.html', title=_('Discussing %(title)s', title=post.title),
                                post=post, mods=mod_list, has_voted=has_voted, poll_results=poll_results,
                                poll_data=poll_data,
@@ -721,6 +722,7 @@ def continue_discussion(post_id, comment_id):
                                recently_downvoted_replies=recently_downvoted_replies,
                                community=post.community, parent_id=parent_id,
                                community_flair=get_comm_flair_list(post.community),
+                               user_notes=user_notes(current_user.get_id()) if current_user.is_authenticated else {},
                                user_pronouns = user_pronouns(), user_flair=user_flair,
                                SUBSCRIPTION_OWNER=SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR=SUBSCRIPTION_MODERATOR,
                                inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
