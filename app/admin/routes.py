@@ -1672,10 +1672,11 @@ def admin_user_edit(user_id):
             db.session.delete(file)
 
         # Update user roles. The UI only lets the user choose 1 role but the DB structure allows for multiple roles per user.
-        db.session.execute(text('DELETE FROM user_role WHERE user_id = :user_id'), {'user_id': user.id})
-        user.roles.append(Role.query.get(form.role.data))
-        if form.role.data == 4:
-            flash(_("Permissions are cached for 50 seconds so new admin roles won't take effect immediately."))
+        if user_access('change user roles'):
+            db.session.execute(text('DELETE FROM user_role WHERE user_id = :user_id'), {'user_id': user.id})
+            user.roles.append(Role.query.get(form.role.data))
+            if form.role.data == 4:
+                flash(_("Permissions are cached for 50 seconds so new admin roles won't take effect immediately."))
 
         db.session.commit()
         cache.delete_memoized(low_value_reposters)
