@@ -24,4 +24,8 @@ Plugins can have their code executed by adding a @hook decorator to a function. 
 
   - `new_registration_for_approval` - is run when a user has submitted an application and (if applicable) verified their email, but the application is awaiting admin approval. The `UserRegistration` object is passed to this plugin as an argument.
 
+  - `new_local_community` - is run whenever a new local community is created on the instance and the `Community` object is passed as a parameter
+
+  - `new_remote_community` - is run whenever a new remote community is federated to the instance and the `Community` object is passed as a parameter
+
 More hooks will be added over time, presently the plugin engine is still experimental and undergoing heavy development.
