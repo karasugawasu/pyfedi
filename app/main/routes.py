@@ -167,6 +167,8 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
         recently_upvoted = []
         recently_downvoted = []
         communities_banned_from_list = []
+    
+    user_id = current_user.get_id()
 
     resp = make_response(render_template('index.html', posts=posts, active_communities=active_communities,
                            new_communities=new_communities, upcoming_events=upcoming_events,
@@ -180,10 +182,10 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
                            description=shorten_string(html_to_text(g.site.sidebar), 150),
                            content_filters=content_filters, sort=sort, view_filter=view_filter,
                            announcement=get_setting('announcement_html', get_setting('announcement')),
-                           reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
-                           user_notes=user_notes(current_user.get_id()),
-                           joined_communities=joined_or_modding_communities(current_user.get_id()),
-                           moderated_community_ids=moderating_communities_ids(current_user.get_id()),
+                           reported_posts=reported_posts(user_id, user_id in g.admin_ids),
+                           user_notes=user_notes(user_id),
+                           joined_communities=joined_or_modding_communities(user_id),
+                           moderated_community_ids=moderating_communities_ids(user_id),
                            inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                            enable_mod_filter=enable_mod_filter,
                            has_topics=num_topics() > 0, time=time,

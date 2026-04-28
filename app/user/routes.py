@@ -121,7 +121,7 @@ def show_profile(user):
                            replies_next_url=replies_next_url, replies_prev_url=replies_prev_url,
                            noindex=not user.indexable, show_post_community=True, hide_vote_buttons=True,
                            show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff(),
-                           reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                           reported_posts=reported_posts(current_user.get_id(), current_user.get_id() in g.admin_ids),
                            moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                            rss_feed=f"{current_app.config['SERVER_URL']}/u/{user.link()}/feed" if user.post_count > 0 else None,
                            rss_feed_name=f"{user.display_name()} on {g.site.name}" if user.post_count > 0 else None,
