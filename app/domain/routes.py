@@ -92,7 +92,7 @@ def show_domain(domain_id):
                                    content_filters=content_filters, recently_upvoted=recently_upvoted,
                                    recently_downvoted=recently_downvoted,
                                    user_pronouns=user_pronouns(),
-                                   reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                                   reported_posts=reported_posts(current_user.get_id(), current_user.get_id() in g.admin_ids),
                                    joined_communities=joined_or_modding_communities(current_user.get_id()),
                                    moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                                    rss_feed=f"{current_app.config['SERVER_URL']}/d/{domain.id}/feed" if domain.post_count > 0 else None,
