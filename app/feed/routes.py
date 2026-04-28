@@ -528,7 +528,7 @@ def show_feed(feed):
                                              joined_communities=joined_or_modding_communities(current_user.get_id()),
                                              moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                                              recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
-                                             reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                                             reported_posts=reported_posts(current_user.get_id(), current_user.get_id() in g.admin_ids),
                                              user_notes=user_notes(current_user.get_id()),
                                              user_pronouns=user_pronouns(),
                                              inoculation=inoculation[
