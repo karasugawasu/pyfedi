@@ -19,6 +19,7 @@ COMMUNITY_HASHTAG_MAP = {
     67: ["PieFed"],            #PieFed JP
     112: ["DQウォーク", "DQW"],  #DQW
     116: ["capsicum"],           #capsicum
+    118: ["DQSG", "ドラクエスマグロ"], #スマグロ
 }
 
 def configured_communities_by_id():
