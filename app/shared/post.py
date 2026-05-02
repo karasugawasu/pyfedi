@@ -243,7 +243,7 @@ def make_post(input, community, type, src, auth=None, uploaded_file=None):
 def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=None, from_scratch=False, hash=None):
     if src == SRC_API:
         if not user:
-           user = authorise_api_user(auth, return_type='model')
+           user = authorise_api_user(auth, return_type='model', id_match=post.user_id)
         title = input['title'].strip()
         body = input['body']
         url = input['url']
@@ -739,7 +739,8 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
 # just for deletes by owner (mod deletes are classed as 'remove')
 def delete_post(post_id: int, federate_deletion, src, auth):
     if src == SRC_API:
-        user_id = authorise_api_user(auth)
+        post = db.session.query(Post).get(post_id)
+        user_id = authorise_api_user(auth, id_match=post.user_id)
     else:
         if current_user:
             user_id = current_user.id
@@ -778,7 +779,8 @@ def delete_post(post_id: int, federate_deletion, src, auth):
 
 def restore_post(post_id: int, src, auth):
     if src == SRC_API:
-        user_id = authorise_api_user(auth)
+        post = db.session.query(Post).get(post_id)
+        user_id = authorise_api_user(auth, id_match=post.user_id)
     else:
         user_id = current_user.id
 
@@ -940,21 +942,23 @@ def move_post(post_id: int, target_id: int, src, auth=None):
         user = current_user
 
     post = db.session.query(Post).get(post_id)
-    old_community_id = post.community_id
-    target_community = db.session.query(Community).get(target_id)
 
-    post.move_to(target_community)
-    db.session.commit()
+    if post.community.is_moderator(user) or post.community.is_instance_admin(user) or user.is_admin_or_staff():
+        old_community_id = post.community_id
+        target_community = db.session.query(Community).get(target_id)
 
-    add_to_modlog('move_post', actor=user, target_user=post.author, reason='',
-                  community=target_community, post=post,
-                  link_text=shorten_string(post.title), link=f'post/{post.id}')
+        post.move_to(target_community)
+        db.session.commit()
 
-    if src == SRC_WEB:
-        flash(_('%(name)s has been moved.', name=post.title))
+        add_to_modlog('move_post', actor=user, target_user=post.author, reason='',
+                      community=target_community, post=post,
+                      link_text=shorten_string(post.title), link=f'post/{post.id}')
 
-    task_selector('move_post', user_id=user.id, old_community_id=old_community_id,
-                  new_community_id=target_community.id, post_id=post_id)
+        if src == SRC_WEB:
+            flash(_('%(name)s has been moved.', name=post.title))
+
+        task_selector('move_post', user_id=user.id, old_community_id=old_community_id,
+                      new_community_id=target_community.id, post_id=post_id)
 
     if src == SRC_API:
         return user.id, post

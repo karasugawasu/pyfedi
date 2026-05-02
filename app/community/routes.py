@@ -29,7 +29,7 @@ from app.community.util import search_for_community, actor_to_community, \
     save_icon_file, save_banner_file, \
     delete_post_from_community, delete_post_reply_from_community, \
     find_potential_moderators, hashtags_used_in_community, publicize_community, \
-    community_theme_list
+    community_theme_list, set_community_theme_allowed, get_community_theme_allowed
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, POST_TYPE_LINK, POST_TYPE_ARTICLE, POST_TYPE_IMAGE, \
     SUBSCRIPTION_PENDING, SUBSCRIPTION_MODERATOR, REPORT_STATE_NEW, REPORT_STATE_ESCALATED, REPORT_STATE_RESOLVED, \
     REPORT_STATE_DISCARDED, POST_TYPE_VIDEO, NOTIF_COMMUNITY, NOTIF_POST, POST_TYPE_POLL, MICROBLOG_APPS, SRC_WEB, \
@@ -152,6 +152,9 @@ def add_local():
         # Always include the undetermined language, so posts with no language will be accepted
         community.languages.append(Language.query.filter(Language.code == 'und').first())
         db.session.commit()
+
+        # Fire the plugin hook for a new local community
+        plugins.fire_hook("new_local_community", community)
 
         if not form.local_only.data and form.publicize.data and 'test' not in community.title.lower():
             publicize_community(community)
@@ -401,19 +404,12 @@ def show_community(community: Community):
             posts = posts.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING)
 
             # filter domains and instances
-            domains_ids = blocked_domains(current_user.id)
-            if domains_ids:
+            if domains_ids := blocked_domains(current_user.id):
                 posts = posts.filter(or_(Post.domain_id.not_in(domains_ids), Post.domain_id == None))
-            instance_ids = blocked_or_banned_instances(current_user.id)
-            if instance_ids:
+            if instance_ids := blocked_or_banned_instances(current_user.id):
                 posts = posts.filter(or_(Post.instance_id.not_in(instance_ids), Post.instance_id == None))
-            community_ids = blocked_communities(current_user.id)
-            if community_ids:
-                posts = posts.filter(Post.community_id.not_in(community_ids))
-
             # filter blocked users
-            blocked_accounts = blocked_users(current_user.id)
-            if blocked_accounts:
+            if blocked_accounts := blocked_users(current_user.id):
                 posts = posts.filter(Post.user_id.not_in(blocked_accounts))
 
         # Filter by post flair
@@ -664,15 +660,15 @@ def show_community(community: Community):
                                          rss_feed_name=f"{community.title} on {g.site.name}",
                                          content_filters=content_filters, sort=sort, flair=flair, show_post_community=False,
                                          tags=hashtags_used_in_community(community.id, content_filters),
-                                         reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                                         reported_posts=reported_posts(current_user.get_id(), current_user.get_id() in g.admin_ids),
                                          user_notes=user_notes(current_user.get_id()), banned_from_community=banned_from_community,
                                          moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                                          inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
                                          post_layout=post_layout, content_type=content_type, current_app=current_app,
                                          user_has_feeds=user_has_feeds, current_feed_id=current_feed_id,
                                          current_feed_title=current_feed_title, user_flair=user_flair, sticky_posts=sticky_posts))
-    resp.headers.set('ETag', f"{community.id}{sort}{post_layout}_{hash(community.last_active)}")
     if current_user.is_anonymous:
+        resp.headers.set('ETag', f"{community.id}{sort}{post_layout}_{hash(community.last_active)}")
         resp.headers.set('Vary', 'Accept, Accept-Language')
         resp.headers.set('Cache-Control', 'public, max-age=30')
     else:
@@ -1235,19 +1231,29 @@ def community_edit(community_id: int):
 
             icon_file = request.files['icon_file']
             if icon_file and icon_file.filename != '':
-                if community.icon_id:
-                    community.icon.delete_from_disk()
+                # Store old icon ID before uploading new one
+                old_icon_id = community.icon_id
                 file = save_icon_file(icon_file)
                 if file:
                     community.icon = file
+                    # Only delete old icon after new one is successfully saved
+                    if old_icon_id:
+                        old_icon_file = File.query.get(old_icon_id)
+                        db.session.delete(old_icon_file)
+                        old_icon_file.delete_from_disk()
             banner_file = request.files['banner_file']
             if banner_file and banner_file.filename != '':
-                if community.image_id:
-                    community.image.delete_from_disk()
+                # Store old banner ID before uploading new one
+                old_banner_id = community.image_id
                 file = save_banner_file(banner_file)
                 if file:
                     community.image = file
                     cache.delete_memoized(Community.header_image, community)
+                    # Only delete old banner after new one is successfully saved
+                    if old_banner_id:
+                        old_banner_file = File.query.get(old_banner_id)
+                        db.session.delete(old_banner_file)
+                        old_banner_file.delete_from_disk()
 
             # Languages of the community
             db.session.execute(text('DELETE FROM "community_language" WHERE community_id = :community_id'),
@@ -1331,6 +1337,22 @@ def remove_header(community_id):
             db.session.commit()
             cache.delete_memoized(Community.header_image, community)
     return '<div> ' + _('Banner removed!') + '</div>'
+
+@bp.route('/community/<int:community_id>/<int:user_id>/flip_community_theme_allowed', methods=['POST'])
+@login_required
+def flip_community_theme_allowed(community_id:int,user_id:int):
+    community_theme_allowed = not get_community_theme_allowed(community_id,user_id)
+    set_community_theme_allowed(community_id,user_id,community_theme_allowed)
+    if community_theme_allowed:
+        resp = make_response(_('Disable theme'))
+        resp.headers["HX-Refresh"] = "true"
+        print(resp)
+        return resp
+    else:
+        resp = make_response(_('Enable theme'))
+        resp.headers["HX-Refresh"] = "true"
+        print(resp)
+        return resp
 
 
 @bp.route('/community/<int:community_id>/delete', methods=['GET', 'POST'])

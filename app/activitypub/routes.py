@@ -113,7 +113,7 @@ def webfinger():
             return ''
 
         webfinger_data = {
-            "subject": f"acct:{actor.strip().lower()}@{current_app.config['SERVER_NAME']}",
+            "subject": f"acct:{actor.strip()}@{current_app.config['SERVER_NAME']}",
             "aliases": [object.public_url()],
             "links": [
                 {

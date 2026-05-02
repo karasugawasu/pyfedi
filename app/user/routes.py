@@ -76,7 +76,6 @@ def show_profile(user):
 
     # posts and replies
     moderates = _get_user_moderates(user)
-    upvoted = _get_user_upvoted_posts(user)
     subscribed = _get_user_subscribed_communities(user)
     posts = _get_user_posts(user, post_page)
     post_replies = _get_user_post_replies(user, replies_page)
@@ -116,13 +115,13 @@ def show_profile(user):
     return render_template('user/show_profile.html', user=user, posts=posts, post_replies=post_replies,
                            moderates=moderates, canonical=canonical, title=_('Posts by %(user_name)s',
                                                                              user_name=user.user_name),
-                           description=description, subscribed=subscribed, upvoted=upvoted, disable_voting=True,
+                           description=description, subscribed=subscribed, disable_voting=True,
                            user_notes=user_notes(current_user.get_id()),
                            post_next_url=post_next_url, post_prev_url=post_prev_url,
                            replies_next_url=replies_next_url, replies_prev_url=replies_prev_url,
                            noindex=not user.indexable, show_post_community=True, hide_vote_buttons=True,
                            show_deleted=current_user.is_authenticated and current_user.is_admin_or_staff(),
-                           reported_posts=reported_posts(current_user.get_id(), g.admin_ids),
+                           reported_posts=reported_posts(current_user.get_id(), current_user.get_id() in g.admin_ids),
                            moderated_community_ids=moderating_communities_ids(current_user.get_id()),
                            rss_feed=f"{current_app.config['SERVER_URL']}/u/{user.link()}/feed" if user.post_count > 0 else None,
                            rss_feed_name=f"{user.display_name()} on {g.site.name}" if user.post_count > 0 else None,
@@ -130,6 +129,26 @@ def show_profile(user):
                            overview_items=overview_items, overview_next_url=overview_next_url,
                            overview_prev_url=overview_prev_url, same_ip_address=same_ip_address,
                            archived_post_replies=archived_post_replies)
+
+
+@bp.route('/u/<actor>/upvotes')
+@login_required_if_private_instance
+def user_upvotes(actor):
+    actor = actor.strip()
+    if '@' in actor:
+        user = find_actor_or_create(actor, create_if_not_found=False)
+    else:
+        user = find_actor_or_create(f'{current_app.config["SERVER_URL"]}/u/{actor}', create_if_not_found=False)
+
+    upvoted = _get_user_upvoted_posts(user)
+
+    if user is not None:
+        return render_template('user/show_upvoted.html', user=user,
+                               title=_('Posts upvoted by %(user_name)s', user_name=user.user_name),
+                               upvoted=upvoted, disable_voting=True,
+                               user_notes=user_notes(current_user.get_id()),
+                               rss_feed=f"{current_app.config['SERVER_URL']}/u/{user.link()}/feed" if user.post_count > 0 else None,
+                               rss_feed_name=f"{user.display_name()} on {g.site.name}" if user.post_count > 0 else None)
 
 
 @bp.route('/u/<actor>/profile', methods=['GET', 'POST'])
@@ -180,35 +199,40 @@ def edit_profile(actor):
             current_user.extra_fields.append(
                 UserExtraField(label=form.extra_label_4.data.strip(), text=form.extra_text_4.data.strip()))
         current_user.bot = form.bot.data
+        db.session.commit()
+
         profile_file = request.files['profile_file']
         if profile_file and profile_file.filename != '':
-            # remove old avatar
-            if current_user.avatar_id:
-                file = File.query.get(current_user.avatar_id)
-                file.delete_from_disk()
-                current_user.avatar_id = None
-                db.session.delete(file)
+            # remove old avatar after adding the new one succeeds
+            old_avatar = current_user.avatar_id
 
             # add new avatar
             file = save_icon_file(profile_file, 'users')
             if file:
                 current_user.avatar = file
+                if old_avatar:
+                    old_file = File.query.get(old_avatar)
+                    db.session.delete(old_file)
+                db.session.commit()
+                if old_avatar:
+                    old_file.delete_from_disk()
+
         banner_file = request.files['banner_file']
         if banner_file and banner_file.filename != '':
             # remove old cover
-            if current_user.cover_id:
-                file = File.query.get(current_user.cover_id)
-                file.delete_from_disk()
-                current_user.cover_id = None
-                db.session.delete(file)
+            old_banner = current_user.cover_id
 
             # add new cover
             file = save_banner_file(banner_file, 'users')
             if file:
                 current_user.cover = file
                 cache.delete_memoized(User.cover_image, current_user)
-
-        db.session.commit()
+                if old_banner:
+                    old_banner_file = File.query.get(old_banner)
+                    db.session.delete(old_banner_file)
+                db.session.commit()
+                if old_banner:
+                    old_banner_file.delete_from_disk()
 
         # Sync to LDAP
         try:

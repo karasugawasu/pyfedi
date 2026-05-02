@@ -16,6 +16,7 @@ post_sort_list = ["Hot", "Top", "TopHour", "TopSixHour", "TopTwelveHour", "TopWe
 comment_sort_list = ["Hot", "Top", "TopAll", "New", "Old", "Controversial"]
 community_sort_list = ["Hot", "Top", "New", "Old", "Active", "TopAll", "TopPosts", "TopSubscribers", "NewFederated", "OldFederated"]
 listing_type_list = ["All", "Local", "Subscribed", "Popular", "Moderating", "ModeratorView"]
+nsfw_type_list = ["Exclude", "Only", "Include"]
 community_listing_type_list = ["All", "Local", "Subscribed", "Moderating", "ModeratorView"]
 content_type_list = ["Communities", "Posts", "Users", "Url", "Comments"]
 subscribed_type_list = ["Subscribed", "NotSubscribed", "Pending"]
@@ -1088,6 +1089,7 @@ class UserSaveSettingsRequest(DefaultSchema):
     cover = fields.String(allow_none=True, metadata={"format": "url", "description": "Pass a null value to remove the image"})
     default_comment_sort_type = fields.String(validate=validate.OneOf(default_comment_sorts_list))
     default_sort_type = fields.String(validate=validate.OneOf(default_sorts_list))
+    display_name = fields.String(allow_none=True, validate=validate.Length(max=255), metadata={"description": "Pass a null value to remove the display name"})
     email_unread = fields.Boolean(metadata={"description": "Receive email about missed notifications (if set up by local admin)"})
     extra_fields = fields.List(fields.Nested(NewUserExtraField),
                                metadata={"description": "A user can't have more than four total extra fields."})
@@ -1470,6 +1472,7 @@ class ListPostsRequest(Schema):
     community_name = fields.String()
     community_id = fields.Integer()
     saved_only = fields.Boolean(metadata={"default": False})
+    nsfw = fields.String(validate=validate.OneOf(nsfw_type_list), metadata={"default": 'Include'}, required=False)
     person_id = fields.Integer()
     limit = fields.Integer(metadata={"default": 50})
     page = fields.Integer(metadata={"default": 1})
@@ -1892,3 +1895,31 @@ class GetRegistrationListResponse(DefaultSchema):
 class RegistrationApproveRequest(DefaultSchema):
     approve = fields.Boolean(required=True)
     user_id = fields.Integer(required=True)
+
+
+class UserRegistrationRequest(DefaultSchema):
+    username = fields.String(required=True)
+    password = fields.String(required=True)
+    password_verify = fields.String(required=True)
+    show_nsfw = fields.Boolean()
+    email = fields.String()
+    captcha_uuid = fields.String()
+    captcha_answer = fields.String()
+    honeypot = fields.String()
+    answer = fields.String()
+
+
+class UserRegistrationResponse(DefaultSchema):
+    jwt = fields.String()
+    registration_created = fields.Boolean()
+    verify_email_sent = fields.Boolean()
+
+
+class CaptchaFields(DefaultSchema):
+    png = fields.String()
+    wav = fields.String()
+    uuid = fields.String()
+
+
+class FetchCaptchaResponse(DefaultSchema):
+    ok = fields.List(fields.Nested(CaptchaFields))

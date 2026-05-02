@@ -77,6 +77,7 @@ def convert_archived_replies_to_tree(archived_replies: list, post: Post) -> List
         post_reply.down_votes = reply_data.get('down_votes', 0)
         post_reply.child_count = reply_data.get('child_count', 0)
         post_reply.path = reply_data.get('path', [])
+        post_reply.answer = reply_data.get('answer', False)
         post_reply.reports = 0
         
         # Post relationship
