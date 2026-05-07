@@ -80,12 +80,9 @@
             {% endif -%}
         </div>
         {% if post.type == POST_TYPE_LINK and post.url and not post.deleted -%}
-            <p class="mt-2 post_link">
+            <p class="mt-2">
                 <a href="{{ post.url }}" rel="nofollow ugc" target="_blank" class="post_link" aria-label="Go to post url" title="{{ post.url }}">
-                    <span
-                        class="fe fe-external"
-                        title="{{ post.domain.post_warning }}"
-                    ></span>
+                    <span class="fe fe-link-diagonal"></span>
                     {{ post.url }}
                 </a>
                 {% if post.domain.post_warning -%}
@@ -174,14 +171,10 @@
                 {% endif -%}
             {% endif -%}
         {% elif post.type == POST_TYPE_VIDEO and post.url and not post.deleted -%}
-            <p class="post_link">
+            <p>
                 <a href="{{ post.url }}" rel="nofollow ugc" target="_blank" class="post_link" aria-label="Go to post url">
-                    <span
-                        class="fe fe-external"
-                        title="{{ post.domain.post_warning }}"
-                    ></span>
-                    {{ post.url|shorten_url }}
-                    <span class="fe fe-external"></span>
+                    <span class="fe fe-link-diagonal"></span>
+                    {{ post.url }}
                 </a>
             </p>
             {% if post.url.endswith('.mp4') or post.url.endswith('.webm') or '.mp4?' in post.url or '.webm?' in post.url -%}
@@ -281,7 +274,7 @@
             {% if archive_link -%}
                 <p>
                     <a href="{{ archive_link }}" rel="nofollow ucg noindex" target="_blank">
-                        {{ _('Archive.ph link') }} <span class="fe fe-external"></span>
+                        {{ _('No paywall link') }} <span class="fe fe-external"></span>
                     </a>
                 </p>
             {% endif -%}
