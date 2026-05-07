@@ -159,12 +159,9 @@ span.score {
   }
 }
 
-.post_link a {
-    color: var(--bs-secondary);
-    display: inline-block;
-    max-width: 80%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    vertical-align: bottom;
+.post_link {
+  max-width: 80% !important;
+  font-size:small;
+  border: 1px solid var(--bs-secondary-bg);
+  background-color: transparent !important;
 }
