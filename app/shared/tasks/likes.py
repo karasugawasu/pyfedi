@@ -48,20 +48,28 @@ def add_custom_emoji_tag(payload, emoji):
     return payload
 
 
-def vote_delivery_details(instance, vote_payload, announce_payload, target_author_inbox, user, community):
-    if instance.software in MICROBLOG_APPS:
+def vote_delivery_details(instance, vote_payload, announce_payload, target_author, user, community):
+    direct_microblog_like = (
+        instance.software in MICROBLOG_APPS
+        and target_author
+        and target_author.instance_id == instance.id
+    )
+
+    if direct_microblog_like:
         return {
-            'inbox': target_author_inbox or instance.inbox,
+            'inbox': target_author.ap_inbox_url or instance.inbox,
             'payload': vote_payload,
             'private_key': user.private_key,
-            'key_id': user.public_url() + '#main-key'
+            'key_id': user.public_url() + '#main-key',
+            'direct_microblog_like': True,
         }
 
     return {
         'inbox': instance.inbox,
         'payload': announce_payload,
         'private_key': community.private_key,
-        'key_id': community.public_url() + '#main-key'
+        'key_id': community.public_url() + '#main-key',
+        'direct_microblog_like': False,
     }
 
 
@@ -192,11 +200,11 @@ def send_vote(user_id, object, vote_to_undo, vote_direction, emoji):
                         instance,
                         undo_public if vote_to_undo else vote_public,
                         announce,
-                        object.author.ap_inbox_url if object.author else None,
+                        object.author,
                         user,
                         community
                     )
-                    if current_app.config['NOTIF_SERVER'] and instance.software not in MICROBLOG_APPS:   # Votes make up a very high percentage of activities, so it is more efficient to send them via fastapi_server.py. However fastapi_server.py does not retry failed sends. For votes this is acceptable.
+                    if current_app.config['NOTIF_SERVER'] and not delivery['direct_microblog_like']:   # Votes make up a very high percentage of activities, so it is more efficient to send them via fastapi_server.py. However fastapi_server.py does not retry failed sends. For votes this is acceptable.
                         send_async.append(HttpSignature.signed_request(delivery['inbox'], delivery['payload'],
                                                                        delivery['private_key'],
                                                                        delivery['key_id'],
