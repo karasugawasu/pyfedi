@@ -508,6 +508,10 @@ h1 .fe-bell, h1 .fe-no-bell {
   content: "\e907";
 }
 
+.fe-back::before {
+  content: "\e92f";
+}
+
 .fe-add-person::before {
   content: "\e9f2";
 }
@@ -3109,6 +3113,37 @@ form h5 {
 
 .blocked_image img {
   filter: grayscale(100%) blur(var(--spacing-4)) !important;
+}
+
+#navbar-back-ios {
+  display: none;
+}
+
+.display_back_button #navbar-back-ios {
+  display: inline;
+  font-size: 30px;
+  line-height: 30px;
+  position: relative;
+  left: -6px;
+}
+
+#loading_animation {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(2px);
+}
+#loading_animation.hidden {
+  display: none;
+}
+#loading_animation img {
+  width: 30px;
+  height: 30px;
 }
 
 .dropdown-header {

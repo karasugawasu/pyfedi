@@ -464,6 +464,8 @@ def show_community(community: Community):
             posts = posts.filter(Post.reply_count > 0)
             posts = posts.order_by(desc(Post.sticky)).order_by(desc(Post.last_active))
         per_page = 20 if low_bandwidth else current_app.config['PAGE_LENGTH']
+        if current_user.is_authenticated and current_user.page_length and current_user.page_length < per_page:
+            per_page = current_user.page_length
         if post_layout == 'masonry':
             per_page = 200
         elif post_layout == 'masonry_wide':
@@ -1111,9 +1113,9 @@ def add_post(actor, type=None):
         form.language_id.data = current_user.language_id or g.site.language_id
 
         # The source query parameter is used when cross-posting - load the source post's content into the form
-        if (post_type == POST_TYPE_LINK or post_type == POST_TYPE_VIDEO) and request.args.get('source'):
+        if request.args.get('source'):
             source_post = Post.query.get(request.args.get('source'))
-            if source_post.deleted:
+            if source_post is None or source_post.deleted:
                 abort(404)
             form.title.data = source_post.title
             form.body.data = source_post.body
@@ -1121,11 +1123,13 @@ def add_post(actor, type=None):
             form.nsfl.data = source_post.nsfl
             form.ai_generated.data = source_post.ai_generated
             form.language_id.data = source_post.language_id
+            form.tags.data = tags_to_string(source_post)
             if post_type == POST_TYPE_LINK:
+                # Source could be a LINK, IMAGE, or video-hosted-link post —
+                # all three end up here. source_post.url is the right value for all.
                 form.link_url.data = source_post.url
             elif post_type == POST_TYPE_VIDEO:
                 form.video_url.data = source_post.url
-            form.tags.data = tags_to_string(source_post)
 
         if (post_type == POST_TYPE_LINK or post_type == POST_TYPE_VIDEO) and request.args.get('link'):
             if post_type == POST_TYPE_LINK:
@@ -2630,7 +2634,7 @@ def retrieve_metadata_of_url(url):
     title = ''
     description = ''
     try:
-        response = httpx_client.get(url, timeout=10, follow_redirects=True)
+        response = httpx_client.get(url, timeout=10, follow_redirects=False)
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, 'html.parser')
 

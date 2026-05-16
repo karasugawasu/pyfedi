@@ -32,7 +32,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import time
 from datetime import datetime, timedelta, timezone
 from email.utils import formatdate, parsedate_to_datetime
 from typing import Literal, TypedDict, cast
@@ -52,7 +51,7 @@ from sqlalchemy import text
 from app import db, celery, httpx_client
 from app.constants import DATETIME_MS_FORMAT
 from app.models import utcnow, ActivityPubLog, Community, Instance, CommunityMember, User, SendQueue
-from app.utils import get_task_session
+from app.utils import get_task_session, is_invalid_post_request_uri, is_invalid_get_request_uri
 
 
 def http_date(epoch_seconds=None):
@@ -96,6 +95,8 @@ def send_post_request(uri: str, body: dict | None, private_key: str, key_id: str
 def post_request(uri: str, body: dict | None, private_key: str, key_id: str,
                  content_type: str = "application/activity+json",
                  method: Literal["get", "post"] = "post", timeout: int = 10, retries: int = 0):
+    if is_invalid_post_request_uri(uri):
+        return
     session = get_task_session()
     try:
         if '@context' not in body:  # add a default json-ld context if necessary
@@ -400,18 +401,6 @@ class HttpSignature:
         """
         Verifies that the request has a valid signature for its body
         """
-        # Verify body digest
-        if "digest" in request.headers:
-            expected_digest = HttpSignature.calculate_digest(request.data)
-            if request.headers["digest"] != expected_digest:
-                raise VerificationFormatError("Digest is incorrect")
-
-        # Verify date header
-        if "date" in request.headers and not skip_date:
-            header_date = parse_http_date(request.headers["date"])
-            if abs((datetime.now(timezone.utc) - header_date).total_seconds()) > 3600:
-                raise VerificationFormatError("Date is too far away")
-
         # Get the signature details
         if "signature" not in request.headers:
             raise VerificationFormatError("No signature header present")
@@ -452,6 +441,8 @@ class HttpSignature:
         """
         if "://" not in uri:
             raise ValueError("URI does not contain a scheme")
+        if is_invalid_get_request_uri(uri):
+            raise ValueError("URI is invalid")
         # Create the core header field set
         uri_parts = urlparse(uri)
         date_string = http_date()
