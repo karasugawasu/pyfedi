@@ -21,6 +21,9 @@ from time import sleep
 from typing import List, Tuple, Optional
 from urllib.parse import urlparse, parse_qs, urlencode
 from zoneinfo import available_timezones
+import socket
+import os
+import ipaddress
 
 import pendulum
 import flask
@@ -37,8 +40,7 @@ from app.markdown_extras import apply_enhanced_image_attributes
 from app.translation import LibreTranslateAPI
 
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
-import os
-import ipaddress
+
 from furl import furl
 from flask import current_app, json, redirect, url_for, request, make_response, Response, g, flash, abort
 from flask_babel import _, lazy_gettext as _l
@@ -56,6 +58,7 @@ from app import db, cache, httpx_client, celery, plugins
 from app.constants import *
 import re
 from PIL import Image, ImageOps, ImageCms
+from py_svg_hush import filter_svg
 
 from captcha.audio import AudioCaptcha
 from captcha.image import ImageCaptcha
@@ -175,21 +178,6 @@ def get_request_instance(uri, instance: Instance, params=None, headers=None) -> 
         instance.update_dormant_gone()
         db.session.commit()
         return httpx.Response(status_code=500)
-
-
-# do a HEAD request to a uri, return the result
-def head_request(uri, params=None, headers=None) -> httpx.Response:
-    if headers is None:
-        headers = {'User-Agent': f'PieFed/{current_app.config["VERSION"]}; +https://{current_app.config["SERVER_NAME"]}'}
-    else:
-        headers.update({'User-Agent': f'PieFed/{current_app.config["VERSION"]}; +https://{current_app.config["SERVER_NAME"]}'})
-    try:
-        response = httpx_client.head(uri, params=params, headers=headers, timeout=5, allow_redirects=True)
-    except httpx.HTTPError as er:
-        current_app.logger.info(f"{uri} {er}")
-        raise httpx.HTTPError(f"HTTPError: {str(er)}") from er
-
-    return response
 
 
 # Saves an arbitrary object into a persistent key-value store. cached.
@@ -2359,6 +2347,8 @@ def opengraph_parse(url):
 
 
 def url_to_thumbnail_file(filename) -> File:
+    if is_invalid_get_request_uri(filename):
+        return None
     try:
         timeout = 15 if 'washingtonpost.com' in filename else 5  # Washington Post is really slow for some reason
         response = httpx_client.get(filename, timeout=timeout)
@@ -2368,8 +2358,10 @@ def url_to_thumbnail_file(filename) -> File:
     if response.status_code == 200:
         content_type = response.headers.get('content-type')
         if content_type and content_type.startswith('image'):
-            # Don't need to generate thumbnail for svg image
+            # Sanitize SVG files to remove potentially dangerous elements
+            response_content = response.content
             if "svg" in content_type:
+                response_content = sanitize_svg_bytes(response_content)
                 file_extension = final_ext = ".svg"
             else:
                 # Generate file extension from mime type
@@ -2387,6 +2379,10 @@ def url_to_thumbnail_file(filename) -> File:
                     if '?' in file_extension:
                         file_extension = file_extension.split('?')[0]
 
+            # Also sanitize if file extension is .svg (regardless of content-type)
+            if file_extension == '.svg' and "svg" not in content_type:
+                response_content = sanitize_svg_bytes(response_content)
+
             new_filename = gibberish(15)
             if store_files_in_s3():
                 directory = 'app/static/tmp'
@@ -2396,7 +2392,7 @@ def url_to_thumbnail_file(filename) -> File:
             temp_file_path = os.path.join(directory, new_filename + file_extension)
 
             with open(temp_file_path, 'wb') as f:
-                f.write(response.content)
+                f.write(response_content)
             response.close()
 
             if file_extension != ".svg":
@@ -4525,15 +4521,76 @@ def display_back_button():
 def is_invalid_get_request_uri(uri):
     if current_app.debug:
         return False
-    try:
-        ip = ipaddress.ip_address(furl(uri).host)
-    except:
-        ip = None
 
-    if ip:
-        return ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_loopback or ip.is_multicast or ip.is_unspecified
-    return False
+    try:
+        f = furl(uri)
+        if not f.host:
+            return True
+
+        if f.host.endswith(".local"):
+            return True
+
+        if f.scheme not in ("http", "https"):
+            return True
+
+        # check if host is an IP literal
+        try:
+            ip = ipaddress.ip_address(f.host)
+            ips = [ip]
+        except ValueError:
+            # otherwise, resolve hostname and check the IP(s) associated with that.
+            infos = socket.getaddrinfo(f.host, None)
+            ips = []
+
+            for info in infos:
+                sockaddr = info[4]
+                ip_str = sockaddr[0]
+                ips.append(ipaddress.ip_address(ip_str))
+
+        if any(not ip.is_global for ip in ips):
+            return True
+
+        return False
+
+    except Exception:
+        return True
 
 
 def is_invalid_post_request_uri(uri):
     return is_invalid_get_request_uri(uri)
+
+
+def sanitize_svg_bytes(svg_bytes: bytes) -> bytes:
+    # Sanitize SVGs to remove potentially dangerous elements.
+
+    try:
+        # Allow common image MIME types in data URLs
+        keep_data_url_mime_types = {
+            "image": ["jpeg", "png", "gif", "webp", "avif"],
+        }
+
+        return filter_svg(svg_bytes, keep_data_url_mime_types)
+    except Exception as e:
+        current_app.logger.error(f"Error sanitizing SVG: {e}")
+        return svg_bytes
+
+
+def sanitize_svg(filepath: str) -> bool:
+    """
+    Sanitize an SVG file using py-svg-hush to remove potentially dangerous elements.
+    Returns True if sanitization was successful, False otherwise.
+    """
+    try:
+
+        with open(filepath, 'rb') as f:
+            svg_bytes = f.read()
+
+        sanitized_svg = sanitize_svg_bytes(svg_bytes)
+
+        if sanitized_svg != svg_bytes:
+            with open(filepath, 'wb') as f:
+                f.write(sanitized_svg)
+        return True
+    except Exception as e:
+        current_app.logger.error(f"Error sanitizing SVG: {e}")
+        return False

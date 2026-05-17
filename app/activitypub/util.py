@@ -29,14 +29,13 @@ from app.models import User, Post, Community, File, PostReply, Instance, utcnow,
     Language, Tag, Poll, PollChoice, CommunityBan, CommunityJoinRequest, NotificationSubscription, \
     Licence, UserExtraField, Feed, FeedMember, FeedItem, CommunityFlair, UserFlair, Topic, Event, InstanceBan, Emoji
 from app.utils import get_request, allowlist_html, get_setting, ap_datetime, markdown_to_html, \
-    is_image_url, domain_from_url, gibberish, ensure_directory_exists, head_request, \
-    shorten_string, fixup_url, \
+    is_image_url, domain_from_url, gibberish, ensure_directory_exists, shorten_string, fixup_url, \
     microblog_content_to_title, is_video_url, \
     notification_subscribers, communities_banned_from, html_to_text, html_to_text_new, add_to_modlog, joined_communities, \
     moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse, mastodon_extra_field_link, \
     blocked_users, piefed_markdown_to_lemmy_markdown, store_files_in_s3, guess_mime_type, get_recipient_language, \
     patch_db_session, to_srgb, communities_banned_from_all_users, blocked_communities, blocked_or_banned_instances, \
-    instance_community_ids, banned_instances, instance_banned, first_paragraph
+    instance_community_ids, banned_instances, instance_banned, first_paragraph, sanitize_svg_bytes
 
 from bs4 import BeautifulSoup
 
@@ -754,26 +753,6 @@ def extract_domain_and_actor(url_string: str):
     return server_domain, actor
 
 
-def user_removed_from_remote_server(actor_url, is_piefed=False):
-    result = False
-    response = None
-    try:
-        if is_piefed:
-            response = head_request(actor_url, headers={'Accept': 'application/activity+json'})
-        else:
-            response = get_request(actor_url, headers={'Accept': 'application/activity+json'})
-        if response.status_code == 404 or response.status_code == 410:
-            result = True
-        else:
-            result = False
-    except:
-        result = True
-    finally:
-        if response:
-            response.close()
-    return result
-
-
 def refresh_user_profile(user_id):
     if current_app.debug:
         refresh_user_profile_task(user_id)
@@ -1072,6 +1051,8 @@ def refresh_community_profile_task(community_id, activity_json):
                                     member_user = session.query(User).get(member.user_id)
                                     is_mod = False
                                     for actor in mods_data['orderedItems']:
+                                        if isinstance(actor, dict):
+                                            actor = actor['id']
                                         if actor.lower() == member_user.profile_id().lower():
                                             is_mod = True
                                             break
