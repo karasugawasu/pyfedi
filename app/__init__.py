@@ -12,6 +12,7 @@ from flask_bootstrap import Bootstrap5
 from flask_mail import Mail
 from flask_babel import Babel, lazy_gettext as _l
 from flask_caching import Cache
+from flask_compress import Compress
 from flask_limiter import Limiter
 from flask_smorest import Api
 from flask_bcrypt import Bcrypt
@@ -56,6 +57,7 @@ mail = Mail()
 bootstrap = Bootstrap5()
 babel = Babel(locale_selector=get_locale)
 cache = Cache()
+compress = Compress()
 limiter = Limiter(get_ip_address, storage_uri='redis+'+Config.CACHE_REDIS_URL if Config.CACHE_REDIS_URL.startswith("unix://") else Config.CACHE_REDIS_URL)
 celery = Celery(__name__, broker=Config.CELERY_BROKER_URL)
 httpx_client = httpx.Client(http2=True)
@@ -127,43 +129,35 @@ def create_app(config_class=Config):
                     "bearerAuth": {
                         "type": "http",
                         "scheme": "bearer",
-                        "bearerFormat": "JWT"
+                        "bearerFormat": "JWT",
                     }
                 }
             },
             "servers": [
                 {
                     "url": f"{app.config['HTTP_PROTOCOL']}://{app.config['SERVER_NAME']}",
-                    "description": "This instance"
-                },
-                {
-                    "url": "https://crust.piefed.social",
-                    "description": "Development instance",
+                    "description": "This instance",
                 },
                 {
                     "url": "https://piefed.social",
+                    "description": "Flagship instance, stable branch",
                 },
                 {
-                    "url": "https://preferred.social"
+                    "url": "https://crust.piefed.social",
+                    "description": "Official development instance",
                 },
-                {
-                    "url": "https://feddit.online"
-                },
-                {
-                    "url": "https://piefed.world"
-                }
             ],
             "info": {
                 "title": "PieFed 1.6 Alpha API",
                 "contact": {
                     "name": "Developer",
-                    "url": "https://codeberg.org/rimu/pyfedi"
+                    "url": "https://codeberg.org/rimu/pyfedi",
                 },
                 "license": {
                     "name": "AGPLv3",
-                    "url": "https://www.gnu.org/licenses/agpl-3.0.en.html#license-text"
-                }
-            }
+                    "url": "https://www.gnu.org/licenses/agpl-3.0.en.html#license-text",
+                },
+            },
         }
     rest_api.init_app(app)
     rest_api.DEFAULT_ERROR_RESPONSE_NAME = None  # Don't include default errors, define them ourselves
@@ -175,6 +169,7 @@ def create_app(config_class=Config):
     bootstrap.init_app(app)
     babel.init_app(app, locale_selector=get_locale)
     cache.init_app(app)
+    compress.init_app(app)   # registered before the after_request in pyfedi.py, so it runs after it
     limiter.init_app(app)
     app_bcrypt.init_app(app)
     celery.conf.update(app.config)

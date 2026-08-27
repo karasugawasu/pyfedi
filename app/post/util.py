@@ -11,7 +11,7 @@ from sqlalchemy import desc, asc, text, or_
 from app import db, cache
 from app.constants import POST_TYPE_LINK, POST_TYPE_IMAGE, POST_TYPE_VIDEO, POST_TYPE_POLL, POST_TYPE_ARTICLE
 from app.models import PostReply, Post, Community, User, Language, utcnow
-from app.utils import blocked_or_banned_instances, blocked_users, is_video_hosting_site, get_request
+from app.utils import blocked_or_banned_instances, blocked_users, is_video_hosting_site, get_request, silenced_instances
 
 
 @cache.memoize(timeout=600)
@@ -158,11 +158,13 @@ def post_replies(post: Post, sort_by: str, viewer: User, db_only=False) -> List[
         if blocked_accounts:
             comments = comments.filter(PostReply.user_id.not_in(blocked_accounts))
         if viewer.reply_hide_threshold and not (viewer.is_admin_or_staff() or post.community.is_moderator()):
-            comments = comments.filter(PostReply.score > viewer.reply_hide_threshold)
+            comments = comments.filter(or_(PostReply.score > viewer.reply_hide_threshold, PostReply.collapsible == False))
         if viewer.read_language_ids and len(viewer.read_language_ids) > 0:
             comments = comments.filter(
                 or_(PostReply.language_id.in_(tuple(viewer.read_language_ids)), PostReply.language_id == None))
     else:
+        if instance_ids := silenced_instances():
+            comments = comments.filter(or_(PostReply.instance_id.not_in(instance_ids), PostReply.instance_id == None))
         comments.filter(PostReply.score > -20)
 
     if sort_by == 'hot':
@@ -286,7 +288,7 @@ def url_needs_archive(url) -> bool:
 
 
 def generate_archive_link(url) -> bool:
-    return 'https://removepaywalls.com/' + url
+    return 'https://www.removepaywall.com/search?url=' + url
 
 
 # Forms like the cross post form need the type for the url

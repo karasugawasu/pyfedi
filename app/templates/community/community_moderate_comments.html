@@ -14,19 +14,13 @@
           <ol class="breadcrumb">
             <li class="breadcrumb-item"><a href="/">{{ _('Home') }}</a></li>
             <li class="breadcrumb-item"><a href="/communities">{{ _('Communities') }}</a></li>
-            <li class="breadcrumb-item"><a href="{{ url_for('activitypub.community_profile', actor=community.ap_id if community.ap_id is not none else community.name) }}">{{ (community.title + '@' + community.ap_domain)|shorten }}</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('activitypub.community_profile', actor=community.link()) }}">{{ (community.title + '@' + community.ap_domain)|shorten }}</a></li>
             <li class="breadcrumb-item active" aria-current="page">{{ _('Moderation') }}</li>
           </ol>
         </nav>
         {% include "community/_community_moderation_nav.html" %}
-        <div class="row">
-            <div class="col-12 col-md-10">
-                <h1 class="mt-2">{{ _('Comments') }}</h1>
-            </div>
-            <div class="col-12 col-md-2 text-right">
-                <!-- <a class="btn btn-primary" href="{{ url_for('community.community_find_moderator', community_id=community.id) }}">{{ _('Add moderator') }}</a> -->
-            </div>
-        </div>
+        <h1 class="mt-2">{{ _('Comments') }}</h1>
+
         <p>{{ _('Review comments in %(community)s', community=community.display_name()) }}</p>
 
         {% if post_replies %}

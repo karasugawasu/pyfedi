@@ -29,7 +29,8 @@ document.addEventListener("DOMContentLoaded", function () {
         setupCommunityNameInput,
         setupCommunityConditionalFields,
         setupShowMoreLinks,
-        setupSubmitOnInputChange
+        setupSubmitOnInputChange,
+        setupTeaserClick
     ];
     
     // Lower priority setup functions that can be deferred
@@ -66,7 +67,9 @@ document.addEventListener("DOMContentLoaded", function () {
         setupReactionDialog,
         setupScrollChat,
         setupCodeBlockCopy,
-        setupLoadingAnimation
+        setupLoadingAnimation,
+        setupHidRead,
+        setupAutoReload
     ];
     
     // Run critical setups immediately
@@ -130,6 +133,51 @@ document.addEventListener("DOMContentLoaded", function () {
 
 });
 
+
+function setupTeaserClick() {
+    // make post teasers clickable
+    if(window.matchMedia("(pointer: fine)").matches) {
+        document.querySelectorAll('.post_teaser').forEach(teaser => {
+            if (!teaser.dataset.teaserClick) {
+                teaser.addEventListener('click', function (e) {
+
+                    // Ignore clicks on controls within the teaser
+                    if (e.target.closest(
+                        'button, [role="button"], .dropdown, .dropdown-menu, .voting_buttons_new, [hx-post], .reaction_button, img, a'
+                    )) {
+                        return;
+                    }
+
+                    const link = teaser.querySelector('h3 a');
+                    if (!link?.href) return;
+
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+
+                    // ctrl/cmd click opens new tab
+                    if (e.metaKey || e.ctrlKey || e.button === 1) {
+                        window.open(link.href, '_blank', 'noopener');
+                        return;
+                    }
+
+                    // shift click opens new window
+                    if (e.shiftKey) {
+                        window.open(link.href, '_blank');
+                        return;
+                    }
+
+                    // normal click
+                    if (e.button === 0) {
+                        window.location.href = link.href;
+                    }
+
+                }, true);
+            }
+            teaser.dataset.teaserClick = 'true';
+        });
+    }
+}
 
 function setupUserPopup() {
     if(window.matchMedia("(pointer: fine)").matches) {
@@ -516,7 +564,13 @@ function setupLightDark() {
 
     var preferredTheme = getStoredTheme();
     if (!preferredTheme || (preferredTheme !== 'light' && preferredTheme !== 'dark')) {
-        preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        const isLinux = navigator.platform.toLowerCase().includes('linux') && !navigator.platform.toLowerCase().includes('android');
+        if(isLinux) {
+            preferredTheme = 'dark';
+        }
+        else {
+            preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
     }
     //setTheme(preferredTheme);
     icon.classList.remove('fe-eye');
@@ -1086,6 +1140,10 @@ function setupKeyboardShortcuts() {
         }
     });
 
+    setupVotableElements();
+}
+
+function setupVotableElements() {
     const votableElements = document.querySelectorAll('.post_teaser, .post_full');
     votableElements.forEach(votable => {
         votable.addEventListener('mouseover', event => {
@@ -1505,16 +1563,12 @@ function setupFederationModeToggle() {
 }
 
 function getCurrentFontSize() {
-    const fontSize = getComputedStyle(document.body).fontSize;
-    return parseFloat(fontSize) / parseFloat(getComputedStyle(document.documentElement).fontSize);
+    return parseFloat(getComputedStyle(document.documentElement).fontSize) / 16;
 }
 
-// Apply font size to target elements
+// Scale the whole UI by resizing the root element. All rem-based styles follow.
 function applyFontSize(sizeRem) {
-    document.body.style.fontSize = sizeRem + 'rem';
-    document.querySelectorAll('.form-control').forEach(el => {
-        el.style.fontSize = sizeRem + 'rem';
-    });
+    document.documentElement.style.fontSize = (sizeRem * 100) + '%';
 }
 
 
@@ -2636,4 +2690,44 @@ function setupLoadingAnimation() {
             form.dataset.loadingAnimationSetup = 'true';
         }
     });
+}
+
+function setupHidRead() {
+    document.querySelectorAll('a.hide_read_post').forEach(a => {
+        if (!a.dataset.hideReadSetup) {
+            a.addEventListener('click', function(event) {
+                event.preventDefault();
+                const postId = a.dataset.id;
+                const postTeaser = document.getElementById(`post_${postId}`);
+                const csrfToken = JSON.parse(document.body.getAttribute("hx-headers"))["x-csrftoken"];
+                postTeaser.classList.add('visually-hidden');
+                fetch(`/post/${postId}/set_read`, {
+                    method: 'POST',
+                    headers: {
+                        'x-csrftoken': csrfToken
+                    }
+                });
+            });
+            a.dataset.hideReadSetup = 'true';
+        }
+    });
+}
+
+function setupAutoReload() {
+    // reload the home page every minute, if sorting by New
+    if(reloadUrl) {
+        var oldTitle = document.title;
+        setInterval(function () {
+            if (window.scrollY === 0 && reloadsDone <= 120) {
+                htmx.trigger("#auto-reload", "refreshFragment");    // in index.html there is hx-trigger="refreshFragment"
+                reloadsDone += 1;
+                document.title = oldTitle + ` (refreshed ${new Date().toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    hour12: true
+                })})`;
+                setTimeout(setupVotableElements, 2000); // so people can vote with A and Z keys
+            }
+        }, 60000);  // once per minute
+    }
 }

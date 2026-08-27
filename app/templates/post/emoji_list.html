@@ -88,15 +88,13 @@
 {% if emojis %}
 <div class="emoji-grid" data-category="custom" style="display: none; grid-template-columns: repeat(8, 1fr); gap: 4px; padding: 8px; max-height: 300px; overflow-y: auto;">
     {% for emoji in emojis %}
-        {%- if emoji.instance_id == 1 -%}
-            <button type="button" class="emoji-item">
-                {%- if emoji.url -%}
-                    <img src="{{ emoji.url }}" alt="{{ emoji.token }}" title="{{ emoji.token }}" style="width: 20px; height: 20px;">
-                {%- else -%}
-                    {{ emoji.token }}
-                {%- endif -%}
-            </button>
-        {% endif %}
+        <button type="button" class="emoji-item">
+            {%- if emoji.url -%}
+                <img src="{{ emoji.url }}" alt="{{ emoji.token }}" title="{{ emoji.token }}" style="width: 25px; height: 25px; overflow: hidden;">
+            {%- else -%}
+                {{ emoji.token }}
+            {%- endif -%}
+        </button>
     {% endfor %}
 </div>
 {% endif %}

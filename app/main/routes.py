@@ -1,10 +1,12 @@
 import os.path
 import json
 import time
-from datetime import timedelta, datetime
+from datetime import timedelta, timezone
 from random import randint
 
 import flask
+from feedgen.feed import FeedGenerator
+from furl import furl
 from markupsafe import Markup
 from pyld import jsonld
 from sqlalchemy import or_, and_, func
@@ -12,7 +14,7 @@ from ua_parser import parse as uaparse
 
 from app import db, cache, limiter, plugins
 from app.activitypub.util import users_total, active_month, local_posts, local_communities, \
-    lemmy_site_data, is_activitypub_request
+    lemmy_site_data, is_activitypub_request, find_microblogging_community
 from app.activitypub.signature import default_context, LDSignature, HttpSignature
 from app.admin.util import topics_for_form
 from app.api.alpha.utils.misc import get_resolve_object
@@ -28,8 +30,7 @@ from sqlalchemy import desc, text
 
 from app.main.forms import ShareLinkForm
 from app.main.util import sidebar_active_communities, sidebar_new_instances, sidebar_upcoming_events, \
-    sidebar_new_communities, _base_list_communities_context
-from app.post.routes import show_post
+    sidebar_new_communities, _base_list_communities_context, reload_url
 from app.translation import LibreTranslateAPI
 from app.utils import render_template, get_setting, request_etag_matches, return_304, blocked_domains, \
     ap_datetime, shorten_string, user_filters_home, \
@@ -39,19 +40,19 @@ from app.utils import render_template, get_setting, request_etag_matches, return
     permission_required, debug_mode_only, ip_address, menu_instance_feeds, menu_my_feeds, menu_subscribed_feeds, \
     feed_tree_public, gibberish, get_deduped_post_ids, paginate_post_ids, post_ids_to_models, html_to_text, \
     get_redis_connection, subscribed_feeds, joined_or_modding_communities, login_required_if_private_instance, \
-    pending_communities, retrieve_image_hash, possible_communities, remove_tracking_from_link, reported_posts, \
+    retrieve_image_hash, possible_communities, remove_tracking_from_link, reported_posts, \
     moderating_communities_ids, user_notes, login_required, safe_order_by, filtered_out_communities, \
     num_topics, referrer, block_honey_pot, user_pronouns, get_instance_stickies, \
-    community_membership_private
+    community_membership_private, favorite_communities, mimetype_from_url, check_anoobis
 from app.models import Community, CommunityMember, Post, Site, User, utcnow, Topic, Instance, \
-    Notification, Language, community_language, ModLog, Feed, FeedItem, CmsPage, BannedInstances
+    Notification, Language, community_language, ModLog, Feed, FeedItem, CmsPage, BannedInstances, BotChallenge
 from app.ldap_utils import test_ldap_connection, sync_user_to_ldap, login_with_ldap
 
 
-@bp.route('/', methods=['HEAD', 'GET', 'POST'])
-@bp.route('/home', methods=['GET', 'POST'])
-@bp.route('/home/<sort>', methods=['GET', 'POST'])
-@bp.route('/home/<sort>/<view_filter>', methods=['GET', 'POST'])
+@bp.route('/', methods=['HEAD', 'GET'])
+@bp.route('/home', methods=['GET'])
+@bp.route('/home/<sort>', methods=['GET'])
+@bp.route('/home/<sort>/<view_filter>', methods=['GET'])
 @login_required_if_private_instance
 def index(sort=None, view_filter=None):
     if 'application/ld+json' in request.headers.get('Accept', '') or 'application/activity+json' in request.headers.get(
@@ -101,6 +102,10 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
             private_communities = tuple([0, 0])
         else:
             private_communities = tuple(pc + [0])
+
+        if current_user.rss_token is None:  # set rss token to something so a private rss feed can be generated
+            current_user.rss_token = gibberish(20)
+            db.session.commit()
     else:
         modded_communities = []
         private_communities = ()
@@ -108,32 +113,34 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
         private_communities = tuple([0, 0])
     enable_mod_filter = len(modded_communities) > 0
 
+    community_sql = None
     if view_filter == 'subscribed' and current_user.is_authenticated:
         community_ids = db.session.execute(text(
             'SELECT id FROM community as c INNER JOIN community_member as cm ON cm.community_id = c.id WHERE cm.is_banned is false AND cm.user_id = :user_id'),
                                            {'user_id': current_user.id}).scalars()
     elif view_filter == 'local':
+        microblog_community = find_microblogging_community()
         if current_user.is_anonymous:
-            community_ids = db.session.execute(
-                text(f'SELECT id FROM community as c WHERE c.private is false and c.instance_id = 1 {low_quality_filter}')).scalars()
+            community_sql = f'c.private is false and c.instance_id = 1 and c.id != {microblog_community.id} {low_quality_filter}'
         else:
-            community_ids = db.session.execute(
-                text(f'SELECT id FROM community as c WHERE (c.private is false OR c.id IN {private_communities}) AND c.instance_id = 1 {low_quality_filter}')).scalars()
+            community_sql = f'(c.private is false OR c.id IN {private_communities}) and c.id != {microblog_community.id} AND c.instance_id = 1 {low_quality_filter}'
+        community_ids = [0]
     elif view_filter == 'popular':
         if current_user.is_anonymous:
-            community_ids = db.session.execute(
-                text('SELECT id FROM community as c WHERE c.show_popular is true and c.private is false AND c.low_quality is false')).scalars()
+            community_sql = 'c.show_popular is true and c.private is false AND c.low_quality is false'
         else:
-            community_ids = db.session.execute(
-                text(f'SELECT id FROM community as c WHERE (c.private is false OR c.id IN {private_communities}) AND c.show_popular is true {low_quality_filter}')).scalars()
+            community_sql = f'(c.private is false OR c.id IN {private_communities}) AND c.show_popular is true {low_quality_filter}'
+        community_ids = [0]
     elif view_filter == 'all' or current_user.is_anonymous:
         community_ids = [-1]  # Special value to indicate 'All'
     elif view_filter == 'moderating':
         community_ids = modded_communities
-    
+
     community_ids = list(community_ids)
 
-    post_ids = get_deduped_post_ids(result_id, community_ids, sort, tag)
+    post_ids = get_deduped_post_ids(result_id, community_ids, sort, tag,
+                                    include_following=view_filter == 'subscribed' and current_user.is_authenticated,
+                                    community_sql=community_sql)
     has_next_page = len(post_ids) > page + 1 * page_length
     post_ids = paginate_post_ids(post_ids, page, page_length=page_length)
     posts = post_ids_to_models(post_ids, sort)
@@ -173,27 +180,62 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
     
     user_id = current_user.get_id()
 
-    resp = make_response(render_template('index.html', posts=posts, active_communities=active_communities,
-                           new_communities=new_communities, upcoming_events=upcoming_events,
-                           show_post_community=True, low_bandwidth=low_bandwidth, recently_upvoted=recently_upvoted,
-                           recently_downvoted=recently_downvoted, new_instances=instances,
-                           communities_banned_from_list=communities_banned_from_list,
-                           SUBSCRIPTION_PENDING=SUBSCRIPTION_PENDING, SUBSCRIPTION_MEMBER=SUBSCRIPTION_MEMBER,
-                           etag=f"{sort}_{view_filter}_{hash(str(g.site.last_active))}", next_url=next_url,
-                           prev_url=prev_url, instance_stickies=instance_stickies,
-                           title=f"{g.site.name} - {g.site.description}",
-                           description=shorten_string(html_to_text(g.site.sidebar), 150),
-                           content_filters=content_filters, sort=sort, view_filter=view_filter,
-                           announcement=get_setting('announcement_html', get_setting('announcement')),
-                           reported_posts=reported_posts(user_id, user_id in g.admin_ids),
-                           user_notes=user_notes(user_id),
-                           joined_communities=joined_or_modding_communities(user_id),
-                           moderated_community_ids=moderating_communities_ids(user_id),
-                           inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
-                           enable_mod_filter=enable_mod_filter,
-                           has_topics=num_topics() > 0, time=time,
-                           user_pronouns=user_pronouns()
-                           ))
+    rss_token = f'?token={current_user.rss_token}' if current_user.is_authenticated else ''
+
+    if current_user.is_anonymous:
+        rss_feed = [
+            (_('Local posts'), f'index/feed/local'),
+        ]
+    else:
+        rss_feed = [
+            (_('Posts from joined communities'), f'index/feed/subscribed{rss_token}'),
+            (_('Local posts'), f'index/feed/local{rss_token}'),
+            (_('Posts from popular communities'), f'index/feed/popular{rss_token}'),
+            (_('All posts'), f'index/feed/all{rss_token}'),
+        ]
+
+    if request.args.get('fragment'):
+        resp = make_response(render_template('index_fragment.html', posts=posts,
+                                             show_post_community=True, low_bandwidth=low_bandwidth,
+                                             recently_upvoted=recently_upvoted,
+                                             recently_downvoted=recently_downvoted,
+                                             communities_banned_from_list=communities_banned_from_list,
+                                             SUBSCRIPTION_PENDING=SUBSCRIPTION_PENDING,
+                                             SUBSCRIPTION_MEMBER=SUBSCRIPTION_MEMBER,
+                                             etag=f"{sort}_{view_filter}_{hash(str(g.site.last_active))}",
+                                             instance_stickies=instance_stickies,
+                                             content_filters=content_filters, sort=sort, view_filter=view_filter,
+                                             reported_posts=reported_posts(user_id, user_id in g.admin_ids),
+                                             user_notes=user_notes(user_id),
+                                             joined_communities=joined_or_modding_communities(user_id),
+                                             moderated_community_ids=moderating_communities_ids(user_id),
+                                             enable_mod_filter=enable_mod_filter,
+                                             has_topics=num_topics() > 0, time=time,
+                                             user_pronouns=user_pronouns(),
+                                             ))
+    else:
+        resp = make_response(render_template('index.html', posts=posts, active_communities=active_communities,
+                               new_communities=new_communities, upcoming_events=upcoming_events,
+                               show_post_community=True, low_bandwidth=low_bandwidth, recently_upvoted=recently_upvoted,
+                               recently_downvoted=recently_downvoted, new_instances=instances,
+                               communities_banned_from_list=communities_banned_from_list,
+                               SUBSCRIPTION_PENDING=SUBSCRIPTION_PENDING, SUBSCRIPTION_MEMBER=SUBSCRIPTION_MEMBER,
+                               etag=f"{sort}_{view_filter}_{hash(str(g.site.last_active))}", next_url=next_url,
+                               prev_url=prev_url, instance_stickies=instance_stickies,
+                               title=f"{g.site.name} - {g.site.description}",
+                               description=shorten_string(html_to_text(g.site.sidebar), 150),
+                               content_filters=content_filters, sort=sort, view_filter=view_filter,
+                               announcement=get_setting('announcement_html', get_setting('announcement')),
+                               reported_posts=reported_posts(user_id, user_id in g.admin_ids),
+                               user_notes=user_notes(user_id),
+                               joined_communities=joined_or_modding_communities(user_id),
+                               moderated_community_ids=moderating_communities_ids(user_id),
+                               inoculation=inoculation[randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None,
+                               enable_mod_filter=enable_mod_filter,
+                               has_topics=num_topics() > 0, time=time,
+                               user_pronouns=user_pronouns(),
+                               rss_feed=rss_feed, reload_url=reload_url(sort, view_filter)
+                               ))
     if current_user.is_anonymous:
         resp.headers.set('ETag', f"{sort}_{view_filter}_{hash(str(g.site.last_active))}")
         resp.headers.set('Vary', 'Accept, Accept-Language')
@@ -238,9 +280,10 @@ def add_post():
 @bp.route('/communities', methods=['GET'])
 @limiter.limit("20 per 1 minutes", methods=['GET', 'POST'])
 @login_required_if_private_instance
+@check_anoobis
 def list_communities():
     verification_warning()
-    search_param = request.args.get('search', '')
+    search_param = request.args.get('search', '').strip()
     home_select = request.args.get('home_select', 'any')
     subscribe_select = request.args.get('subscribe_select', 'any')
     topic_id = int(request.args.get('topic_id', 0))
@@ -430,6 +473,7 @@ def list_communities():
 
 @bp.route('/modlog', methods=['GET'])
 @limiter.limit("20 per 1 minutes", methods=['GET', 'POST'])
+@check_anoobis
 def modlog():
     page = request.args.get('page', 1, type=int)
     low_bandwidth = request.cookies.get('low_bandwidth', '0') == '1'
@@ -780,12 +824,17 @@ And if you want to add your score to the database to help your fellow Bookworms 
 
 @bp.route('/communities_menu')
 def communities_menu():
+    if current_user.is_authenticated:
+        favorites = Community.query.filter(Community.id.in_(favorite_communities(current_user.id))).all()
+    else:
+        favorites = None
     return render_template('communities_menu.html',
                            moderating_communities=moderating_communities(current_user.get_id()),
                            joined_communities=joined_communities(current_user.get_id()),
                            is_admin=current_user.is_authenticated and current_user.is_admin(),
                            is_staff=current_user.is_authenticated and current_user.is_staff(),
-                           default_user_add_remote=get_setting("allow_default_user_add_remote_community", True)
+                           default_user_add_remote=get_setting("allow_default_user_add_remote_community", True),
+                           favorite_communities=favorites
                            )
 
 
@@ -794,7 +843,7 @@ def explore_menu():
     return render_template('explore_menu.html', menu_topics=menu_topics(),
                            menu_instance_feeds=menu_instance_feeds(),
                            menu_my_feeds=menu_my_feeds(current_user.id) if current_user.is_authenticated else None,
-                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,
+                           menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None
                            )
 
 
@@ -834,9 +883,19 @@ def share():
         form.which_community.data = int(request.cookies.get('cross_post_community_id'))
 
     communities = Community.query.filter_by(banned=False).join(Post).filter(Post.url == url, Post.deleted == False,
-                                                                            Post.status > POST_STATUS_REVIEWING).all()
+                                                                            Post.status > POST_STATUS_REVIEWING,
+                                                                            Post.from_bot == False,
+                                                                            Community.name != 'microblogs').all()
+    posts_keyed_by_community = {}
+    if len(communities):
+        posts = Post.query.filter(Post.url == url, Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
+                                  Post.microblog == False, Post.from_bot == False).all()
+        for post in posts:
+            posts_keyed_by_community[post.community_id] = post
 
-    return render_template('share.html', form=form, title=request.args.get('title'), communities=communities)
+    return render_template('share.html', form=form, title=request.args.get('title'), communities=communities,
+                           posts_keyed_by_community=posts_keyed_by_community)
+
 
 @bp.route('/protocol_handler')
 @login_required
@@ -1067,6 +1126,7 @@ def service_worker():
 @bp.route('/manifest.json', methods=['GET'])
 @bp.route('/static/manifest.json', methods=['GET'])
 def static_manifest():
+    g.site = Site.query.get(1)
     def get_manifest_for_os(os_family):
         base_dir = 'app/static/pwa_manifests'
         if os_family == 'mac os x':
@@ -1155,6 +1215,111 @@ def explore():
                            menu_subscribed_feeds=menu_subscribed_feeds(current_user.id) if current_user.is_authenticated else None,)
 
 
+# RSS feed of the community
+@bp.route('/index/feed', methods=['GET'])
+@bp.route('/index/feed/<feed_type>', methods=['GET'])
+#@cache.cached(timeout=600, query_string=True)
+def index_rss(feed_type=None):
+
+    # If nothing has changed since their last visit, return HTTP 304
+    current_etag = f"home_{hash(g.site.last_active)}"
+    if request_etag_matches(current_etag):
+        return return_304(current_etag, 'application/rss+xml')
+
+    if g.site.private_instance:
+        abort(404)
+
+    current_user_is_authenticated = False
+    user = None
+    if rss_token := request.args.get('token'):
+        user = User.query.filter(User.rss_token == rss_token.strip()).first()
+        if user:
+            current_user_is_authenticated = True
+
+    community_ids = [-1]
+    low_quality_filter = 'AND c.low_quality is false' if current_user_is_authenticated and user.hide_low_quality else ''
+    if current_user_is_authenticated:
+        pc = community_membership_private(user.id)
+        if len(pc) == 0:  # tuples must have at least 2 elements, I think?
+            private_communities = tuple([0, 0])
+        else:
+            private_communities = tuple(pc + [0])
+    else:
+        private_communities = ()
+    if len(private_communities) == 0:
+        private_communities = tuple([0, 0])
+
+    if feed_type is None:
+        feed_type = 'local'
+
+    if feed_type == 'subscribed' and current_user_is_authenticated:
+        community_ids = db.session.execute(text(
+            'SELECT id FROM community as c INNER JOIN community_member as cm ON cm.community_id = c.id WHERE cm.is_banned is false AND cm.user_id = :user_id'),
+                                           {'user_id': user.id}).scalars()
+    elif feed_type == 'local' or not current_user_is_authenticated:
+        if not current_user_is_authenticated:
+            community_ids = db.session.execute(
+                text(f'SELECT id FROM community as c WHERE c.private is false and c.instance_id = 1 {low_quality_filter}')).scalars()
+        else:
+            community_ids = db.session.execute(
+                text(f'SELECT id FROM community as c WHERE (c.private is false OR c.id IN {private_communities}) AND c.instance_id = 1 {low_quality_filter}')).scalars()
+    elif feed_type == 'popular':
+        if not current_user_is_authenticated:
+            community_ids = db.session.execute(
+                text('SELECT id FROM community as c WHERE c.show_popular is true and c.private is false AND c.low_quality is false')).scalars()
+        else:
+            community_ids = db.session.execute(
+                text(f'SELECT id FROM community as c WHERE (c.private is false OR c.id IN {private_communities}) AND c.show_popular is true {low_quality_filter}')).scalars()
+    elif feed_type == 'all':
+        community_ids = [-1]  # Special value to indicate 'All'
+
+    community_ids = list(community_ids)
+
+    post_ids = get_deduped_post_ids(gibberish(15), community_ids, 'new',
+                                    include_following=feed_type == 'subscribed' and current_user_is_authenticated)
+    post_ids = paginate_post_ids(post_ids, 0, page_length=50)
+    posts = post_ids_to_models(post_ids, 'new')
+
+    description = shorten_string(g.site.description, 150) if g.site.description else None
+    og_image = g.site.logo if g.site.logo else None
+    fg = FeedGenerator()
+    fg.id(f"{current_app.config['SERVER_URL']}/{feed_type}{rss_token}")
+    fg.title(f'{g.site.name} - {feed_type.capitalize()}')
+    fg.link(href=f"{current_app.config['SERVER_URL']}", rel='alternate')
+    if og_image:
+        fg.logo(og_image)
+    else:
+        fg.logo(f"{current_app.config['SERVER_URL']}/static/images/apple-touch-icon.png")
+    if description:
+        fg.subtitle(description)
+    else:
+        fg.subtitle(' ')
+    fg.link(href=f"{current_app.config['SERVER_URL']}/feed", rel='self')
+    fg.language('en')
+
+    for post in posts:
+        fe = fg.add_entry()
+        fe.title(post.title)
+        if post.slug:
+            fe.link(href=f"{current_app.config['SERVER_URL']}{post.slug}")
+        else:
+            fe.link(href=f"{current_app.config['SERVER_URL']}/post/{post.id}")
+        if post.url:
+            type = mimetype_from_url(post.url)
+            if type and not type.startswith('text/'):
+                fe.enclosure(post.url, type=type)
+        fe.description(post.body_html)
+        fe.guid(post.profile_id(), permalink=True)
+        fe.author(name=post.author.user_name)
+        fe.pubDate(post.created_at.replace(tzinfo=timezone.utc))
+
+    response = make_response(fg.rss_str())
+    response.headers.set('Content-Type', 'application/rss+xml')
+    response.headers.add_header('ETag', f"home_{hash(g.site.last_active)}")
+    response.headers.add_header('Cache-Control', 'no-cache, max-age=600, must-revalidate')
+    return response
+
+
 @bp.route('/r/random')
 @bp.route('/random')
 @login_required_if_private_instance
@@ -1222,6 +1387,37 @@ def content_warning():
     resp.headers.set('Vary', 'Accept, Cookie, Accept-Language')
     resp.headers.set('Cache-Control', 'private, max-age=1, must-revalidate')
     return resp
+
+
+@bp.route('/anoobis')
+def anoobis():
+    next = request.args.get('next')
+    if next is None:
+        return ''
+    f = furl(next)
+    if next and (f.host is None or f.host == current_app.config['SERVER_NAME']) and (f.scheme is None or f.scheme.startswith('http')):
+        return render_template('anoobis.html', next=next, diff_desktop=current_app.config['ANOOBIS_DIFFICULTY_DESKTOP'],
+                               diff_mobile=current_app.config['ANOOBIS_DIFFICULTY_MOBILE'])
+    else:
+        raise Exception(f'Anoobis error: {f.host} != {current_app.config["SERVER_NAME"]}')
+        abort(403)
+
+
+@bp.route('/bot_challenge/<uuid>')
+@limiter.limit("20 per 1 minutes")
+def bot_challenge_result(uuid):
+    challenge = BotChallenge.query.filter(BotChallenge.uuid == uuid).first()
+    if challenge:
+        if challenge.is_a_bot is True:
+            return render_template('generic_message.html', title=_('Sorry'),
+                                   message=_("You took too long to respond so your account has been flagged as a bot."))
+        else:
+            challenge.is_a_bot = False
+            db.session.commit()
+            return render_template('generic_message.html', title=_('Thanks!'),
+                                   message=_("You have confirmed that your account is operated by a human."))
+    else:
+        abort(404)
 
 
 @bp.route('/my-year-in-review/<year>')

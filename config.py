@@ -22,6 +22,7 @@ def safe_int_env(var_name: str, default: int = 0) -> int:
 class Config(object):
     SERVER_NAME = os.environ.get('SERVER_NAME').lower() or 'localhost'
     SECRET_KEY = os.environ.get('SECRET_KEY')
+    JWT_EXPIRY_DAYS = int(os.environ.get('JWT_EXPIRY_DAYS') or 365)
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
                               'sqlite:///' + os.path.join(basedir, 'app.db')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
@@ -32,7 +33,7 @@ class Config(object):
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD') or None
     MAIL_FROM = os.environ.get('MAIL_FROM') or 'noreply@' + os.environ.get('SERVER_NAME')
     ERRORS_TO = os.environ.get('ERRORS_TO') or ''
-    LANGUAGES = ['ca', 'de', 'en', 'es', 'fr', 'ja', 'uk', 'zh']
+    LANGUAGES = ['ca', 'ceb', 'de', 'en', 'es', 'fil', 'fr', 'ja', 'uk', 'zh']
     FULL_AP_CONTEXT = bool(int(os.environ.get('FULL_AP_CONTEXT', 0)))
     CACHE_TYPE = os.environ.get('CACHE_TYPE') or 'FileSystemCache'
     CACHE_REDIS_URL = os.environ.get('CACHE_REDIS_URL') or 'redis://localhost:6379/1'
@@ -40,6 +41,10 @@ class Config(object):
     CACHE_DEFAULT_TIMEOUT = 300
     CACHE_THRESHOLD = 1000
     CACHE_KEY_PREFIX = 'pyfedi'
+    COMPRESS_ALGORITHM = 'gzip'  # one variant only - br/zstd as well would fragment nginx's proxy_cache
+    COMPRESS_LEVEL = 6
+    COMPRESS_MIN_SIZE = 4096
+    COMPRESS_STREAMS = False
     CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL') or 'redis://localhost:6379/0'
     RESULT_BACKEND = os.environ.get('RESULT_BACKEND') or 'redis://localhost:6379/0'
     SQLALCHEMY_ECHO = False     # set to true to see SQL in console
@@ -48,6 +53,7 @@ class Config(object):
 
     BOUNCE_ADDRESS = os.environ.get('BOUNCE_ADDRESS') or MAIL_FROM or ''    # Warning: all emails in this inbox will be deleted!
     BOUNCE_HOST = os.environ.get('BOUNCE_HOST') or ''
+    BOUNCE_HOST_TYPE = os.environ.get('BOUNCE_HOST_TYPE') or ''     # imap or pop3
     BOUNCE_USERNAME = os.environ.get('BOUNCE_USERNAME') or ''
     BOUNCE_PASSWORD = os.environ.get('BOUNCE_PASSWORD') or ''
 
@@ -92,6 +98,7 @@ class Config(object):
     S3_ACCESS_KEY = os.environ.get('S3_ACCESS_KEY') or ''
     S3_ACCESS_SECRET = os.environ.get('S3_ACCESS_SECRET') or ''
     S3_PUBLIC_URL = os.environ.get('S3_PUBLIC_URL') or ''
+    S3_PUBLIC_ACL = os.environ.get('S3_PUBLIC_ACL') or False
     S3_STORAGE_CLASS = os.environ.get('S3_STORAGE_CLASS') or ''
 
     GOOGLE_OAUTH_CLIENT_ID = os.environ.get('GOOGLE_OAUTH_CLIENT_ID') or ''
@@ -184,3 +191,11 @@ class Config(object):
     DETECT_AI_ENDPOINT = os.environ.get('DETECT_AI_ENDPOINT') or ''
 
     REDIS_MEMORY_LIMIT = int(os.environ.get('REDIS_MEMORY_LIMIT') or 200000000)
+
+    VOTE_QUOTA = int(os.environ.get('VOTE_QUOTA') or 240)
+
+    ANOOBIS = os.environ.get('ANOOBIS') or False
+    ANOOBIS_DIFFICULTY_DESKTOP = os.environ.get('') or 19
+    ANOOBIS_DIFFICULTY_MOBILE = os.environ.get('') or 12
+
+    RSS_FEEDS = os.environ.get('RSS_FEEDS') or False

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timedelta
 
 from flask import current_app, g
 from sqlalchemy import text, func, or_
@@ -12,7 +13,7 @@ from app.activitypub.util import active_month
 from app.constants import *
 from app.models import ChatMessage, Community, Language, Instance, Post, PostReply, User, \
     AllowedInstances, BannedInstances, utcnow, Site, Feed, FeedItem, Topic, CommunityFlair, \
-    UserNote, Poll, Event, PollChoice
+    UserNote, Poll, Event, PollChoice, Conversation, Report
 from app.post.util import tags_to_string, flair_to_string
 from app.utils import blocked_communities, blocked_or_banned_instances, blocked_users, communities_banned_from, \
     get_setting, \
@@ -27,7 +28,7 @@ from app.shared.post import get_post_flair_list
 
 def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, communities_moderating=None, banned_from=None,
               bookmarked_posts=None, post_subscriptions=None, communities_joined=None, read_posts=None, content_filters=None,
-              usernotes=None) -> dict:
+              usernotes=None, unread_counts=None, interacted_at=None) -> dict:
     if isinstance(post, int):
         post = Post.query.get(post)
         if post is None:
@@ -138,8 +139,29 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
                     {'post_id': post.id, 'user_id': user_id}).scalar()
             else:
                 read_post = post.id in read_posts
+
+            # unread comments on post
+            if unread_counts is None:
+                if interacted_at is None:
+                    since = db.session.execute(
+                        text('SELECT interacted_at FROM "read_posts" WHERE read_post_id = :post_id and user_id = :user_id'),
+                        {'post_id': post.id, 'user_id': user_id}).scalar()
+                else:
+                    since = interacted_at.get(post.id) or datetime.utcnow() - timedelta(days=1)
+                unread_comments = db.session.execute(text("""SELECT
+                                    COUNT(pr.id) AS reply_count
+                                FROM
+                                    post p
+                                LEFT JOIN
+                                    post_reply pr ON pr.post_id = p.id
+                                    AND pr.posted_at >= :since
+                                WHERE
+                                    p.id = :post_id"""), {'since': since, 'post_id': post.id}).scalar()
+            else:
+                unread_comments = unread_counts.get(post.id) or 0
         else:
             bookmarked = post_sub = followed = read_post = False
+            unread_comments = 0
         if not stub:
             if banned_from is None:
                 banned = post.community_id in communities_banned_from(post.user_id)
@@ -174,7 +196,7 @@ def post_view(post: Post | int, variant, stub=False, user_id=None, my_vote=0, co
                                          post.community_id in communities_moderating[user_id] else False
         v2 = {'post': post_view(post=post, variant=1, stub=stub), 'counts': counts, 'banned_from_community': False,
               'subscribed': subscribe_type,
-              'saved': saved, 'read': read, 'hidden': False, 'unread_comments': post.reply_count, 'my_vote': my_vote,
+              'saved': saved, 'read': read, 'hidden': False, 'unread_comments': unread_comments, 'my_vote': my_vote,
               'filtered': post.blocked_by_content_filter(content_filters, user_id) == '-1',
               'blurred': post.blurred(g.user if hasattr(g, 'user') else None),
               'activity_alert': activity_alert,
@@ -453,7 +475,8 @@ def user_view(user: User | int, variant, stub=False, user_id=None, flair_communi
                     "federate_votes": not user.vote_privately == True,
                     "feed_auto_follow": user.feed_auto_follow,
                     "feed_auto_leave": user.feed_auto_leave,
-                    "ai_visibility": ai_visibility_options[user.hide_gen_ai]
+                    "ai_visibility": ai_visibility_options[user.hide_gen_ai],
+                    "manually_approves_followers": user.ap_manually_approves_followers
                 },
                 "person": {
                     "id": user.id,
@@ -893,7 +916,7 @@ def reply_report_view(report, reply_id, user_id, variant=1) -> dict:
         return report_json
 
 
-def post_report_view(report, post_id, user_id) -> dict:
+def post_report_view(report, post_id, user_id, variant=1) -> dict:
     # views/post_report_view.dart - /post/report api endpoint
     post_json = post_view(post=post_id, variant=2, user_id=user_id)
     community_json = community_view(community=post_json['post']['community_id'], variant=1, stub=True)
@@ -911,32 +934,39 @@ def post_report_view(report, post_id, user_id) -> dict:
     creator_is_moderator = True if moderator else False
     creator_is_admin = True if admin else False
 
-    v1 = {
-        'post_report_view': {
-            'post_report': {
-                'id': report.id,
-                'creator_id': report.reporter_id,
-                'post_id': report.suspect_post_id,
-                'original_post_name': post_json['post']['title'],
-                'original_post_body': '',
-                'reason': report.reasons,
-                'resolved': report.status == 3,
-                'published': report.created_at.isoformat(timespec="microseconds") + 'Z'
-            },
-            'post': post_json['post'],
-            'community': community_json,
-            'creator': user_view(user=user_id, variant=1, stub=True, user_id=user_id),
-            'post_creator': user_view(user=report.suspect_user_id, variant=1, stub=True, user_id=user_id),
-            'counts': post_json['counts'],
-            'creator_banned_from_community': creator_banned_from_community,
-            'creator_is_moderator': creator_is_moderator,
-            'creator_is_admin': creator_is_admin,
-            'creator_blocked': False,
-            'subscribed': post_json['subscribed'],
-            'saved': post_json['saved']
-        }
+    report_json = {
+        "post_report": {
+            "id": report.id,
+            "creator_id": report.reporter_id,
+            "post_id": report.suspect_post_id,
+            "original_post_name": post_json["post"]["title"],
+            "original_post_body": "",
+            "reason": report.reasons,
+            "resolved": report.status == 3,
+            "published": report.created_at.isoformat(timespec="microseconds") + "Z",
+        },
+        "post": post_json["post"],
+        "community": community_json,
+        "creator": user_view(user=user_id, variant=1, stub=True, user_id=user_id),
+        "post_creator": user_view(
+            user=report.suspect_user_id, variant=1, stub=True, user_id=user_id
+        ),
+        "counts": post_json["counts"],
+        "creator_banned_from_community": creator_banned_from_community,
+        "creator_is_moderator": creator_is_moderator,
+        "creator_is_admin": creator_is_admin,
+        "creator_blocked": False,
+        "subscribed": post_json["subscribed"],
+        "saved": post_json["saved"],
     }
-    return v1
+
+    if variant == 1:
+        v1 = {'post_report_view': report_json}
+        return v1
+    
+    if variant == 2:
+        # GET /post/report/list - just return the bare json to be appended onto a list by another function
+        return report_json
 
 
 def search_view(type) -> dict:
@@ -1075,34 +1105,95 @@ def private_message_view(cm: ChatMessage, variant, report=None) -> dict:
         return v2
 
     v3 = {
-        'private_message_report_view': {
-            'private_message_report': {
-                'id': report.id,
-                'creator_id': report.reporter_id,
-                'private_message_id': cm.id,
-                'original_pm_text': cm.body,
-                'reason': report.reasons,
-                'resolved': report.status == 3,
-                'published': report.created_at.isoformat(timespec="microseconds") + 'Z'
-            },
-            'private_message': {
-                'id': cm.id,
-                'creator_id': cm.sender_id,
-                'recipient_id': cm.recipient_id,
-                'content': cm.body if not cm.deleted else 'Deleted by author',
-                'deleted': cm.deleted,
-                'read': cm.read,
-                'published': cm.created_at.isoformat(timespec="microseconds") + 'Z',
-                'ap_id': ap_id,
-                'local': is_local
-            },
-            'private_message_creator': creator,
-            'creator': user_view(report.reporter_id, variant=1)
-        }
+        "private_message_report": {
+            "id": report.id,
+            "creator_id": report.reporter_id,
+            "private_message_id": cm.id,
+            "original_pm_text": cm.body,
+            "reason": report.reasons,
+            "resolved": report.status == REPORT_STATE_RESOLVED,
+            "published": report.created_at.isoformat(timespec="microseconds") + "Z",
+        },
+        "private_message": {
+            "id": cm.id,
+            "creator_id": cm.sender_id,
+            "recipient_id": cm.recipient_id,
+            "content": cm.body if not cm.deleted else "Deleted by author",
+            "deleted": cm.deleted,
+            "read": cm.read,
+            "published": cm.created_at.isoformat(timespec="microseconds") + "Z",
+            "ap_id": ap_id,
+            "local": is_local,
+        },
+        "private_message_creator": creator,
+        "creator": user_view(report.reporter_id, variant=1),
     }
 
     if variant == 3:
         return v3
+
+
+def conversation_information_view(conversation: int | Conversation, variant=1) -> dict:
+    if isinstance(conversation, int):
+        conversation = Conversation.query.get(conversation)
+    
+    conversation_id = conversation.id
+    members = []
+    for member in conversation.members:
+        members.append(user_view(member, variant=1))
+    creator_id = conversation.user_id
+    published = conversation.created_at.isoformat(timespec="microseconds") + "Z"
+    updated = conversation.updated_at.isoformat(timespec="microseconds") + "Z"
+
+    if variant == 1:
+        # ConversationInfoView schema
+        v1 = {"id": conversation_id,
+              "members": members,
+              "creator_id": creator_id,
+              "published": published,
+              "updated": updated}
+        
+        return v1
+
+
+def conversation_report_view(report: int | Report, variant=1) -> dict:
+    if isinstance(report, int):
+        report = Report.query.get(report)
+    
+    if not report.suspect_conversation_id:
+        raise Exception("report is not for a conversation")
+    
+    report_id = report.id
+    creator_id = report.reporter_id
+    conversation_id = report.suspect_conversation_id
+    reason = report.reasons
+    description = report.description
+    resolved = report.status == REPORT_STATE_RESOLVED
+    published = report.created_at.isoformat(timespec="microseconds") + "Z"
+
+    v1 = {"id": report_id,
+          "creator_id": creator_id,
+          "conversation_id": conversation_id,
+          "reason": reason,
+          "description": description,
+          "resolved": resolved,
+          "published": published}
+    
+    if variant == 1:
+        # ConversationReport schema
+        return v1
+    
+    conversation = Conversation.query.get(conversation_id)
+
+    v2 = dict()
+    v2["conversation_report"] = v1
+    v2["conversation_information"] = conversation_information_view(conversation)
+    v2["creator"] = user_view(creator_id, variant=1)
+
+    if variant == 2:
+        # ConversationReportView schema
+        # the `message_history` key is populated separately, back where this function is called
+        return v2
 
 
 def topic_view(topic: Topic | int, variant: int, communities_moderating, banned_from,
@@ -1231,8 +1322,9 @@ def site_instance_chooser_view():
         'can_make_communities': not g.site.community_creation_admin_only,
         'defederation': list(set([instance.domain for instance in defed_list])),
         'trusts': list(set([instance.domain for instance in trusted_list])),
-        'tos_url': g.site.tos_url,
-        'registration_mode': g.site.registration_mode
+        'tos_url': g.site.tos_url or '',
+        'registration_mode': g.site.registration_mode,
+        'software': 'piefed'
     }
     return result
 
@@ -1291,6 +1383,8 @@ def cached_modlist_for_community(community_id):
 
 @cache.memoize(timeout=3000)
 def cached_modlist_for_user(user):
+    if user is None:
+        return []
     community_ids = db.session.execute(
         text('SELECT community_id FROM "community_member" WHERE user_id = :user_id and (is_moderator = True or is_owner = True)'),
         {'user_id': user.id}).scalars()

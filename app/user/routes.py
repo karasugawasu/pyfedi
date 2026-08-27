@@ -19,23 +19,23 @@ from app.community.util import save_icon_file, save_banner_file, retrieve_mods_a
 from app.constants import *
 from app.email import send_verification_email
 from app.ldap_utils import sync_user_to_ldap
-from app.models import Post, Community, CommunityMember, User, PostReply, PostVote, Notification, utcnow, File, Site, \
+from app.models import Post, Community, CommunityMember, User, PostReply, Notification, utcnow, File, Site, \
     Instance, Report, UserBlock, CommunityBan, CommunityJoinRequest, CommunityBlock, Filter, Domain, DomainBlock, \
     InstanceBlock, NotificationSubscription, PostBookmark, PostReplyBookmark, read_posts, Topic, UserNote, \
-    UserExtraField, Feed, FeedMember, IpBan, user_file, ArchivedPostReply
+    UserExtraField, Feed, FeedMember, user_file, UserFollower, BotChallenge, votes_cast_today, \
+    CommunityFlair, CommunityFlairBlock
 from app.shared.site import block_remote_instance
-from app.shared.tasks import task_selector
 from app.shared.upload import process_file_delete, process_upload
-from app.shared.user import subscribe_user, ban_user, unban_user
+from app.shared.user import subscribe_user, ban_user, unban_user, follow_user, unfollow_user, bot_challenge_user
 from app.user import bp
 from app.user.forms import ProfileForm, SettingsForm, DeleteAccountForm, ReportUserForm, \
     FilterForm, KeywordFilterEditForm, RemoteFollowForm, ImportExportForm, UserNoteForm, BanUserForm, DeleteFileForm, \
     UploadFileForm, BlockUserForm, BlockCommunityForm, BlockDomainForm, BlockInstanceForm, UnsubAllForm
-from app.user.utils import purge_user_then_delete, unsubscribe_from_community, search_for_user, _get_user_moderates, \
+from app.user.utils import unsubscribe_from_community, search_for_user, _get_user_moderates, \
     _get_user_upvoted_posts, _get_user_subscribed_communities, _get_user_posts, _get_user_post_replies, \
-    _get_user_archived_replies, _get_user_posts_and_replies, _get_user_same_ip
+    _get_user_archived_replies, _get_user_posts_and_replies, _get_user_same_ip, insert_or_update_user_note
 from app.utils import render_template, markdown_to_html, user_access, markdown_to_text, shorten_string, \
-    gibberish, file_get_contents, community_membership, user_filters_home, \
+    gibberish, community_membership, user_filters_home, \
     user_filters_posts, user_filters_replies, theme_list, \
     blocked_users, add_to_modlog, \
     blocked_communities, piefed_markdown_to_lemmy_markdown, \
@@ -43,8 +43,8 @@ from app.utils import render_template, markdown_to_html, user_access, markdown_t
     login_required_if_private_instance, recently_upvoted_posts, recently_downvoted_posts, recently_upvoted_post_replies, \
     recently_downvoted_post_replies, reported_posts, user_notes, login_required, get_setting, filtered_out_communities, \
     moderating_communities_ids, is_valid_xml_utf8, blocked_or_banned_instances, blocked_domains, get_task_session, \
-    patch_db_session, user_in_restricted_country, referrer, user_pronouns, community_membership_private, \
-    intlist_to_strlist
+    patch_db_session, user_in_restricted_country, referrer, user_pronouns, \
+    permission_required, check_anoobis
 
 
 @bp.route('/people', methods=['GET', 'POST'])
@@ -61,6 +61,7 @@ def show_profile_by_id(user_id):
 
 
 @login_required_if_private_instance
+@check_anoobis
 def show_profile(user):
     if (user.deleted or user.banned) and current_user.is_anonymous:
         abort(404)
@@ -94,6 +95,13 @@ def show_profile(user):
     if len(user_public_feeds) > 0:
         user_has_public_feeds = True
 
+    following = User.query.filter(User.banned == False).join(UserFollower, UserFollower.remote_user_id == User.id).\
+        filter(UserFollower.local_user_id == user.id, UserFollower.is_inward == False).all()
+    followers = User.query.filter(User.banned == False).join(UserFollower, UserFollower.remote_user_id == User.id). \
+        filter(UserFollower.local_user_id == user.id, UserFollower.is_inward == True, UserFollower.is_accepted == True).all()
+
+    bot_challenge = BotChallenge.query.filter(BotChallenge.user_id == user.id).first()
+
     # pagination urls
     post_next_url = url_for('activitypub.user_profile', actor=user.ap_id if user.ap_id is not None else user.user_name,
                             post_page=posts.next_num) if posts.has_next else None
@@ -111,12 +119,59 @@ def show_profile(user):
     overview_prev_url = url_for('activitypub.user_profile',
                                 actor=user.ap_id if user.ap_id is not None else user.user_name,
                                 overview_page=overview_page - 1) if overview_page != 1 else None
+    posting_pattern_labels = []
+    posting_pattern_values = []
+    comment_pattern_labels = []
+    comment_pattern_values = []
+    if current_user.is_authenticated:
+        vote_quota_used = votes_cast_today(user.id) / current_app.config['VOTE_QUOTA']
+
+        # Generate graph of which hours of the day the user posts at. Bots tend to have a distinctive look.
+        sql = """select
+                    h.hour_of_day,
+                    count(p.id) as post_count
+                from generate_series(0, 23) as h(hour_of_day)
+                left join post p
+                    on extract(hour from p.created_at) = h.hour_of_day
+                    and p.created_at >= now() - interval '1 month'
+                    and p.user_id in (
+                        select id
+                        from "user"
+                        where user_name = :user_name
+                    )
+                group by h.hour_of_day
+                order by h.hour_of_day;"""
+        posting_pattern = db.session.execute(text(sql), {'user_name': user.user_name}).all()
+        posting_pattern_labels = [x for x, y in posting_pattern]
+        posting_pattern_values = [y for x, y in posting_pattern]
+
+        sql = """select
+                            h.hour_of_day,
+                            count(p.id) as post_count
+                        from generate_series(0, 23) as h(hour_of_day)
+                        left join post_reply p
+                            on extract(hour from p.created_at) = h.hour_of_day
+                            and p.created_at >= now() - interval '1 month'
+                            and p.user_id in (
+                                select id
+                                from "user"
+                                where user_name = :user_name
+                            )
+                        group by h.hour_of_day
+                        order by h.hour_of_day;"""
+        comment_pattern = db.session.execute(text(sql), {'user_name': user.user_name}).all()
+        comment_pattern_labels = [x for x, y in comment_pattern]
+        comment_pattern_values = [y for x, y in comment_pattern]
+    else:
+        vote_quota_used = 0
 
     return render_template('user/show_profile.html', user=user, posts=posts, post_replies=post_replies,
                            moderates=moderates, canonical=canonical, title=_('Posts by %(user_name)s',
                                                                              user_name=user.user_name),
                            description=description, subscribed=subscribed, disable_voting=True,
-                           user_notes=user_notes(current_user.get_id()),
+                           user_notes=user_notes(current_user.get_id()), posting_pattern_labels=posting_pattern_labels,
+                           posting_pattern_values=posting_pattern_values, comment_pattern_labels=comment_pattern_labels,
+                           comment_pattern_values=comment_pattern_values, show_posts_tab=request.args.get('show_posts_tab'),
                            post_next_url=post_next_url, post_prev_url=post_prev_url,
                            replies_next_url=replies_next_url, replies_prev_url=replies_prev_url,
                            noindex=not user.indexable, show_post_community=True, hide_vote_buttons=True,
@@ -128,7 +183,9 @@ def show_profile(user):
                            user_has_public_feeds=user_has_public_feeds, user_public_feeds=user_public_feeds,
                            overview_items=overview_items, overview_next_url=overview_next_url,
                            overview_prev_url=overview_prev_url, same_ip_address=same_ip_address,
-                           archived_post_replies=archived_post_replies)
+                           archived_post_replies=archived_post_replies,
+                           followers=followers, following=following,
+                           bot_challenge=bot_challenge, vote_quota_used=vote_quota_used)
 
 
 @bp.route('/u/<actor>/upvotes')
@@ -460,8 +517,10 @@ def user_settings():
         ('', _l('Auto-detect')),
         ('eu', _l('Basque')),
         ('ca', _l('Catalan')),
+        ('ceb', _l('Cebuano')),
         ('zh', _l('Chinese')),
         ('en', _l('English')),
+        ('fil', _l('Filipino / Tagalog')),
         ('fi', _l('Finnish')),
         ('fr', _l('French')),
         ('de', _l('German')),
@@ -473,6 +532,7 @@ def user_settings():
     ]
     form.read_languages.choices = read_language_choices()
     if form.validate_on_submit():
+        old_read_languages = current_user.read_language_ids
         propagate_indexable = form.indexable.data != current_user.indexable
         current_user.newsletter = form.newsletter.data
         current_user.searchable = form.searchable.data
@@ -497,6 +557,7 @@ def user_settings():
         session['ui_language'] = form.interface_language.data
         current_user.vote_privately = not form.federate_votes.data
         current_user.show_subscribed_communities = form.show_subscribed_communities.data
+        current_user.ap_manually_approves_followers = form.manually_approves_followers.data
         if propagate_indexable:
             db.session.execute(text('UPDATE "post" set indexable = :indexable WHERE user_id = :user_id'),
                                {'user_id': current_user.id,
@@ -508,6 +569,10 @@ def user_settings():
         db.session.commit()
         from app.api.alpha.views import user_view
         cache.delete_memoized(user_view)
+
+        if old_read_languages != current_user.read_language_ids:
+            from app.utils import user_filters_languages
+            cache.delete_memoized(user_filters_languages, current_user.id)
 
         flash(_('Your changes have been saved.'), 'success')
 
@@ -591,6 +656,7 @@ def user_settings():
         form.code_style.data = current_user.code_style or 'fruity'
         form.additional_css.data = current_user.additional_css
         form.show_subscribed_communities.data = current_user.show_subscribed_communities
+        form.manually_approves_followers.data = current_user.ap_manually_approves_followers
         form.max_hours_per_day.data = request.cookies.get('max_hours_per_day', '')
         form.max_hours_change_restriction.data = request.cookies.get('max_hours_change_restriction', 'anytime')
 
@@ -658,7 +724,7 @@ def user_settings_import_export():
         # redirecting to the current page, so no
         # url_for needed here
         return send_file(buffer, download_name=f'{user.user_name}_piefed_settings.json', as_attachment=True,
-                         mimetype='application/json')
+                         mimetype='application/octet-stream')
     elif form.validate_on_submit():
         import_file = request.files['import_file']
         if import_file and import_file.filename != '':
@@ -983,6 +1049,31 @@ def user_community_unblock(community_id):
         db.session.commit()
         cache.delete_memoized(blocked_communities, current_user.id)
         flash(_('%(community_name)s has been unblocked.', community_name=community.display_name()))
+
+    if request.headers.get('HX-Request'):
+        resp = make_response()
+        curr_url = request.headers.get('HX-Current-Url')
+
+        if "/user/" in curr_url:
+            resp.headers['HX-Redirect'] = curr_url
+        else:
+            resp.headers['HX-Redirect'] = url_for("main.index")
+
+        return resp
+
+    goto = request.args.get('redirect') if 'redirect' in request.args else url_for('user.user_settings_filters')
+    return redirect(goto)
+
+
+@bp.route('/user/flair/<int:flair_id>/unblock', methods=['POST'])
+@login_required
+def user_flair_unblock(flair_id):
+    flair = CommunityFlair.query.get_or_404(flair_id)
+    existing_block = CommunityFlairBlock.query.filter_by(user_id=current_user.id, community_flair_id=flair.id).first()
+    if existing_block:
+        db.session.delete(existing_block)
+        db.session.commit()
+        flash(_('%(flair_name)s has been unblocked.', flair_name=flair.flair))
 
     if request.headers.get('HX-Request'):
         resp = make_response()
@@ -1375,10 +1466,13 @@ def user_settings_filters():
         filter(DomainBlock.user_id == current_user.id).order_by(Domain.name).all()
     blocked_instances = Instance.query.join(InstanceBlock, InstanceBlock.instance_id == Instance.id). \
         filter(InstanceBlock.user_id == current_user.id).order_by(Instance.domain).all()
+    blocked_flair = CommunityFlair.query.join(CommunityFlairBlock, CommunityFlairBlock.community_flair_id == CommunityFlair.id). \
+        filter(CommunityFlairBlock.user_id == current_user.id).order_by(CommunityFlair.flair).all()
 
     return render_template('user/filters.html', title=_('Filters'), form=form, filters=filters, user=current_user,
                            blocked_users=blocked_users, blocked_communities=blocked_communities,
-                           blocked_domains=blocked_domains, blocked_instances=blocked_instances)
+                           blocked_domains=blocked_domains, blocked_instances=blocked_instances,
+                           blocked_flair=blocked_flair)
 
 
 @bp.route('/user/settings/filters/add', methods=['GET', 'POST'])
@@ -1908,13 +2002,11 @@ def edit_user_note(actor):
     form = UserNoteForm()
     if form.validate_on_submit() and not current_user.banned:
         text = form.note.data.strip()
-        usernote = UserNote.query.filter(UserNote.target_id == user.id, UserNote.user_id == current_user.id).first()
-        if usernote:
-            usernote.body = text
+        if form.apply_all.data:
+            for u in User.query.filter(User.user_name == user.user_name).all():
+                insert_or_update_user_note(text, u)
         else:
-            usernote = UserNote(target_id=user.id, user_id=current_user.id, body=text)
-            db.session.add(usernote)
-        db.session.commit()
+            insert_or_update_user_note(text, user)
         from app.api.alpha.views import user_view
         cache.delete_memoized(user_view)
         cache.delete_memoized(user_notes, current_user.id)
@@ -1926,6 +2018,8 @@ def edit_user_note(actor):
             return redirect(f'/u/{actor}')
 
     elif request.method == 'GET':
+        if User.query.filter(User.user_name == user.user_name).count() == 1:
+            form.apply_all.render_kw = {'class': 'hide_field'}
         form.note.data = user.get_note(current_user)
 
     return render_template('user/edit_note.html', title=_('Edit note'), form=form, user=user, return_to=return_to)
@@ -1938,6 +2032,78 @@ def user_preview(user_id):
     if (user.deleted or user.banned) and current_user.is_anonymous:
         abort(404)
     return render_template('user/user_preview.html', user=user, return_to=return_to)
+
+
+@bp.route('/u/<actor>/follow', methods=['POST'])
+@login_required
+def user_follow(actor):
+    actor = actor.strip()
+    return_to = request.args.get('return_to', f'/u/{actor}').strip()
+    if return_to.startswith('http'):
+        abort(401)
+    if '@' in actor:
+        user: User = User.query.filter_by(ap_id=actor, deleted=False).first()
+    else:
+        user: User = User.query.filter_by(user_name=actor, deleted=False, ap_id=None).first()
+    if user is None:
+        abort(404)
+
+    follow_user(user.id, src=SRC_WEB)
+
+    if request.headers.get('HX-Request') == 'true':
+        if user.ap_manually_approves_followers:
+            return '<div class="ms-auto">' + _('Requested') + '</div>'
+        else:
+            return '<div class="ms-auto">' + _('Done') + '</div>'
+    else:
+        flash(_('Follow request sent.'), 'success')
+        return redirect(return_to)
+
+
+@bp.route('/u/<actor>/unfollow', methods=['POST'])
+@login_required
+def user_unfollow(actor):
+    actor = actor.strip()
+    return_to = request.args.get('return_to', f'/u/{actor}').strip()
+    if return_to.startswith('http'):
+        abort(401)
+    if '@' in actor:
+        user: User = User.query.filter_by(ap_id=actor, deleted=False).first()
+    else:
+        user: User = User.query.filter_by(user_name=actor, deleted=False, ap_id=None).first()
+    if user is None:
+        abort(404)
+
+    unfollow_user(user.id, src=SRC_WEB)
+
+    if request.headers.get('HX-Request') == 'true':
+        return '<div class="ms-auto">' + _('Done') + '</div>'
+    else:
+        flash(_('Unfollowed.'), 'success')
+        return redirect(return_to)
+
+
+@bp.route('/u/<actor>/bot_challenge', methods=['POST'])
+@permission_required('change instance settings')
+def user_bot_challenge(actor):
+    actor = actor.strip()
+    return_to = request.args.get('return_to', f'/u/{actor}').strip()
+    if return_to.startswith('http'):
+        abort(401)
+    if '@' in actor:
+        user: User = User.query.filter_by(ap_id=actor, deleted=False).first()
+    else:
+        user: User = User.query.filter_by(user_name=actor, deleted=False, ap_id=None).first()
+    if user is None:
+        abort(404)
+
+    bot_challenge_user(user.id, src=SRC_WEB)
+
+    flash(_('Bot challenge was sent. If they do not respond within 48 hours their account will be flagged as a bot.'), 'success')
+    if request.headers.get('HX-Request') == 'true':
+        return '<div class="ms-auto">' + _('Done') + '</div>'
+    else:
+        return redirect(return_to)
 
 
 @bp.route('/user/lookup/<person>/<domain>')
@@ -2158,25 +2324,25 @@ def user_file_upload():
                     db.session.commit()
 
         if form.file1.data:
-            process_upload(form.file1.data, user_id=current_user.id)
+            process_upload(form.file1.data, user=current_user)
         if form.file2.data:
-            process_upload(form.file2.data, user_id=current_user.id)
+            process_upload(form.file2.data, user=current_user)
         if form.file3.data:
-            process_upload(form.file3.data, user_id=current_user.id)
+            process_upload(form.file3.data, user=current_user)
         if form.file4.data:
-            process_upload(form.file4.data, user_id=current_user.id)
+            process_upload(form.file4.data, user=current_user)
         if form.file5.data:
-            process_upload(form.file5.data, user_id=current_user.id)
+            process_upload(form.file5.data, user=current_user)
         if form.file6.data:
-            process_upload(form.file6.data, user_id=current_user.id)
+            process_upload(form.file6.data, user=current_user)
         if form.file7.data:
-            process_upload(form.file7.data, user_id=current_user.id)
+            process_upload(form.file7.data, user=current_user)
         if form.file8.data:
-            process_upload(form.file8.data, user_id=current_user.id)
+            process_upload(form.file8.data, user=current_user)
         if form.file9.data:
-            process_upload(form.file9.data, user_id=current_user.id)
+            process_upload(form.file9.data, user=current_user)
         if form.file10.data:
-            process_upload(form.file10.data, user_id=current_user.id)
+            process_upload(form.file10.data, user=current_user)
 
         return redirect(form.referrer.data)
 
@@ -2193,6 +2359,67 @@ def user_file_upload():
     form.referrer.data = referrer(url_for('user.user_files'))
 
     return render_template('user/file_upload.html', form=form, user=current_user)
+
+
+@bp.route('/user/follow_requests', methods=['GET'])
+@login_required
+def user_follow_requests():
+    follow_requests = db.session.query(User).join(UserFollower, User.id == UserFollower.remote_user_id) \
+        .outerjoin(UserBlock,
+                   (User.id == UserBlock.blocker_id) & (UserFollower.local_user_id == UserBlock.blocked_id)) \
+        .filter((UserFollower.local_user_id == current_user.id) & (UserBlock.id == None)) \
+        .filter(UserFollower.is_accepted == None, UserFollower.is_inward == True) \
+        .all()
+
+    return render_template('user/follow_requests.html', title=_('Follow requests'),
+                           follow_requests=follow_requests, user=current_user)
+
+
+@bp.route('/user/follow_request/<int:user_id>/accept', methods=['POST'])
+@login_required
+def user_follow_request_accept(user_id):
+    remote_user = User.query.get(user_id)
+    follow_request = UserFollower.query.filter(UserFollower.local_user_id == current_user.id,
+                                               UserFollower.remote_user_id == user_id,
+                                               UserFollower.is_inward == True).first()
+    if follow_request:
+        follow_request.is_accepted = True
+        db.session.commit()
+        if not remote_user.is_local():
+            accept = {"@context": default_context(),
+                      "actor": current_user.public_url(),
+                      "to": [remote_user.public_url()],
+                      "object": {"actor": remote_user.public_url(), "to": None,
+                                 "object": current_user.public_url(), "type": "Follow", "id": f'{current_app.config["SERVER_URL"]}/activities/follow/{gibberish(32)}'},
+                      "type": "Accept",
+                      "id": f"{current_app.config['SERVER_URL']}/activities/accept/" + gibberish(32)}
+            send_post_request(remote_user.ap_inbox_url, accept, current_user.private_key,
+                              f"{current_user.public_url()}#main-key")
+    return 'Done'
+
+
+@bp.route('/user/follow_request/<int:user_id>/reject', methods=['POST'])
+@login_required
+def user_follow_request_reject(user_id):
+    remote_user = User.query.get(user_id)
+    follow_request = UserFollower.query.filter(UserFollower.local_user_id == current_user.id,
+                                               UserFollower.remote_user_id == user_id,
+                                               UserFollower.is_inward == True).first()
+    if follow_request:
+        follow_request.is_accepted = True
+        db.session.commit()
+        if not remote_user.is_local():
+            accept = {"@context": default_context(),
+                      "actor": current_user.public_url(),
+                      "to": [remote_user.public_url()],
+                      "object": {"actor": remote_user.public_url(), "to": None,
+                                 "object": current_user.public_url(), "type": "Follow",
+                                 "id": f'{current_app.config["SERVER_URL"]}/activities/follow/{gibberish(32)}'},
+                      "type": "Reject",
+                      "id": f"{current_app.config['SERVER_URL']}/activities/reject/" + gibberish(32)}
+            send_post_request(remote_user.ap_inbox_url, accept, current_user.private_key,
+                              f"{current_user.public_url()}#main-key")
+    return 'Done'
 
 
 def _calculate_future_date(restriction_setting):

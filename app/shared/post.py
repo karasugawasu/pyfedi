@@ -7,25 +7,25 @@ from datetime import datetime
 
 import boto3
 from PIL import Image, ImageOps
-from flask import flash, request, current_app, g
+from flask import flash, request, current_app, g, abort
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 from pillow_heif import register_heif_opener
 from sqlalchemy import text, Integer
 
-from app import db, cache, plugins
+from app import db, cache, plugins, limiter
 from app.activitypub.util import make_image_sizes, notify_about_post
 from app.community.util import tags_from_string_old, end_poll_date, flair_from_form, flairs_from_string
 from app.constants import *
 from app.models import File, Notification, NotificationSubscription, Poll, PollChoice, Post, PostBookmark, PostVote, \
-    Report, Site, User, utcnow, Instance, Event, Community
+    Report, Site, User, utcnow, Instance, Event, Community, CommunityFlair, votes_cast_today
 from app.shared.tasks import task_selector
 from app.utils import render_template, authorise_api_user, shorten_string, gibberish, ensure_directory_exists, \
     piefed_markdown_to_lemmy_markdown, markdown_to_html, fixup_url, domain_from_url, \
     opengraph_parse, url_to_thumbnail_file, can_create_post, is_video_hosting_site, recently_upvoted_posts, \
     is_image_url, add_to_modlog, store_files_in_s3, guess_mime_type, retrieve_image_hash, \
     hash_matches_blocked_image, can_upvote, can_downvote, get_recipient_language, to_srgb, can_upload_video, \
-    is_video_url, sanitize_svg
+    is_video_url, sanitize_svg, user_ip_banned, ip_address, inspect_image_c2pa
 
 
 def vote_for_post(post_id: int, vote_direction, federate: bool, emoji: str, src, auth=None):
@@ -47,11 +47,17 @@ def vote_for_post(post_id: int, vote_direction, federate: bool, emoji: str, src,
             return render_template(template, post=post, community=post.community, recently_upvoted=[],
                                    recently_downvoted=[])
 
+    if user.banned or user_ip_banned():
+        abort(403)
+
+    mark_post_read([post.id], True, user.id)
+
+    if votes_cast_today(user.id) > current_app.config['VOTE_QUOTA']:
+        abort(429)
+
     undo = post.vote(user, vote_direction, emoji)
 
     task_selector('vote_for_post', user_id=user.id, post_id=post_id, vote_to_undo=undo, vote_direction=vote_direction, federate=federate, emoji=emoji)
-
-    mark_post_read([post.id], True, user.id)
 
     if src == SRC_API:
         return user.id
@@ -178,7 +184,7 @@ def make_post(input, community, type, src, auth=None, uploaded_file=None):
     # ideally, a similar change could be made for incoming activitypub (create_post() and update_post_from_activity() could share code)
     # once this happens, and post.new() just does the minimum before being passed off to an update function, post.new() can be used here again.
 
-    if not can_create_post(user, community):
+    if not can_create_post(user, community) or user_ip_banned():
         raise Exception('You are not permitted to make posts in this community')
 
     if url:
@@ -213,6 +219,7 @@ def make_post(input, community, type, src, auth=None, uploaded_file=None):
     community.last_active = g.site.last_active = utcnow()
     user.post_count += 1
     user.last_seen = utcnow()
+    user.ip_address = ip_address()
 
     post.generate_ap_id(community)
 
@@ -261,6 +268,14 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
             tags = []
         if 'flair' in input:
             flair = flairs_from_string(input['flair'], post.community_id)
+        elif 'flair_id' in input and input['flair_id']:
+            # Handle single flair_id for RSS feeds and other API calls
+            flair_id = input['flair_id']
+            if isinstance(flair_id, int):
+                flair = [CommunityFlair.query.get(flair_id)]
+            else:
+                flair = CommunityFlair.query.filter(CommunityFlair.id.in_(flair_id)).all()
+            flair = [f for f in flair if f is not None]
         else:
             flair = []
         scheduled_for = None
@@ -371,7 +386,7 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
     post.indexable = user.indexable
     if post.community.is_moderator(user) or post.community.is_owner(user) or user.is_admin():
         post.sticky = False if src == SRC_API else input.sticky.data
-    post.nsfw = nsfw
+    post.nsfw = nsfw or post.community.nsfw
     post.nsfl = False if src == SRC_API else input.nsfl.data
     post.ai_generated = ai_generated
     post.notify_author = notify_author
@@ -460,6 +475,12 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
             directory = 'app/static/media/posts/' + new_filename[0:2] + '/' + new_filename[2:4]
         ensure_directory_exists(directory)
 
+        # check for AI-generated images
+        uploaded_file.seek(0)
+        ai_gen = inspect_image_c2pa(uploaded_file.read(), uploaded_file.mimetype or "application/octet-stream")
+        if ai_gen['c2pa']['ai_generated']:
+            post.ai_generated = True
+
         # save the file
         final_place = os.path.join(directory, new_filename + file_ext.lower())
         uploaded_file.seek(0)
@@ -519,6 +540,8 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
             extra_args = {'ContentType': guess_mime_type(final_place)}
             if current_app.config.get('S3_STORAGE_CLASS'):
                 extra_args['StorageClass'] = current_app.config['S3_STORAGE_CLASS']
+            if current_app.config.get('S3_PUBLIC_ACL'):
+                extra_args['ACL'] = 'public-read'
             s3 = session.client(
                 service_name='s3',
                 region_name=current_app.config['S3_REGION'],
@@ -722,7 +745,7 @@ def edit_post(input, post: Post, type, src, user=None, auth=None, uploaded_file=
 
     db.session.commit()
 
-    if post.status < POST_STATUS_PUBLISHED:
+    if post.status < POST_STATUS_PUBLISHED or post.community.local_only or post.community.private:
         federate = False
 
     if from_scratch:
@@ -760,6 +783,7 @@ def delete_post(post_id: int, federate_deletion, src, auth):
         post.deleted = True
         post.deleted_by = user_id
         post.author.post_count -= 1
+        post.author.last_seen = utcnow()
         post.community.post_count -= 1
         db.session.commit()
 
@@ -825,6 +849,9 @@ def report_post(post: Post, input, src, auth=None):
         description = input.description.data
         notify_admins = ('5' in input.reasons.data or '6' in input.reasons.data or ('17' in input.reasons.data and post.community.instance.software.lower() != 'piefed'))
         report_remote = input.report_remote.data
+
+    if post.community.is_local() and post.community.un_moderated:
+        notify_admins = True
 
     targets_data = {
         'gen': '0',
@@ -1105,12 +1132,15 @@ def mark_post_read(post_ids: List[int], read: bool, user_id: int):
             db.session.execute(text(
                 'INSERT INTO "read_posts" (user_id, read_post_id, interacted_at) VALUES (:user_id, :post_id, :stamp) ON CONFLICT (user_id, read_post_id) DO UPDATE SET interacted_at = EXCLUDED.interacted_at'),
                 {"user_id": user_id, "post_id": post_id, "stamp": utcnow()})
-        db.session.commit()
     else:
         for post_id in post_ids:
             db.session.execute(
                 text('DELETE FROM "read_posts" WHERE user_id = :user_id AND read_post_id = :post_id'),
                 {"user_id": user_id, "post_id": post_id})
+    from app import redis_client
+    with redis_client.lock(f"lock:user:{user_id}", timeout=10, blocking_timeout=6):
+        db.session.execute(text('UPDATE "user" SET last_seen = now() WHERE id = :user_id'),
+                           {'user_id': user_id})
         db.session.commit()
 
 
@@ -1132,6 +1162,9 @@ def vote_for_poll(post_id, votes, src, auth=None):
         user = authorise_api_user(auth, return_type='model')
     else:
         user = current_user
+
+    if user.banned or user_ip_banned():
+        abort(403)
     
     if isinstance(votes, int):
         votes = [votes]

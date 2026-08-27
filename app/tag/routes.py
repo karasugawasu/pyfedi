@@ -34,7 +34,8 @@ def show_tag(tag):
 
         posts = Post.query.join(Community, Community.id == Post.community_id). \
             join(post_tag, post_tag.c.post_id == Post.id).filter(post_tag.c.tag_id == tag.id). \
-            filter(Community.banned == False, Post.deleted == False, Post.status > POST_STATUS_REVIEWING)
+            filter(Community.banned == False, Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
+                   Post.private == False)
 
         if current_user.is_anonymous or current_user.ignore_bots == 1:
             posts = posts.filter(Post.from_bot == False)
@@ -367,7 +368,7 @@ def tag_posts(tag_id):
             posts = posts.filter(Post.user_id.not_in(blocked_accounts))
 
         # filter language
-        if len(current_user.read_language_ids):
+        if current_user.read_language_ids:
             posts = posts.filter(Post.language_id.in_(tuple(current_user.read_language_ids)))
 
     if community_id := request.args.get('community_id'):

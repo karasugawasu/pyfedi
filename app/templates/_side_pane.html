@@ -2,7 +2,7 @@
 {% if community %}
     {% block community_actions %}
         {% if not hide_community_actions -%}
-        <div class="card">
+        <div class="card" id="community_actions">
             <div class="card-body">
                 <div class="row mb-2">
                     {% if not banned_from_community -%}
@@ -13,7 +13,7 @@
                         {% endif -%}
                         <div class="col-6">
                             {% if current_user.is_authenticated and community_membership(current_user, community) in [SUBSCRIPTION_MEMBER, SUBSCRIPTION_MODERATOR, SUBSCRIPTION_OWNER] -%}
-                                <a class="w-100 btn btn-warning" href="/community/{{ community.link() }}/unsubscribe" rel="nofollow">{{ _('Leave') }}</a>
+                                <a class="w-100 btn btn-warning" href="{{ url_for('community.community_membership_manage', community_id=community.id) }}" rel="nofollow">{{ _('Membership') }}</a>
                             {% elif current_user.is_authenticated and community_membership(current_user, community) == SUBSCRIPTION_PENDING -%}
                                 <a class="w-100 btn btn-outline-secondary" href="/community/{{ community.link() }}/unsubscribe" rel="nofollow">{{ _('Pending') }}</a>
                             {% else -%}
@@ -99,6 +99,11 @@
                       {{ _('This community is private and only visible to members.') }}
                     </p>
                 {% endif -%}
+                {% if community.new_mods_wanted or (community.is_local() and community.un_moderated) -%}
+                    <p class="border bg-body-secondary border-secondary rounded-pill text-center px-3 py-1">
+                        {{ _('This community needs more moderators. Contact the %(instance_name)s admin team to apply.', instance_name=community.ap_domain) }}
+                    </p>
+                {% endif -%}
                 {{ community.description_html|community_links|feed_links|safe if community.description_html else '' }}
                 {% if current_user.is_authenticated or (community_flair and len(community_flair) > 0) -%}
                     <hr>
@@ -174,7 +179,7 @@
             </div>
         </div>
         {% if related_communities -%}
-        <div class="card mt-3">
+        <div class="card mt-3" id="related_communities">
             <div class="card-header">
                  <h2>{{ _('Related communities') }}</h2>
             </div>
@@ -191,7 +196,7 @@
         </div>
         {% endif -%}
         {% if community_feeds -%}
-            <div class="card mt-3">
+            <div class="card mt-3" id="community_feeds">
                 <div class="card-header">
                      <h2>{{ _('Feeds') }}</h2>
                 </div>

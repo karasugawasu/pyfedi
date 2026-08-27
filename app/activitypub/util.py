@@ -22,7 +22,7 @@ from sqlalchemy import text, Integer, update
 from sqlalchemy.exc import IntegrityError
 
 from app import db, cache, celery, plugins
-from app.activitypub.signature import signed_get_request, send_post_request, default_context
+from app.activitypub.signature import signed_get_request, send_post_request, default_context, RsaKeys
 from app.constants import *
 from app.models import User, Post, Community, File, PostReply, Instance, utcnow, \
     PostVote, PostReplyVote, ActivityPubLog, Notification, Site, CommunityMember, InstanceRole, Report, Conversation, \
@@ -35,7 +35,7 @@ from app.utils import get_request, allowlist_html, get_setting, ap_datetime, mar
     moderating_communities, get_task_session, is_video_hosting_site, opengraph_parse, mastodon_extra_field_link, \
     blocked_users, piefed_markdown_to_lemmy_markdown, store_files_in_s3, guess_mime_type, get_recipient_language, \
     patch_db_session, to_srgb, communities_banned_from_all_users, blocked_communities, blocked_or_banned_instances, \
-    instance_community_ids, banned_instances, instance_banned, first_paragraph, sanitize_svg_bytes
+    instance_community_ids, banned_instances, communities_run_by_inactive_mods, inspect_image_c2pa, first_paragraph
 
 from bs4 import BeautifulSoup
 
@@ -209,6 +209,7 @@ def post_to_page(post: Post):
         activity_data['buyTicketsLink'] = event.buy_tickets_link
         activity_data['feeCurrency'] = event.event_fee_currency
         activity_data['feeAmount'] = event.event_fee_amount
+        activity_data['location'] = event.location
 
     if post.indexable:
         activity_data['searchableBy'] = 'https://www.w3.org/ns/activitystreams#Public'
@@ -648,7 +649,8 @@ def find_flair_or_create(flair: dict, community_id: int, session=None) -> Commun
 
         return existing_flair
     else:
-        flair_text = text_color = background_color = blur_images = ''
+        flair_text = text_color = background_color = ''
+        blur_images = False
         if "text_color" in flair:
             text_color = flair['text_color']
         elif "textColor" in flair:
@@ -1085,6 +1087,9 @@ def refresh_community_profile_task(community_id, activity_json):
                                     if post:
                                         post.sticky = True
                                         session.commit()
+
+                    community.un_moderated = community.id in communities_run_by_inactive_mods()
+                    session.commit()
 
     except Exception:
         session.rollback()
@@ -1667,6 +1672,14 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                     source_image = source_image_response.content
                                     source_image_response.close()
 
+                                    # detect AI image posts
+                                    if directory == 'posts':
+                                        if ai_image := inspect_image_c2pa(source_image, content_type):
+                                            if ai_image['c2pa']['ai_generated']:
+                                                session.execute(text('UPDATE "post" SET ai_generated = true WHERE image_id = :file_id AND ai_generated is false'), {
+                                                    'file_id': file.id
+                                                })
+
                                     content_type_parts = content_type.split('/')
                                     if content_type_parts:
                                         # content type headers often are just 'image/jpeg' but sometimes 'image/jpeg;charset=utf8'
@@ -1772,6 +1785,8 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                             extra_args = {'ContentType': content_type}
                                             if current_app.config.get('S3_STORAGE_CLASS'):
                                                 extra_args['StorageClass'] = current_app.config['S3_STORAGE_CLASS']
+                                            if current_app.config.get('S3_PUBLIC_ACL'):
+                                                extra_args['ACL'] = 'public-read'
                                             boto3_session = boto3.session.Session()
                                             s3 = boto3_session.client(
                                                 service_name='s3',
@@ -1817,6 +1832,8 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                             extra_args = {'ContentType': content_type}
                                             if current_app.config.get('S3_STORAGE_CLASS'):
                                                 extra_args['StorageClass'] = current_app.config['S3_STORAGE_CLASS']
+                                            if current_app.config.get('S3_PUBLIC_ACL'):
+                                                extra_args['ACL'] = 'public-read'
                                             if boto3_session is None and s3 is None:
                                                 boto3_session = boto3.session.Session()
                                                 s3 = boto3_session.client(
@@ -1853,8 +1870,7 @@ def make_image_sizes_async(file_id, thumbnail_width, medium_width, directory, to
                                                     Image.open(BytesIO(source_image)).convert('L'), timeout=30)
                                             except Exception:
                                                 image_text = ''
-                                            if 'Anonymous' in image_text and (
-                                                    'No.' in image_text or ' N0' in image_text):  # chan posts usually contain the text 'Anonymous' and ' No.12345'
+                                            if 'Anonymous' in image_text and ('No.' in image_text or ' N0' in image_text):  # chan posts usually contain the text 'Anonymous' and ' No.12345'
                                                 post = session.query(Post).filter_by(image_id=file.id).first()
                                                 targets_data = {'gen': '0',
                                                                 'post_id': post.id,
@@ -1975,6 +1991,8 @@ def find_reported_object(ap_id) -> Union[User, Post, PostReply, None]:
 
 
 def find_instance_id(server):
+    if not server:
+        return None
     server = server.strip().lower()
     instance = db.session.query(Instance).filter_by(domain=server).first()
     if instance:
@@ -2159,6 +2177,8 @@ def delete_post_or_comment(deletor, to_delete, store_ap_json, request_json, reas
                 if not to_delete.author.bot:
                     with redis_client.lock(f"lock:post:{to_delete.id}", timeout=10, blocking_timeout=6):
                         to_delete.post.reply_count -= 1
+                        if to_delete.post.reply_count_cross_posted:
+                            to_delete.post.reply_count_cross_posted -= 1
                         db.session.commit()
             with redis_client.lock(f"lock:community:{community.id}", timeout=10, blocking_timeout=6):
                 community.post_reply_count -= 1
@@ -3043,7 +3063,7 @@ def update_post_reply_from_activity(reply: PostReply, request_json: dict):
 
 def update_post_from_activity(post: Post, request_json: dict):
     from app import redis_client
-    with redis_client.lock(f"lock:post:{post.id}", timeout=30, blocking_timeout=30):
+    with redis_client.lock(f"lock:post:{post.id}", timeout=60, blocking_timeout=60):
         # redo body without checking if it's changed
         if 'content' in request_json['object'] and request_json['object']['content'] is not None:
             # prefer Markdown in 'source' in provided
@@ -3162,7 +3182,7 @@ def update_post_from_activity(post: Post, request_json: dict):
                                     db.session.add(notification)
             # remove when lemmy supports flairs
             # for now only clear tags if there's new ones or if maybe another PieFed instance is trying to remove them
-            if len(flair_tags) > 0 or post.instance.software == 'piefed':
+            if len(flair_tags) > 0 or (post.instance.software == 'piefed' or post.instance.software == 'pylova'):
                 post.flair.clear()
                 for ft in flair_tags:
                     flair = find_flair_or_create(ft, post.community_id)
@@ -3591,6 +3611,20 @@ def process_report(user, reported, request_json, session):
                                         targets=targets_data)
             session.add(notification)
             already_notified.add(mod.user_id)
+
+        if reported.community.is_local() and reported.community.un_moderated:
+            # Notify site admin if community is un-moderated
+            already_notified = set()
+            for admin in Site.admins():
+                if admin.id not in already_notified:
+                    notify = Notification(title='Reported user', url='/admin/reports', user_id=admin.id,
+                                          author_id=user.id, notif_type=NOTIF_REPORT,
+                                          subtype='user_reported',
+                                          targets=targets_data)
+                    session.add(notify)
+                    admin.unread_notifications += 1
+                    session.commit()
+
         reported.reports += 1
         session.commit()
     elif isinstance(reported, PostReply):
@@ -3628,6 +3662,20 @@ def process_report(user, reported, request_json, session):
                                         targets=targets_data)
             session.add(notification)
             already_notified.add(mod.user_id)
+
+        if reported.community.is_local() and reported.community.un_moderated:
+            # Notify site admin if community is un-moderated
+            already_notified = set()
+            for admin in Site.admins():
+                if admin.id not in already_notified:
+                    notify = Notification(title='Reported user', url='/admin/reports', user_id=admin.id,
+                                          author_id=user.id, notif_type=NOTIF_REPORT,
+                                          subtype='user_reported',
+                                          targets=targets_data)
+                    session.add(notify)
+                    admin.unread_notifications += 1
+                    session.commit()
+
         reported.reports += 1
         session.commit()
     elif isinstance(reported, Community):
@@ -3660,6 +3708,28 @@ def process_quote_boost(core_activity: dict, post_ap: str, their_post_ap: str):
         to = find_actor_or_create_cached(core_activity['actor'])
         if to and to.instance.inbox:
             send_post_request(to.instance.inbox, accept_activity, post.author.private_key, post.author.public_url() + '#main-key')
+
+
+def process_microblog_announce(request_json, id, store_ap_json):
+    """
+    if post / comment already exists locally
+	    update post announce data
+    else
+        retrieve post
+        if is top-level note
+            create post
+            update post announce data
+        else - it's a reply
+            retrieve context
+            make sure all notes and posts in context exist
+            find comment
+                update comment post announce data
+    """
+    post_data = remote_object_to_json(request_json['object'])
+    if not post_data:
+        return None
+
+
 
 
 def lemmy_site_data():
@@ -4250,6 +4320,28 @@ def find_community(request_json):
                         return potential_community
 
     return None
+
+
+def find_microblogging_community():
+    """ Make a special community to put posts without a community into, e.g. microblog posts """
+    community = db.session.query(Community).filter(Community.instance_id == 1, Community.user_id == 1, Community.name == 'microblogs').first()
+    if community is None:
+        private_key, public_key = RsaKeys.generate_keypair()
+        community = Community(title=_('Microblogs'), name='microblogs',
+                              description=_('Microblog posts from around the fediverse.'),
+                              nsfw=False, private_key=private_key,
+                              public_key=public_key, description_html=markdown_to_html(_('Microblog posts from around the fediverse.')),
+                              local_only=False, show_popular=False, show_all=False,
+                              ap_profile_id='https://' + current_app.config['SERVER_NAME'] + '/c/microblogs',
+                              ap_public_url='https://' + current_app.config['SERVER_NAME'] + '/c/microblogs',
+                              ap_followers_url='https://' + current_app.config['SERVER_NAME'] + '/c/microblogs/followers',
+                              ap_moderators_url='https://' + current_app.config['SERVER_NAME'] + '/c/microblogs/moderators',
+                              ap_domain=current_app.config['SERVER_NAME'],
+                              subscriptions_count=0, instance_id=1, user_id=1, ai_generated=False,
+                              first_federated_at=utcnow())
+        db.session.add(community)
+        db.session.commit()
+    return community
 
 
 def normalise_actor_string(actor: str) -> Tuple[str, str]:

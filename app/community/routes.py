@@ -24,7 +24,7 @@ from app.community.forms import SearchRemoteCommunity, CreateDiscussionForm, Cre
     DeleteCommunityForm, AddCommunityForm, EditCommunityForm, AddModeratorForm, BanUserCommunityForm, \
     EscalateReportForm, ResolveReportForm, CreateVideoForm, CreatePollForm, EditCommunityWikiPageForm, \
     InviteCommunityForm, MoveCommunityForm, EditCommunityFlairForm, SetMyFlairForm, FindAndBanUserCommunityForm, \
-    CreateEventForm, InviteAcceptForm
+    CreateEventForm, InviteAcceptForm, EditCommunityMembership, CommunityRssFeedEdit, DeleteCommunityRssFeedForm
 from app.community.util import search_for_community, actor_to_community, \
     save_icon_file, save_banner_file, \
     delete_post_from_community, delete_post_reply_from_community, \
@@ -32,20 +32,20 @@ from app.community.util import search_for_community, actor_to_community, \
     community_theme_list, set_community_theme_allowed, get_community_theme_allowed
 from app.constants import SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, POST_TYPE_LINK, POST_TYPE_ARTICLE, POST_TYPE_IMAGE, \
     SUBSCRIPTION_PENDING, SUBSCRIPTION_MODERATOR, REPORT_STATE_NEW, REPORT_STATE_ESCALATED, REPORT_STATE_RESOLVED, \
-    REPORT_STATE_DISCARDED, POST_TYPE_VIDEO, NOTIF_COMMUNITY, NOTIF_POST, POST_TYPE_POLL, MICROBLOG_APPS, SRC_WEB, \
-    NOTIF_REPORT, NOTIF_NEW_MOD, NOTIF_BAN, NOTIF_UNBAN, NOTIF_REPORT_ESCALATION, NOTIF_MENTION, POST_STATUS_REVIEWING, \
-    POST_TYPE_EVENT, INVITE_MEMBERS_ONLY, INVITE_MODS_ONLY, INVITE_OWNER_ONLY, DOWNVOTE_ACCEPT_NONE, REPORT_TYPE_COMMUNITY
+    REPORT_STATE_DISCARDED, POST_TYPE_VIDEO, NOTIF_COMMUNITY, POST_TYPE_POLL, SRC_WEB, \
+    NOTIF_REPORT, NOTIF_BAN, NOTIF_UNBAN, NOTIF_REPORT_ESCALATION, NOTIF_MENTION, POST_STATUS_REVIEWING, \
+    POST_TYPE_EVENT, REPORT_TYPE_COMMUNITY
 from app.email import send_email
 from app.inoculation import inoculation
 from app.models import User, Community, CommunityMember, CommunityJoinRequest, CommunityBan, Post, Site, \
     File, utcnow, Report, Notification, Topic, PostReply, \
     NotificationSubscription, Language, ModLog, CommunityWikiPage, \
     CommunityWikiPageRevision, read_posts, Feed, FeedItem, CommunityBlock, CommunityFlair, post_flair, UserFlair, \
-    post_tag, Tag, hidden_posts, CommunityInvitation
+    post_tag, Tag, hidden_posts, CommunityInvitation, CommunityFlairBlock, RssFeed
 from app.community import bp
 from app.post.util import tags_to_string
 from app.shared.community import invite_with_chat, invite_with_email, subscribe_community, add_mod_to_community, \
-    remove_mod_from_community, get_comm_flair_list
+    remove_mod_from_community, get_comm_flair_list, favorite_community
 from app.utils import get_setting, render_template, markdown_to_html, validation_required, \
     shorten_string, gibberish, community_membership, \
     request_etag_matches, return_304, can_upvote, can_downvote, user_filters_posts, \
@@ -58,7 +58,8 @@ from app.utils import get_setting, render_template, markdown_to_html, validation
     possible_communities, reported_posts, user_notes, login_required, get_task_session, patch_db_session, \
     approval_required, permission_required, aged_account_required, communities_banned_from_all_users, \
     moderating_communities_ids_all_users, block_honey_pot, user_pronouns, community_membership_private, \
-    show_reason_why_no_federation, can_upload_video, banned_instances, is_invalid_get_request_uri
+    show_reason_why_no_federation, can_upload_video, banned_instances, is_invalid_get_request_uri, user_ip_banned, \
+    check_anoobis
 from app.shared.post import make_post, sticky_post
 from app.shared.tasks import task_selector
 from app.shared.community import leave_community
@@ -74,7 +75,7 @@ from datetime import timezone, timedelta
 @approval_required
 @aged_account_required
 def add_local():
-    if current_user.banned:
+    if current_user.banned or user_ip_banned():
         return show_ban_message()
 
     try:
@@ -179,7 +180,7 @@ def add_local():
 @validation_required
 @approval_required
 def add_remote():
-    if current_user.banned:
+    if current_user.banned or user_ip_banned():
         return show_ban_message()
     form = SearchRemoteCommunity()
     new_community = None
@@ -262,6 +263,7 @@ def _make_community_results_datalist_html(community_name):
 
 # @bp.route('/c/<actor>', methods=['GET']) - defined in activitypub/routes.py, which calls this function for user requests. A bit weird.
 @login_required_if_private_instance
+@check_anoobis
 def show_community(community: Community):
     if community.banned:
         abort(404)
@@ -367,7 +369,7 @@ def show_community(community: Community):
     posts = None
     comments = None
     if content_type == 'posts' or content_type == 'events':
-        posts = Post.query.filter(Post.community_id == community.id)
+        posts = Post.query.filter(Post.community_id == community.id, Post.private == False)
 
         if content_type == 'events':
             posts = posts.filter(Post.type == POST_TYPE_EVENT)
@@ -413,10 +415,21 @@ def show_community(community: Community):
                 posts = posts.filter(Post.user_id.not_in(blocked_accounts))
 
         # Filter by post flair
+        flair_id = None
         if flair:
             flair_id = find_flair_id(flair, community.id)
             if flair_id:
                 posts = posts.join(post_flair).filter(post_flair.c.flair_id == flair_id)
+
+        # Remove posts with flair the user has blocked
+        if current_user.is_authenticated:
+            blocked_flair = CommunityFlairBlock.query.filter(CommunityFlairBlock.user_id == current_user.id,
+                                                             CommunityFlairBlock.community_id == community.id).all()
+            if blocked_flair:
+                blocked_flair_ids = [bf.community_flair_id for bf in blocked_flair if bf.community_flair_id != flair_id]
+                # sub-query - posts that have any blocked flair
+                blocked_post_ids = db.session.query(post_flair.c.post_id).filter(post_flair.c.flair_id.in_(blocked_flair_ids))
+                posts = posts.filter(Post.id.not_in(blocked_post_ids))
 
         # Filter by post tag
         if tag:
@@ -655,7 +668,7 @@ def show_community(community: Community):
                                          community_flair=get_comm_flair_list(community),
                                          recently_upvoted=recently_upvoted, recently_downvoted=recently_downvoted,
                                          community_feeds=community_feeds,
-                                         user_pronouns=user_pronouns(),
+                                         user_pronouns=user_pronouns(), hide_community_actions=community.name == 'microblogs',
                                          canonical=community.profile_id(), can_upvote_here=can_upvote(user, community),
                                          can_downvote_here=can_downvote(user, community),
                                          rss_feed=f"{current_app.config['SERVER_URL']}/community/{community.link()}/feed",
@@ -701,7 +714,7 @@ def show_community_rss(actor):
         score = request.args.get('score', 0, int)
 
         posts = Post.query.filter(Post.community_id == community.id).filter(Post.from_bot == False, Post.deleted == False,
-                                  Post.status > POST_STATUS_REVIEWING)
+                                  Post.status > POST_STATUS_REVIEWING, Post.private == False)
         if score:
             posts = posts.filter(Post.score >= score)
 
@@ -932,6 +945,8 @@ def unsubscribe(actor):
 
                 db.session.query(CommunityMember).filter_by(user_id=current_user.id, community_id=community.id).delete()
                 db.session.query(CommunityJoinRequest).filter_by(user_id=current_user.id, community_id=community.id).delete()
+                db.session.query(CommunityFlairBlock).filter_by(user_id=current_user.id, community_id=community.id).delete()
+
                 community.subscriptions_count -= 1
                 db.session.commit()
 
@@ -998,7 +1013,7 @@ def join_then_add(actor):
 @validation_required
 @approval_required
 def add_post(actor, type=None):
-    if current_user.banned or current_user.ban_posts:
+    if current_user.banned or current_user.ban_posts or user_ip_banned():
         return show_ban_message()
     if request.method == 'GET':
         community = actor_to_community(actor)
@@ -1195,7 +1210,7 @@ def community_report(community_id: int):
                            community=community)
 
 
-@bp.route('/community/<int:community_id>/edit', methods=['GET', 'POST'])
+@bp.route('/<int:community_id>/edit', methods=['GET', 'POST'])
 @login_required
 def community_edit(community_id: int):
     from app.admin.util import topics_for_form
@@ -1573,7 +1588,7 @@ def community_ban_user(community_id: int, user_id: int):
     user = User.query.get_or_404(user_id)
     existing = CommunityBan.query.filter_by(community_id=community.id, user_id=user.id).first()
 
-    if (community.is_owner() or current_user.is_admin_or_staff()) and community.is_moderator(user):
+    if (community.is_moderator() or current_user.is_admin_or_staff()) and not community.is_moderator(user):
         form = BanUserCommunityForm()
         if form.validate_on_submit():
             # Both CommunityBan and CommunityMember need to be updated. CommunityBan is under the control of moderators while
@@ -1655,7 +1670,7 @@ def community_unban_user(community_id: int, user_id: int):
     community = Community.query.get_or_404(community_id)
     user = User.query.get_or_404(user_id)
 
-    if (community.is_owner() or current_user.is_admin_or_staff()) and community.is_moderator(user):
+    if (community.is_moderator() or current_user.is_admin_or_staff()) and not community.is_moderator(user):
         existing_ban = CommunityBan.query.filter_by(community_id=community.id, user_id=user.id).first()
         if existing_ban:
             db.session.delete(existing_ban)
@@ -1699,11 +1714,20 @@ def community_unban_user(community_id: int, user_id: int):
         abort(403)
 
 
-@bp.route('/<int:community_id>/notification', methods=['GET', 'POST'])
+@bp.route('/<int:community_id>/notification', methods=['POST'])
 @login_required
 def community_notification(community_id: int):
     try:
         return subscribe_community(community_id, None, SRC_WEB)
+    except NoResultFound:
+        abort(404)
+
+
+@bp.route('/<int:community_id>/fave', methods=['POST'])
+@login_required
+def community_fave(community_id: int):
+    try:
+        return favorite_community(community_id, current_user.id, SRC_WEB)
     except NoResultFound:
         abort(404)
 
@@ -1786,6 +1810,86 @@ def community_moderate(actor):
             abort(401)
     else:
         abort(404)
+
+
+@bp.route('/<actor>/rss_feeds', methods=['GET'])
+@login_required
+def community_rss_feeds(actor):
+    if current_user.banned:
+        return show_ban_message()
+    community = actor_to_community(actor)
+
+    if community is not None:
+        if community.is_moderator() or current_user.is_admin():
+            rss_feeds = RssFeed.query.filter(RssFeed.community_id == community.id).order_by(RssFeed.title).all()
+            return render_template('community/community_rss_feeds.html',
+                                   title=_('RSS feeds for %(community)s', community=community.display_name()),
+                                   community=community, rss_feeds=rss_feeds, current='rss_feeds',
+                                   can_add_rss=current_app.config['RSS_FEEDS'],
+                                   inoculation=inoculation[
+                                       randint(0, len(inoculation) - 1)] if g.site.show_inoculation_block else None)
+
+
+@bp.route('/community/<int:community_id>/feed/<int:feed_id>', methods=['GET', 'POST'])
+@bp.route('/community/<int:community_id>/feed/new', methods=['GET', 'POST'])
+@login_required
+def community_rss_feed_edit(community_id, feed_id=None):
+    if current_user.banned:
+        return show_ban_message()
+    community = Community.query.get_or_404(community_id)
+
+    if community is not None:
+        if (community.is_moderator() or current_user.is_admin()) and current_app.config['RSS_FEEDS']:
+            rss_feed = RssFeed.query.get(feed_id) if feed_id else None
+            form = CommunityRssFeedEdit()
+            form.flair.choices = [(-1, _('None'))] + flair_for_form(community_id)
+            if form.validate_on_submit():
+                if feed_id:
+                    rss_feed.title = form.name.data
+                    rss_feed.url = form.url.data
+                    rss_feed.check_frequency = int(form.check_frequency.data)
+                    rss_feed.flair_id = int(form.flair.data) if form.flair.data != '-1' else None
+                    rss_feed.error_count = 0    # reset to 0 to make it possible to revive a previously-broken feed
+                else:
+                    rss_feed = RssFeed(title=form.name.data, url=form.url.data, community_id=community.id,
+                                       check_frequency=form.check_frequency.data,
+                                       flair_id=int(form.flair.data) if form.flair.data != '-1' else None)
+                    db.session.add(rss_feed)
+                db.session.commit()
+                return redirect(url_for('community.community_rss_feeds', actor=community.link()))
+
+            if rss_feed:
+                form.name.data = rss_feed.title
+                form.url.data = rss_feed.url
+                form.check_frequency.data = str(rss_feed.check_frequency)
+                if rss_feed.flair_id:
+                    form.flair.data = str(rss_feed.flair_id)
+
+            return render_template('community/community_rss_feed_edit.html', form=form,
+                                   title=_('Edit rss feed %(name)s', name=rss_feed.title) if feed_id else _('Add RSS feed'),
+                                   current='rss_feeds')
+        else:
+            abort(403)
+
+
+@bp.route('/community/<int:community_id>/feed/<int:feed_id>/delete', methods=['GET', 'POST'])
+@login_required
+def community_rss_feed_delete(community_id, feed_id):
+    if current_user.banned:
+        return show_ban_message()
+    community = Community.query.get_or_404(community_id)
+
+    if community.is_moderator() or current_user.is_admin():
+        rss_feed = RssFeed.query.get_or_404(feed_id)
+        form = DeleteCommunityRssFeedForm()
+        if form.validate_on_submit():
+            rss_feed.delete_dependencies()
+            db.session.delete(rss_feed)
+            db.session.commit()
+            return redirect(url_for('community.community_rss_feeds', actor=community.link()))
+
+        return render_template('generic_form.html', form=form, title=_('Are you sure?'),
+                               message=_('Deleting this feed will also delete any posts created from it.'))
 
 
 @bp.route('/<actor>/moderate/subscribers', methods=['GET', 'POST'])
@@ -2433,6 +2537,8 @@ def community_flair_delete(community_id, flair_id):
 
     if community.is_moderator() or current_user.is_admin():
         db.session.execute(text('DELETE FROM "post_flair" WHERE flair_id = :flair_id'), {'flair_id': flair_id})
+        db.session.execute(text('UPDATE "rss_feed" SET flair_id=null WHERE flair_id = :flair_id'), {'flair_id': flair_id})
+        db.session.query(CommunityFlairBlock).filter(CommunityFlairBlock.community_flair_id == flair_id).delete()
         db.session.query(CommunityFlair).filter(CommunityFlair.id == flair_id).delete()
         db.session.commit()
 
@@ -2613,7 +2719,8 @@ def check_url_already_posted():
     url = request.args.get('link_url')
     if url:
         url = remove_tracking_from_link(url.strip())
-        posts = Post.query.filter(Post.url == url, Post.deleted == False, Post.status > POST_STATUS_REVIEWING).all()
+        posts = Post.query.filter(Post.url == url, Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
+                                  Post.microblog == False, Post.from_bot == False).all()
         title, description = retrieve_metadata_of_url(url)
         return flask.render_template('community/check_url_posted.html', posts=posts,
                                      title=title, description=description)
@@ -2629,6 +2736,35 @@ def community_changed():
         return flask.render_template('community/community_changed.html', community=community)
     else:
         return ''
+
+
+@bp.route('/<int:community_id>/membership', methods=['GET', 'POST'])
+@login_required
+def community_membership_manage(community_id: int):
+    community = Community.query.get_or_404(community_id)
+    form = EditCommunityMembership()
+
+    flair_choices = []
+    for flair in CommunityFlair.query.filter_by(community_id=community_id).order_by(CommunityFlair.flair).all():
+        flair_choices.append((flair.id, flair.flair))
+    form.block_flair.choices = flair_choices
+
+    if form.validate_on_submit():
+        CommunityFlairBlock.query.filter(CommunityFlairBlock.user_id == current_user.id,
+                                         CommunityFlairBlock.community_id == community_id).delete()
+        db.session.commit()
+        for flair_id in form.block_flair.data:
+            db.session.add(CommunityFlairBlock(user_id=current_user.id, community_id=community_id,
+                                               community_flair_id=flair_id))
+        db.session.commit()
+        flash(_('Saved'))
+        return redirect(url_for('activitypub.community_profile', actor=community.link()))
+
+    blocked_flair = CommunityFlairBlock.query.filter(CommunityFlairBlock.user_id == current_user.id).all()
+    form.block_flair.data = [bf.community_flair_id for bf in blocked_flair]
+
+    return render_template('community/community_membership.html', title=_('Community membership'), form=form,
+                           current_app=current_app, community=community)
 
 
 @bp.route('/get_sidebar/<int:community_id>')

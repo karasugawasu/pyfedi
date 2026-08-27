@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from flask import current_app, flash
+from flask import current_app, flash, abort
 from flask_babel import _, force_locale, gettext
 from flask_login import current_user
 from sqlalchemy import text
 
-from app import db
+from app import db, limiter
 from app.constants import *
 from app.models import Notification, NotificationSubscription, Post, PostReply, PostReplyBookmark, Report, Site, User, \
-    utcnow, Instance
+    utcnow, Instance, votes_cast_today
 from app.shared.tasks import task_selector
 from app.utils import render_template, authorise_api_user, shorten_string, \
     piefed_markdown_to_lemmy_markdown, markdown_to_html, add_to_modlog, can_create_post_reply, \
-    can_upvote, can_downvote, get_recipient_language
+    can_upvote, can_downvote, get_recipient_language, user_ip_banned, ip_address
 
 
 def vote_for_reply(reply_id: int, vote_direction, federate: bool, emoji: str | None, src, auth=None):
@@ -26,6 +26,12 @@ def vote_for_reply(reply_id: int, vote_direction, federate: bool, emoji: str | N
     else:
         reply = db.session.query(PostReply).get_or_404(reply_id)
         user = current_user
+
+    if user.banned or user_ip_banned():
+        abort(403)
+
+    if votes_cast_today(user.id) > current_app.config['VOTE_QUOTA']:
+        abort(429)
 
     undo = reply.vote(user, vote_direction, emoji)
 
@@ -151,6 +157,9 @@ def make_reply(input, post, parent_id, src, auth=None):
         distinguished = input.distinguished.data
         answer = False
 
+    if user.banned or user_ip_banned():
+        raise Exception('You are not permitted to comment in this community')
+
     if not post.community.is_moderator(user) and not post.community.is_owner(user) and not user.is_admin_or_staff():
         distinguished = False
 
@@ -175,6 +184,7 @@ def make_reply(input, post, parent_id, src, auth=None):
                           language_id=language_id, distinguished=distinguished, answer=answer)
 
     user.language_id = language_id
+    user.ip_address = ip_address()
     reply.ap_id = reply.profile_id()
     db.session.commit()
     if src == SRC_WEB:
@@ -240,6 +250,8 @@ def delete_reply(reply_id, src, auth):
 
     if not reply.author.bot:
         reply.post.reply_count -= 1
+        reply.post.reply_count_cross_posted -= 1
+        reply.community.post_reply_count -= 1
     reply.author.post_reply_count -= 1
     if reply.path:
         db.session.execute(text('update post_reply set child_count = child_count - 1 where id in :parents'),
@@ -489,6 +501,31 @@ def lock_post_reply(post_reply_id, locked, src, auth=None):
             if src == SRC_WEB:
                 flash(_('Comment has been unlocked.'))
             task_selector('unlock_post_reply', user_id=user.id, post_reply_id=post_reply_id)
+
+    if src == SRC_API:
+        return user.id, post_reply
+
+
+def set_collapse_post_reply(post_reply_id, collapsible, src, auth=None):
+    if src == SRC_API:
+        user = authorise_api_user(auth, return_type='model')
+        post_reply = db.session.query(PostReply).filter_by(id=post_reply_id).one()
+    else:
+        user = current_user
+        post_reply = db.session.query(PostReply).get(post_reply_id)
+
+    if post_reply.community.is_moderator(user) or post_reply.community.is_instance_admin(user) or user.is_admin_or_staff():
+        post_reply.collapsible = collapsible
+        db.session.commit()
+
+        if collapsible:
+            if src == SRC_WEB:
+                flash(_('Comment is collapsible.'))
+            #task_selector('lock_post_reply', user_id=user.id, post_reply_id=post_reply_id)
+        else:
+            if src == SRC_WEB:
+                flash(_('Comment will not be collapsed when loading the post.'))
+            #task_selector('unlock_post_reply', user_id=user.id, post_reply_id=post_reply_id)
 
     if src == SRC_API:
         return user.id, post_reply

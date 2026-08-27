@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import namedtuple, defaultdict
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from random import randint
 
 from flask import redirect, url_for, flash, current_app, abort, request, g, make_response, jsonify, Response
@@ -46,7 +47,8 @@ from app.shared.post import edit_post, sticky_post, lock_post, bookmark_post, re
     vote_for_post, mark_post_read, report_post, delete_post, mod_remove_post, restore_post, mod_restore_post, \
     vote_for_poll, hide_post, move_post
 from app.shared.reply import make_reply, edit_reply, bookmark_reply, remove_bookmark_reply, subscribe_reply, \
-    delete_reply, mod_remove_reply, vote_for_reply, lock_post_reply, report_reply, choose_answer, unchoose_answer
+    delete_reply, mod_remove_reply, vote_for_reply, lock_post_reply, report_reply, choose_answer, unchoose_answer, \
+    set_collapse_post_reply
 from app.shared.site import block_remote_instance
 from app.shared.community import get_comm_flair_list
 from app.shared.tasks import task_selector
@@ -63,10 +65,11 @@ from app.utils import render_template, markdown_to_html, validation_required, \
     total_comments_on_post_and_cross_posts, approval_required, libretranslate_string, user_in_restricted_country, \
     site_language_code, block_honey_pot, joined_communities, moderating_communities, user_pronouns, \
     instance_sticky_posts, instance_sticky_post_ids, user_access, show_reason_why_no_federation, \
-    community_membership_private
+    community_membership_private, user_ip_banned, check_anoobis
 
 
 @login_required_if_private_instance
+@check_anoobis
 def show_post(post_id: int, sort, low_bandwidth, autoplay):
     with limiter.limit('30/minute'):
         post = Post.query.get_or_404(post_id)
@@ -240,6 +243,12 @@ def show_post(post_id: int, sort, low_bandwidth, autoplay):
             recently_downvoted_replies = []
             reply_collapse_threshold = -10
 
+        # fep-2345 - fediverse:creator tag
+        if post.type == POST_TYPE_ARTICLE or post.type == POST_TYPE_LINK or post.type == POST_TYPE_POLL or post.type == POST_TYPE_EVENT or post.is_microblog():
+            creator = '@' + post.author.lemmy_link()
+        else:
+            creator = None
+
         # Polls
         poll_results = False
         poll_choices = []
@@ -308,7 +317,7 @@ def show_post(post_id: int, sort, low_bandwidth, autoplay):
                                    breadcrumbs=breadcrumbs, related_communities=related_communities, mods=mod_list,
                                    has_voted=has_voted, poll_results=poll_results, poll_data=poll_data,
                                    poll_choices=poll_choices, poll_total_votes=poll_total_votes,
-                                   event=event,
+                                   event=event, creator=creator,
                                    canonical=post.ap_id, form=form, replies=replies, more_replies=more_replies,
                                    user_flair=user_flair, lazy_load_replies=lazy_load_replies,
                                    THREAD_CUTOFF_DEPTH=constants.THREAD_CUTOFF_DEPTH,
@@ -334,7 +343,8 @@ def show_post(post_id: int, sort, low_bandwidth, autoplay):
                                    recipient_language_code=recipient_language_code,
                                    recipient_language_name=recipient_language_name,
                                    author_banned=author_banned,
-                                   user_pronouns=user_pronouns()
+                                   user_pronouns=user_pronouns(),
+                                   hide_community_actions = community.name == 'microblogs',
                                    )
         response.headers.set('Link',
                              f'<https://{current_app.config["SERVER_NAME"]}/post/{post.id}>; rel="alternate"; type="application/activity+json"')
@@ -639,6 +649,7 @@ def poll_vote(post_id):
 
 @bp.route('/post/<int:post_id>/comment/<int:comment_id>')
 @login_required_if_private_instance
+@check_anoobis
 def continue_discussion(post_id, comment_id):
     block_honey_pot()
 
@@ -797,7 +808,7 @@ def continue_discussion_ajax(post_id, comment_id, nonce):
 @login_required
 def add_reply(post_id: int, comment_id: int):
     # this route is used when JS is disabled
-    if current_user.banned or current_user.ban_comments:
+    if current_user.banned or current_user.ban_comments or user_ip_banned():
         return show_ban_message()
     post = Post.query.get_or_404(post_id)
 
@@ -857,7 +868,7 @@ def add_reply_inline(post_id: int, comment_id: int, nonce):
     # this route is called by htmx and returns a html fragment representing a form that can be submitted to make a new reply
     # it also accepts the POST from that form and makes the reply. All the JS in the response needs a nonce from the parent page
     # to keep CSP happy and that nonce needs to be used by any replies to this reply so it's nonces all the way down.
-    if current_user.banned or current_user.ban_comments:
+    if current_user.banned or current_user.ban_comments or user_ip_banned():
         return _('You have been banned.')
     post = Post.query.get_or_404(post_id)
     if not can_create_post_reply(current_user, post.community):
@@ -1044,7 +1055,7 @@ def post_edit(post_id: int):
 
     if post.user_id == current_user.id:
 
-        if post.community.id in communities_banned_from(current_user.id):
+        if post.community.id in communities_banned_from(current_user.id) or user_ip_banned():
             abort(403)
 
         if g.site.enable_nsfl is False:
@@ -1118,8 +1129,10 @@ def post_edit(post_id: int):
                     i += 1
             elif post_type == POST_TYPE_EVENT:
                 event = Event.query.filter_by(post_id=post.id).first()
-                form.start_datetime.data = event.start
-                form.end_datetime.data = event.end
+                # event.start / event.end are stored as naive UTC - show them in the event's timezone
+                event_tz = ZoneInfo(event.timezone) if event.timezone else ZoneInfo('UTC')
+                form.start_datetime.data = event.start.replace(tzinfo=ZoneInfo('UTC')).astimezone(event_tz).replace(tzinfo=None)
+                form.end_datetime.data = event.end.replace(tzinfo=ZoneInfo('UTC')).astimezone(event_tz).replace(tzinfo=None)
                 form.event_timezone.data = event.timezone
                 form.max_attendees.data = event.max_attendees
                 form.online.data = event.online
@@ -1149,7 +1162,7 @@ def post_delete(post_id: int):
     post = Post.query.get_or_404(post_id)
     community = post.community
     if post.user_id == current_user.id or community.is_moderator() or current_user.is_admin() or user_access('administer all communities', current_user.get_id()):
-        if post.community.id in communities_banned_from(current_user.id):
+        if post.community.id in communities_banned_from(current_user.id) or user_ip_banned():
             abort(403)
         form = DeleteConfirmationForm()
         if form.validate_on_submit():
@@ -1653,6 +1666,13 @@ def post_reply_lock(post_id: int, post_reply_id: int, mode):
     return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{post_reply_id}')))
 
 
+@bp.route('/post/<int:post_id>/<int:post_reply_id>/collapse/<mode>', methods=['POST'])
+@login_required
+def post_reply_collapse(post_id: int, post_reply_id: int, mode):
+    set_collapse_post_reply(post_reply_id, mode == 'yes', SRC_WEB)
+    return redirect(referrer(url_for('activitypub.post_ap', post_id=post_id, _anchor=f'comment_{post_reply_id}')))
+
+
 @bp.route('/post/<int:post_id>/move', methods=['GET', 'POST'])
 @login_required
 def post_move(post_id: int):
@@ -2075,6 +2095,7 @@ def post_reply_notification(post_reply_id: int):
 
 @bp.route('/post/<int:post_id>/cross_posts', methods=['GET'])
 @login_required_if_private_instance
+@check_anoobis
 def post_cross_posts(post_id: int):
     post = Post.query.get_or_404(post_id)
     if post.cross_posts:
@@ -2288,7 +2309,7 @@ def preview():
             target_id = "#textarea_in_reply_to_preview_"
             if preview_id:
                 target_id += preview_id
-    elif preview_type == "post":
+    elif preview_type == "post" or preview_type == "wiki":
         oob_target = "post_preview_btn"
         target_id = "#preview"
     
@@ -2317,7 +2338,8 @@ def show_post_ical(post_id: int):
         evt.name = post.title
         evt.description = f'For more information see {post.ap_id}'
         evt.begin = post.event.start
-        evt.end = post.event.end
+        if post.event.start and post.event.end and post.event.end > post.event.start:
+            evt.end = post.event.end
         alarm = DisplayAlarm(display_text=str(escape(post.title)), trigger=timedelta(minutes=30))
         evt.alarms += [alarm]
         ical.events.add(evt)
@@ -2373,6 +2395,13 @@ def post_set_ai(post_id):
         post.ai_generated = True
         db.session.commit()
     return 'Done'
+
+
+@bp.route('/post/<int:post_id>/set_read', methods=['POST'])
+@login_required
+def post_set_read(post_id):
+    mark_post_read([post_id], True, current_user.id)
+    return ''
 
 
 @bp.route('/post_reply/<int:post_reply_id>/check_ai', methods=['POST'])

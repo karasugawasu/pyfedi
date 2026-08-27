@@ -5,7 +5,7 @@ from feedgen.feed import FeedGenerator
 from flask import redirect, url_for, flash, request, make_response, current_app, abort, g
 from flask_babel import _
 from flask_login import current_user, login_required
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, or_, text
 
 from app import db, constants, cache, limiter
 from app.constants import POST_STATUS_REVIEWING, SRC_WEB
@@ -18,11 +18,12 @@ from app.utils import render_template, permission_required, user_filters_posts, 
     blocked_or_banned_instances, \
     recently_upvoted_posts, recently_downvoted_posts, mimetype_from_url, request_etag_matches, \
     return_304, joined_or_modding_communities, login_required_if_private_instance, reported_posts, \
-    moderating_communities_ids, block_honey_pot, user_pronouns, community_membership_private
+    moderating_communities_ids, block_honey_pot, user_pronouns, community_membership_private, check_anoobis
 
 
 @bp.route('/d/<domain_id>', methods=['GET', 'POST'])
 @login_required_if_private_instance
+@check_anoobis
 def show_domain(domain_id):
     block_honey_pot()
     with limiter.limit('60/minute'):
@@ -39,15 +40,17 @@ def show_domain(domain_id):
                 form = PostWarningForm()
                 if form.validate_on_submit():
                     domain.post_warning = form.post_warning.data
+                    domain.warning_type = form.warning_type.data
                     db.session.commit()
                     flash(_('Saved'))
                 form.post_warning.data = domain.post_warning
+                form.warning_type.data = str(domain.warning_type)
             else:
                 form = None
             if current_user.is_anonymous or current_user.ignore_bots == 1:
                 posts = Post.query.join(Community, Community.id == Post.community_id). \
                     filter(Post.from_bot == False, Post.domain_id == domain.id, Community.banned == False,
-                           Post.deleted == False, Post.status > POST_STATUS_REVIEWING). \
+                           Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Post.private == False). \
                     order_by(desc(Post.posted_at))
             else:
                 posts = Post.query.join(Community).filter(Post.domain_id == domain.id, Community.banned == False,
@@ -120,8 +123,8 @@ def show_domain_rss(domain_id):
 
             posts = Post.query.join(Community, Community.id == Post.community_id). \
                 filter(Post.from_bot == False, Post.domain_id == domain.id, Community.banned == False,
-                       Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Community.private == False). \
-                order_by(desc(Post.posted_at)).limit(20)
+                       Post.deleted == False, Post.status > POST_STATUS_REVIEWING, Community.private == False,
+                       Post.private == False).order_by(desc(Post.posted_at)).limit(20)
 
             fg = FeedGenerator()
             fg.id(f"{current_app.config['SERVER_URL']}/d/{domain_id}")
@@ -189,8 +192,6 @@ def domains():
 @bp.route('/domains/banned', methods=['GET'])
 @login_required
 def domains_blocked_list():
-    if not current_user.trustworthy():
-        abort(404)
 
     page = request.args.get('page', 1, type=int)
     search = request.args.get('search', '')
@@ -206,6 +207,16 @@ def domains_blocked_list():
 
     return render_template('domain/domains_blocked.html', title='Domains blocked on this instance', domains=domains,
                            next_url=next_url, prev_url=prev_url, search=search)
+
+
+@bp.route('/domains/unban_all', methods=['POST'])
+@login_required
+@permission_required('manage users')
+def unban_all():
+    db.session.execute(text('UPDATE "domain" SET banned = false'))
+    db.session.commit()
+    flash(_('All domains have been unbanned.'))
+    return redirect(url_for('domain.domains_blocked_list'))
 
 
 @bp.route('/d/<int:domain_id>/block', methods=['POST'])

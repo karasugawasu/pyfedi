@@ -1,5 +1,4 @@
 from datetime import timedelta
-import time
 
 from flask import current_app, g, request
 from sqlalchemy import desc, text, and_, exists, asc, or_
@@ -11,7 +10,7 @@ from app.api.alpha.views import post_view, post_report_view, reply_view, communi
 from app.constants import *
 from app.feed.routes import get_all_child_feed_ids
 from app.models import Post, Community, CommunityMember, utcnow, User, Feed, FeedItem, Topic, PostReply, PostVote, \
-    CommunityFlair, read_posts, Poll
+    CommunityFlair, read_posts, Poll, Report
 from app.shared.post import vote_for_post, bookmark_post, remove_bookmark_post, subscribe_post, make_post, edit_post, \
     delete_post, restore_post, report_post, lock_post, sticky_post, mod_remove_post, mod_restore_post, mark_post_read, \
     vote_for_poll, hide_post
@@ -22,7 +21,8 @@ from app.utils import authorise_api_user, blocked_users, blocked_communities, bl
     site_language_id, filtered_out_communities, joined_or_modding_communities, \
     user_filters_home, user_filters_posts, in_sorted_list, instance_sticky_posts, instance_sticky_post_ids, \
     communities_banned_from_all_users, moderating_communities_ids_all_users, blocked_domains, SqlKeysetPagination, \
-    community_membership_private, paginate_post_ids, post_ids_to_models
+    community_membership_private, paginate_post_ids, post_ids_to_models, user_access, moderating_communities_ids, \
+    user_filters_languages
 from app.shared.tasks import task_selector
 
 
@@ -98,12 +98,14 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         blocked_instance_ids = blocked_or_banned_instances(user_id)
         blocked_domain_ids = blocked_domains(user_id)
         private_community_ids = community_membership_private(user_id)
+        read_language_ids = user_filters_languages(user_id)
     else:
         blocked_person_ids = []
         blocked_community_ids = []
         blocked_instance_ids = []
         blocked_domain_ids = []
         private_community_ids = []
+        read_language_ids = []
 
     content_filters = {}
     u_rp_ids = []
@@ -126,7 +128,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
     #post_query_criteria.append(f'deleted is false AND status > {POST_STATUS_REVIEWING}')
 
     if blocked_person_ids:
-        post_query_criteria.append(f'p.user_id NOT IN :blocked_person_ids')
+        post_query_criteria.append('p.user_id NOT IN :blocked_person_ids')
         post_query_parameters['blocked_person_ids'] = tuple(blocked_person_ids)
 
     if blocked_community_ids:
@@ -138,8 +140,12 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         post_query_parameters['blocked_domain_ids'] = tuple(blocked_domain_ids)
 
     if blocked_instance_ids:
-        post_query_criteria.append('c.instance_id NOT IN :blocked_instance_ids')
+        post_query_criteria.append('c.instance_id NOT IN :blocked_instance_ids AND p.instance_id NOT IN :blocked_instance_ids')
         post_query_parameters['blocked_instance_ids'] = tuple(blocked_instance_ids)
+
+    if read_language_ids:
+        post_query_criteria.append('(p.language_id IN :read_language_ids OR p.language_id is null)')
+        post_query_parameters['read_language_ids'] = tuple(read_language_ids)
 
     if type == "Local":
         posts = Post.query.filter(Post.deleted == False, Post.status > POST_STATUS_REVIEWING,
@@ -158,7 +164,7 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                                                       Community.instance_id.not_in(
                                                                           blocked_instance_ids))
         
-        post_query_criteria.append(f'score > 100')
+        post_query_criteria.append('score > 100')
         post_query_criteria.append('show_popular is true')
 
     elif type == "Subscribed" and user_id is not None:
@@ -200,13 +206,11 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                       Post.community_id.not_in(blocked_community_ids),
                                       or_(Post.domain_id == None, Post.domain_id.not_in(blocked_domain_ids)),
                                       Post.instance_id.not_in(blocked_instance_ids)). \
-                join(Community, Community.id == Post.community_id).filter(Community.show_all == True,
-                                                                          Community.name == name,
+                join(Community, Community.id == Post.community_id).filter(Community.name == name,
                                                                           Community.ap_domain == ap_domain,
                                                                           Community.instance_id.not_in(
                                                                               blocked_instance_ids))
-            
-            post_query_criteria.append('show_all is true')
+
             post_query_criteria.append('community_name = :community_name')
             post_query_criteria.append('ap_domain = :ap_domain')
             post_query_parameters.update({
@@ -578,6 +582,8 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
             usernotes = None
         
         user_votes = get_post_votes_for_posts(user_id, post_ids)
+        unread_counts = get_post_unread_counts(user_id, post_ids)
+        interacted_at = get_post_interacted_at(user_id, post_ids)
     else:
         bookmarked_posts = []
         banned_from = {}
@@ -587,6 +593,8 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
         communities_joined = []
         usernotes = {}
         user_votes = {}
+        unread_counts = {}
+        interacted_at = {}
 
     postlist = []
     for post in posts:
@@ -598,7 +606,8 @@ def get_post_list(auth, data, user_id=None, search_type='Posts') -> dict:
                                   banned_from=banned_from, bookmarked_posts=bookmarked_posts,
                                   post_subscriptions=post_subscriptions, read_posts=read_post_set,
                                   communities_joined=communities_joined, content_filters=content_filters,
-                                  usernotes=usernotes, my_vote=my_vote))
+                                  usernotes=usernotes, my_vote=my_vote, unread_counts=unread_counts,
+                                  interacted_at=interacted_at))
     if use_faster_query:
         list_json = {
             "posts": postlist,
@@ -625,6 +634,50 @@ def get_post_votes_for_posts(user_id, post_ids):
     
     # Convert to a dictionary for O(1) lookup
     return {vote[0]: vote[1] for vote in votes}
+
+
+def get_post_unread_counts(user_id, post_ids):
+    """Pre-fetch user unread comment counts for a list of posts to avoid N+1 queries in post_view()"""
+    if not user_id or not post_ids:
+        return {}
+
+    counts = db.session.execute(
+        text("""SELECT
+                    p.id AS post_id,
+                    CASE
+                        WHEN rp.read_post_id IS NOT NULL
+                        THEN COUNT(CASE WHEN pr.posted_at >= rp.interacted_at THEN 1 END)
+                        ELSE p.reply_count
+                    END AS reply_count
+                FROM
+                    post p
+                LEFT JOIN
+                    read_posts rp ON rp.read_post_id = p.id AND rp.user_id = :user_id
+                LEFT JOIN
+                    post_reply pr ON pr.post_id = p.id
+                WHERE
+                    p.id IN :post_ids
+                GROUP BY
+                    p.id, p.reply_count, rp.read_post_id, rp.interacted_at;"""),
+        {'user_id': user_id, 'post_ids': tuple(post_ids)}
+    ).all()
+
+    # Convert to a dictionary for O(1) lookup
+    return {c[0]: c[1] for c in counts}
+
+
+def get_post_interacted_at(user_id, post_ids):
+    """Pre-fetch user interacted_at for a list of posts to avoid N+1 queries in post_view()"""
+    if not user_id or not post_ids:
+        return {}
+
+    interacted = db.session.execute(
+        text('SELECT read_post_id, interacted_at FROM "read_posts" WHERE read_post_id IN :post_ids and user_id = :user_id'),
+        {'user_id': user_id, 'post_ids': tuple(post_ids)}
+    ).all()
+
+    # Convert to a dictionary for O(1) lookup
+    return {i[0]: i[1] for i in interacted}
 
 
 def get_post_list2(auth, data, user_id=None, search_type='Posts') -> dict:
@@ -756,8 +809,7 @@ def get_post_list2(auth, data, user_id=None, search_type='Posts') -> dict:
                                       Post.community_id.not_in(blocked_community_ids),
                                       or_(Post.domain_id == None, Post.domain_id.not_in(blocked_domain_ids)),
                                       Post.instance_id.not_in(blocked_instance_ids)). \
-                join(Community, Community.id == Post.community_id).filter(Community.show_all == True,
-                                                                          Community.name == name,
+                join(Community, Community.id == Post.community_id).filter(Community.name == name,
                                                                           Community.ap_domain == ap_domain,
                                                                           Community.instance_id.not_in(
                                                                               blocked_instance_ids))
@@ -1501,6 +1553,104 @@ def post_post_report(auth, data):
 
     post_json = post_report_view(report=report, post_id=post_id, user_id=user_id)
     return post_json
+
+
+def get_post_report_list(auth, data):
+    user = authorise_api_user(auth, return_type="model")
+
+    if not user:
+        raise Exception("incorrect login")
+
+    post_id = data['post_id'] if 'post_id' in data else None
+    community_id = data['community_id'] if 'community_id' in data else None
+    limit = data['limit'] if 'limit' in data else 20
+    page = data['page'] if 'page' in data else 1
+    unresolved_only = data['unresolved_only'] if 'unresolved_only' in data else True
+
+    if post_id:
+        # Just get reports for a single post
+        post = Post.query.get(post_id)
+        mods = post.community.moderators()
+        mod_ids = [mod.user_id for mod in mods]
+
+        if user.id in mod_ids or user_access('administer all communities', user.id):
+            reports = Report.query.filter(Report.suspect_post_id == post_id,
+                                          Report.suspect_post_reply_id == None)
+        else:
+            raise Exception('incorrect login')
+    elif community_id:
+        # Just get reports for a single community
+        community = Community.query.get(community_id)
+        mods = community.moderators()
+        mod_ids = [mod.user_id for mod in mods]
+
+        if user.id in mod_ids or user_access("administer all communities", user.id):
+            reports = Report.query.filter(Report.in_community_id == community_id,
+                                          Report.suspect_post_id != None,
+                                          Report.suspect_post_reply_id == None)
+        else:
+            raise Exception('incorrect login')
+    else:
+        # Don't restrict reports to single post or community
+        if user_access('administer all communities', user.id):
+            # Privileged user, don't filter by community
+            reports = Report.query.filter(Report.suspect_post_id != None,
+                                          Report.suspect_post_reply_id == None)
+        else:
+            modded_comm_ids = moderating_communities_ids(user.id)
+            reports = Report.query.filter(Report.suspect_post_id != None,
+                                          Report.in_community_id.in_(modded_comm_ids),
+                                          Report.suspect_post_reply_id == None)
+    
+    if unresolved_only:
+        reports = reports.filter(Report.status < REPORT_STATE_RESOLVED)
+    
+    reports = reports.paginate(page=page, per_page=limit, error_out=False)
+
+    report_list = []
+    for report in reports.items:
+        report_list.append(post_report_view(report=report,
+                                             post_id=report.suspect_post_id,
+                                             user_id=user.id,
+                                             variant=2))
+    
+    reply_json = dict()
+    reply_json['post_reports'] = report_list
+    reply_json['next_page'] = str(reports.next_num) if reports.next_num else None
+
+    return reply_json
+
+
+def put_post_report_resolve(auth, data):
+    report_id = data['report_id']
+    resolved = data['resolved']
+
+    user = authorise_api_user(auth, return_type="model")
+
+    if not user:
+        raise Exception("incorrect login")
+    
+    report = Report.query.get(report_id)
+    
+    if not report.suspect_post_id and report.suspect_post_reply_id:
+        raise Exception("invalid target of resolution")
+    
+    community = Community.query.get(report.in_community_id)
+    mods = community.moderators()
+    mod_ids = [mod.user_id for mod in mods]
+
+    if user.id in mod_ids or user_access('administer all communities', user.id):
+        if resolved:
+            report.status = REPORT_STATE_RESOLVED
+        else:
+            report.status = REPORT_STATE_NEW
+
+        db.session.commit()
+    else:
+        raise Exception("incorrect login")
+    
+    reply_json = post_report_view(report=report, post_id=report.suspect_post_id, user_id=user.id)
+    return reply_json
 
 
 def post_post_lock(auth, data):
