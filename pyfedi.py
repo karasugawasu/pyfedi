@@ -21,7 +21,7 @@ from app.utils import getmtime, gibberish, shorten_string, shorten_url, digits, 
     in_sorted_list, role_access, first_paragraph, person_link_to_href, feed_membership, html_to_text, remove_images, \
     notif_id_to_string, feed_link_to_href, get_setting, set_setting, show_explore, human_filesize, can_upload_video, \
     debug_checkpoint, compaction_level, humanize_number, round_invisible_digits, get_site_as_dict, localize_datetime, \
-    display_back_button, favorite_communities
+    display_back_button, favorite_communities, get_event_start
 
 app = create_app()
 cli.register(app)
@@ -75,6 +75,7 @@ with app.app_context():
     app.jinja_env.globals['localize_datetime'] = localize_datetime
     app.jinja_env.globals['display_back_button'] = display_back_button
     app.jinja_env.globals['favorite_communities'] = favorite_communities
+    app.jinja_env.globals["get_event_start"] = get_event_start
     app.jinja_env.filters['community_links'] = community_link_to_href
     app.jinja_env.filters['feed_links'] = feed_link_to_href
     app.jinja_env.filters['person_links'] = person_link_to_href
@@ -141,8 +142,20 @@ def after_request(response):
             from flask import session
             session.modified = False
         # Cache headers for static resources
-        if request.path.startswith('/static/') or request.path.startswith('/bootstrap/static/'):
-            response.headers['Cache-Control'] = 'public, max-age=31536000'  # 1 year
+        # Skip manifest.json as it varies by User-Agent and has its own cache headers
+        if (request.path.startswith('/static/') or request.path.startswith('/bootstrap/static/')) and '/manifest.json' not in request.path:
+            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'  # 1 year
+            # Set Vary to only Accept-Encoding for static files to allow upstream proxy caching
+            # Static files don't vary by cookie or language, only by Accept-Encoding for compression
+            if 'Vary' in response.headers:
+                vary = response.headers['Vary']
+                vary_parts = [v.strip() for v in vary.split(',')]
+                # Only keep Accept-Encoding, remove everything else (Cookie, Accept-Language, etc.)
+                vary_parts = [v for v in vary_parts if v.lower() == 'accept-encoding']
+                if vary_parts:
+                    response.headers['Vary'] = ', '.join(vary_parts)
+                else:
+                    del response.headers['Vary']
     else:
         if not current_app.config['ALLOW_AI_CRAWLERS']:
             response.headers.add('Link', f'<https://{current_app.config["SERVER_NAME"]}/rsl.xml>; rel="license"; type="application/rsl+xml"')

@@ -4,10 +4,10 @@ import re
 from datetime import timedelta
 from time import sleep
 from io import BytesIO
-import json as python_json
+import orjson
 import shutil
 
-from flask import request, flash, json, url_for, current_app, redirect, g, abort, send_file
+from flask import request, flash, json, url_for, current_app, redirect, g, abort, send_file, make_response
 from flask_login import current_user, login_user
 from flask_babel import _, ngettext
 from slugify import slugify
@@ -24,19 +24,22 @@ from app.admin.constants import ReportTypes
 from app.admin.forms import FederationForm, SiteMiscForm, SiteProfileForm, EditCommunityForm, EditUserForm, \
     EditTopicForm, SendNewsletterForm, AddUserForm, PreLoadCommunitiesForm, ImportExportBannedListsForm, \
     EditInstanceForm, RemoteInstanceScanForm, MoveCommunityForm, EditBlockedImageForm, AddBlockedImageForm, \
-    CmsPageForm, CreateOfflineInstanceForm, InstanceChooserForm, CloseInstanceForm, EmojiForm
+    CmsPageForm, CreateOfflineInstanceForm, InstanceChooserForm, CloseInstanceForm, EmojiForm, TopicImportForm
 from flask_wtf import FlaskForm
 from app.admin.util import unsubscribe_from_everything_then_delete, unsubscribe_from_community, send_newsletter, \
-    topics_for_form, move_community_images_to_here, switch_to_unsilenced, switch_to_silenced
+    topics_for_form, move_community_images_to_here, switch_to_unsilenced, switch_to_silenced, serialize_topic_tree, \
+    create_topic_and_children
 from app.auth.util import send_email_verification, random_token
 from app.community.util import save_icon_file, save_banner_file, search_for_community, is_bad_name
 from app.community.routes import do_subscribe
 from app.constants import REPORT_STATE_NEW, REPORT_STATE_ESCALATED, POST_STATUS_REVIEWING, ROLE_ADMIN
 from app.email import send_registration_approved_email
-from app.models import AllowedInstances, BannedInstances, ActivityPubLog, CronJobLog, utcnow, Site, Community, CommunityMember, \
+from app.models import AllowedInstances, BannedInstances, ActivityPubLog, CronJobLog, utcnow, Site, Community, \
+    CommunityMember, \
     User, Instance, File, Report, Topic, UserRegistration, Role, Post, PostReply, Language, RolePermission, Domain, \
-    Tag, DefederationSubscription, BlockedImage, CmsPage, Notification, Emoji
+    Tag, DefederationSubscription, BlockedImage, CmsPage, Notification, Emoji, user_file
 from app.shared.tasks import task_selector
+from app.shared.upload import process_file_delete
 from app.translation import LibreTranslateAPI
 from app.utils import render_template, permission_required, set_setting, get_setting, gibberish, markdown_to_html, \
     moderating_communities, joined_communities, finalize_user_setup, theme_list, blocked_phrases, blocked_referrers, \
@@ -44,13 +47,15 @@ from app.utils import render_template, permission_required, set_setting, get_set
     download_defeds, instance_banned, login_required, referrer, \
     community_membership, retrieve_image_hash, posts_with_blocked_images, user_access, reported_posts, user_notes, \
     safe_order_by, get_task_session, patch_db_session, low_value_reposters, moderating_communities_ids, \
-    instance_allowed, trusted_instance_ids, get_emoji_replacements, get_site_as_dict
+    instance_allowed, trusted_instance_ids, get_emoji_replacements, get_site_as_dict, roles_with
 from app.admin import bp
 
 
 @bp.route('/', methods=['GET', 'POST'])
 @login_required
 def admin_home():
+    if not current_user.is_admin_or_staff():
+        abort(403)
     load1, load5, load15 = os.getloadavg()
     if current_app.config["NUM_CPU"] and current_app.config["NUM_CPU"] != 0:
         num_cores = current_app.config["NUM_CPU"]
@@ -243,7 +248,8 @@ def admin_site():
         form.tos_url.data = site.tos_url
         form.contact_email.data = site.contact_email
         form.announcement.data = get_setting('announcement', '')
-    return render_template('admin/site.html', title=_('Site profile'), form=form)
+    return render_template('admin/site.html', title=_('Site profile'), form=form,
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/misc', methods=['GET', 'POST'])
@@ -349,7 +355,8 @@ def admin_misc():
         form.enable_report_em_dash_replies.data = get_setting('enable_report_em_dash_replies', True)
         form.limit_one_em_report_per_user.data = get_setting('limit_one_em_report_per_user', False)
         form.read_posts_cutoff.data = get_setting('read_posts_cutoff', 180)
-    return render_template('admin/misc.html', title=_('Misc settings'), form=form, close_form=close_form)
+    return render_template('admin/misc.html', title=_('Misc settings'), form=form, close_form=close_form,
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/instance_chooser', methods=['GET', 'POST'])
@@ -371,7 +378,8 @@ def admin_instance_chooser():
         form.financial_stability.data = get_setting('financial_stability', False)
         form.daily_backups.data = get_setting('daily_backups', False)
 
-    return render_template('admin/instance_chooser.html', title=_('Misc settings'), form=form)
+    return render_template('admin/instance_chooser.html', title=_('Misc settings'), form=form,
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/federation', methods=['GET', 'POST'])
@@ -431,7 +439,7 @@ def admin_federation():
         form.auto_add_remote_communities.data = get_setting('auto_add_remote_communities', False)
 
     return render_template('admin/federation.html', title=_('Federation settings'),
-                           form=form, current_app_debug=current_app.debug)
+                           form=form, current_app_debug=current_app.debug, roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/federation/preload', methods=['GET', 'POST'])
@@ -557,7 +565,8 @@ def admin_federation_preload():
         return redirect(url_for('admin.admin_federation_preload'))
 
     return render_template('admin/federation_preload.html', title=_('Federation settings - preload'),
-                           preload_form=preload_form, current_app_debug=current_app.debug)
+                           preload_form=preload_form, current_app_debug=current_app.debug,
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/federation/remote_scan', methods=['GET', 'POST'])
@@ -880,7 +889,8 @@ def admin_federation_remote_scan():
         return redirect(url_for('admin.admin_federation_remote_scan'))
 
     return render_template('admin/federation_remote_scan.html', title=_('Federation settings - remote scan'),
-                           remote_scan_form=remote_scan_form, current_app_debug=current_app.debug)
+                           remote_scan_form=remote_scan_form, current_app_debug=current_app.debug,
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/federation/ban_lists', methods=['GET', 'POST'])
@@ -965,20 +975,16 @@ def admin_federation_ban_lists():
                 banned_users.append(user_ban.ap_id)
         ban_lists_dict['banned_users'] = banned_users
 
-        # setup the BytesIO buffer
         buffer = BytesIO()
-        buffer.write(str(python_json.dumps(ban_lists_dict)).encode('utf-8'))
+        buffer.write(orjson.dumps(ban_lists_dict))
         buffer.seek(0)
 
         # send the file to the user as a download
-        # the as_attachment=True results in flask
-        # redirecting to the current page, so no
-        # url_for needed here
         return send_file(buffer, download_name=f'{current_app.config["SERVER_NAME"]}_bans.json', as_attachment=True,
                          mimetype='application/json')
 
     return render_template('admin/federation_ban_lists.html', title=_('Federation settings - ban lists'),
-                           ban_lists_form=ban_lists_form, current_app_debug=current_app.debug)
+                           ban_lists_form=ban_lists_form, current_app_debug=current_app.debug, roles_with=roles_with('change instance settings'))
 
 
 @celery.task
@@ -1137,7 +1143,7 @@ def admin_activities():
                        direction=direction_filter) if activities.has_prev and page != 1 else None
 
     return render_template('admin/activities.html', title=_('ActivityPub Log'), next_url=next_url, prev_url=prev_url,
-                           activities=activities)
+                           activities=activities, roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/activity_json/<int:activity_id>')
@@ -1166,7 +1172,7 @@ def activity_json(activity_id):
         json_html = markdown_to_html(json_md)
 
     return render_template('admin/activity_json.html', title=_('Activity JSON'), json_html=json_html,
-        activity=activity, current_app=current_app, skip_protocol_replacement=True)
+        activity=activity, current_app=current_app, skip_protocol_replacement=True, roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/activity_json/<int:activity_id>/replay')
@@ -1187,6 +1193,9 @@ def admin_communities():
     page = request.args.get('page', 1, type=int)
     search = request.args.get('search', '')
     sort_by = request.args.get('sort_by', 'title ASC')
+    page_length = 500
+    if current_user.page_length and current_user.page_length < page_length:
+        page_length = current_user.page_length
 
     communities = Community.query
     if search:
@@ -1194,7 +1203,7 @@ def admin_communities():
     communities = communities.order_by(safe_order_by(sort_by, Community, {'title', 'topic_id', 'subscriptions_count',
                                                                           'show_popular', 'show_all', 'post_count',
                                                                           'content_retention', 'nsfw', 'post_reply_count', 'last_active'}))
-    communities = communities.paginate(page=page, per_page=1000, error_out=False)
+    communities = communities.paginate(page=page, per_page=page_length, error_out=False)
 
     next_url = url_for('admin.admin_communities', page=communities.next_num, search=search,
                        sort_by=sort_by) if communities.has_next else None
@@ -1203,7 +1212,7 @@ def admin_communities():
 
     return render_template('admin/communities.html', title=_('Communities'), next_url=next_url, prev_url=prev_url,
                            communities=communities,
-                           search=search, sort_by=sort_by,
+                           search=search, sort_by=sort_by, roles_with=roles_with('administer all communities')
                            )
 
 
@@ -1224,7 +1233,7 @@ def admin_communities_no_topic():
 
     return render_template('admin/communities.html', title=_('Communities with no topic'), next_url=next_url,
                            prev_url=prev_url,
-                           communities=communities)
+                           communities=communities, roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/communities/low-quality', methods=['GET'])
@@ -1246,7 +1255,7 @@ def admin_communities_low_quality():
 
     return render_template('admin/communities.html', title=_('Communities with low_quality == True'), next_url=next_url,
                            prev_url=prev_url,
-                           communities=communities)
+                           communities=communities, roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/communities/un-moderated', methods=['GET'])
@@ -1270,7 +1279,7 @@ def admin_communities_unmoderated():
 
     return render_template('admin/communities.html', title=_('Unmoderated communities'), next_url=next_url,
                            prev_url=prev_url,
-                           communities=communities)
+                           communities=communities, roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/community/<int:community_id>/edit', methods=['GET', 'POST'])
@@ -1368,7 +1377,8 @@ def admin_community_edit(community_id):
         form.always_translate.data = community.always_translate
         form.can_be_archived.data = community.can_be_archived
         form.downvote_accept_mode.data = community.downvote_accept_mode
-    return render_template('admin/edit_community.html', title=_('Edit community'), form=form, community=community)
+    return render_template('admin/edit_community.html', title=_('Edit community'), form=form, community=community,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/community/<int:community_id>/delete', methods=['POST'])
@@ -1426,7 +1436,67 @@ def unsubscribe_everyone_then_delete_task(community_id):
 @login_required
 def admin_topics():
     topics = topic_tree()
-    return render_template('admin/topics.html', title=_('Topics'), topics=topics)
+    return render_template('admin/topics.html', title=_('Topics'), topics=topics,
+                           roles_with=roles_with('administer all communities'))
+
+
+@bp.route('/topics/export', methods=['GET'])
+@permission_required('administer all communities')
+@login_required
+def admin_topics_export():
+    topics = topic_tree()
+
+    # Convert topic tree to JSON-serializable format
+    topics_data = serialize_topic_tree(topics)
+    
+    # Create JSON buffer for send_file to use
+    buffer = BytesIO()
+    buffer.write(orjson.dumps(topics_data, option=orjson.OPT_INDENT_2))
+    buffer.seek(0)
+    
+    return send_file(
+        buffer, 
+        download_name=f'{current_app.config["SERVER_NAME"]}_topics.json', 
+        as_attachment=True,
+        mimetype='application/json'
+    )
+
+
+@bp.route('/topics/import', methods=['GET', 'POST'])
+@permission_required('administer all communities')
+@login_required
+def admin_topics_import():
+    form = TopicImportForm()
+    if form.validate_on_submit():
+        import_file = form.import_file.data
+        
+        if import_file:
+            file_content = import_file.read()
+            
+            try:
+                topics_data = orjson.loads(file_content)
+
+                for topic_data in topics_data:
+                    create_topic_and_children(topic_data, None)
+                
+                db.session.commit()
+                
+                cache.delete_memoized(menu_topics)
+                cache.delete_memoized(topic_tree)
+                
+                flash(_('Topics imported successfully!'))
+                return redirect(url_for('admin.admin_topics'))
+                
+            except Exception as e:
+                current_app.logger.error(f"Error importing topics: {e}")
+                flash(_('Error importing topics: %(error)s', error=str(e)), 'error')
+                if current_app.debug:
+                    raise e
+        else:
+            flash(_('No file uploaded'), 'error')
+    
+    return render_template('admin/topic_import.html', title=_('Topic import'), form=form,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/topic/add', methods=['GET', 'POST'])
@@ -1451,7 +1521,8 @@ def admin_topic_add():
         flash(_('Saved'))
         return redirect(url_for('admin.admin_topics'))
 
-    return render_template('admin/edit_topic.html', title=_('Add topic'), form=form)
+    return render_template('admin/edit_topic.html', title=_('Add topic'), form=form,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/topic/<int:topic_id>/edit', methods=['GET', 'POST'])
@@ -1484,7 +1555,8 @@ def admin_topic_edit(topic_id):
         form.show_posts_in_children.data = topic.show_posts_in_children
         if topic.countries and len(topic.countries):
             form.countries.data = "\n".join(topic.countries)
-    return render_template('admin/edit_topic.html', title=_('Edit topic'), form=form, topic=topic)
+    return render_template('admin/edit_topic.html', title=_('Edit topic'), form=form, topic=topic,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/topic/<int:topic_id>/delete', methods=['POST'])
@@ -1515,6 +1587,9 @@ def admin_users():
     sort_by = request.args.get('sort_by', 'last_seen DESC')
     last_seen = request.args.get('last_seen', 0, type=int)
     verified = request.args.get('verified', '')
+    page_length = 500
+    if current_user.page_length and current_user.page_length < page_length:
+        page_length = current_user.page_length
 
     sort_by_btn = request.args.get('sort_by_btn', '')
     if sort_by_btn:
@@ -1536,7 +1611,7 @@ def admin_users():
     elif verified == 'unverified':
         users = users.filter(User.verified == False)
     users = users.order_by(safe_order_by(sort_by, User, {'user_name', 'banned', 'reports', 'attitude', 'reputation', 'created', 'last_seen'}))
-    users = users.paginate(page=page, per_page=500, error_out=False)
+    users = users.paginate(page=page, per_page=page_length, error_out=False)
 
     next_url = url_for('admin.admin_users', page=users.next_num, search=search, local_remote=local_remote,
                        sort_by=sort_by, last_seen=last_seen) if users.has_next else None
@@ -1545,7 +1620,8 @@ def admin_users():
 
     return render_template('admin/users.html', title=_('Users'), next_url=next_url, prev_url=prev_url, users=users,
                            local_remote=local_remote, search=search, sort_by=sort_by, last_seen=last_seen,
-                           user_notes=user_notes(current_user.get_id()), verified=verified)
+                           user_notes=user_notes(current_user.get_id()), verified=verified,
+                           roles_with=roles_with('administer all users'))
 
 
 @bp.route('/content', methods=['GET'])
@@ -1620,6 +1696,7 @@ def admin_content():
                            posts_replies=posts_replies, show=show, days=days,
                            reported_posts=reported_posts(current_user.get_id(), current_user.get_id() in g.admin_ids),
                            moderated_community_ids=moderating_communities_ids(current_user.get_id()),
+                           roles_with=roles_with('administer all communities')
                            )
 
 
@@ -1639,6 +1716,7 @@ def admin_approve_registrations():
     return render_template('admin/approve_registrations.html',
                            registrations=registrations, disposable_domains=disposable_domains,
                            recently_approved=recently_approved,
+                           roles_with=roles_with('approve registrations')
                            )
 
 
@@ -1768,7 +1846,9 @@ def admin_user_edit(user_id):
         if user.roles and user.roles.count() > 0:
             form.role.data = user.roles[0].id
 
-    return render_template('admin/edit_user.html', title=_('Edit user'), form=form, user=user)
+    return render_template('admin/edit_user.html', title=_('Edit user'), form=form, user=user,
+                           roles_with=roles_with('administer all users'))
+
 
 @bp.route('/user/<int:user_id>/resend_email', methods=['POST'])
 @permission_required('administer all users')
@@ -1850,7 +1930,8 @@ def admin_users_add():
         flash(_('User added'))
         return redirect(url_for('admin.admin_users', local_remote='local'))
 
-    return render_template('admin/add_user.html', title=_('Add user'), form=form, user=user)
+    return render_template('admin/add_user.html', title=_('Add user'), form=form, user=user,
+                           roles_with=roles_with('administer all users'))
 
 
 @bp.route('/user/<int:user_id>/delete', methods=['POST'])
@@ -1867,23 +1948,45 @@ def admin_user_delete(user_id):
     user.deleted_by = current_user.id
     db.session.commit()
 
-    if user.is_local():
-        if user.private_key is not None:  # They have a private key once the registration is fully completed
-            unsubscribe_from_everything_then_delete(user.id)
-        else:  # Non-finalized users can just be deleted as they will not have been federated anywhere.
-            user.deleted = True
-            user.delete_dependencies()
-            db.session.commit()
+    if current_app.debug:
+        admin_user_delete_task(user_id, current_user.id)
     else:
-        user.deleted = True
-        user.delete_dependencies()
-        db.session.commit()
-
-        add_to_modlog('delete_user', actor=current_user, target_user=user, link_text=user.display_name(), link=user.link())
+        admin_user_delete_task.delay(user_id, current_user.id)
 
     flash(_('User deleted'))
     return redirect(referrer())
 
+
+@celery.task
+def admin_user_delete_task(user_id, current_user_id):
+    with current_app.app_context():
+        session = get_task_session()
+        try:
+            with patch_db_session(session):
+                user: User = session.query(User).get(user_id)
+                current_usr = session.query(User).get(current_user_id)
+                if user:
+                    if user.is_local():
+                        if user.private_key is not None:  # They have a private key once the registration is fully completed
+                            unsubscribe_from_everything_then_delete(user.id)
+                        else:  # Non-finalized users can just be deleted as they will not have been federated anywhere.
+                            user.delete_dependencies()
+                            db.session.execute(text('UPDATE "user" SET deleted = true, banned = true WHERE id = :user_id'),
+                                               {'user_id': user.id})
+                            db.session.commit()
+                    else:
+                        user.delete_dependencies()
+                        db.session.execute(text('UPDATE "user" SET deleted = true, banned = true WHERE id = :user_id'), {'user_id': user.id})
+                        db.session.commit()
+
+                        add_to_modlog('delete_user', actor=current_usr, target_user=user, link_text=user.display_name(),
+                                      link=user.link())
+
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
 
 @bp.route('/reports', methods=['GET'])
@@ -1911,7 +2014,9 @@ def admin_reports():
     prev_url = url_for('admin.admin_reports', page=reports.prev_num) if reports.has_prev and page != 1 else None
 
     return render_template('admin/reports.html', title=_('Reports'), next_url=next_url, prev_url=prev_url,
-                           reports=reports, local_remote=local_remote, search=search, report_types=report_types, report_types_list=ReportTypes.get_choices())
+                           reports=reports, local_remote=local_remote, search=search, report_types=report_types,
+                           report_types_list=ReportTypes.get_choices(),
+                           roles_with=roles_with('administer all users'))
 
 
 @bp.route('/newsletter', methods=['GET', 'POST'])
@@ -1924,7 +2029,8 @@ def newsletter():
         flash(_('Newsletter sent'))
         return redirect(url_for('admin.newsletter'))
 
-    return render_template("admin/newsletter.html", form=form, title=_('Send newsletter'))
+    return render_template("admin/newsletter.html", form=form, title=_('Send newsletter'),
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/permissions', methods=['GET', 'POST'])
@@ -1951,7 +2057,8 @@ def admin_permissions():
     permissions = db.session.execute(text('SELECT DISTINCT permission FROM "role_permission"')).fetchall()
 
     return render_template('admin/permissions.html', title=_('Role permissions'), roles=roles,
-                           form=form, permissions=permissions)
+                           form=form, permissions=permissions,
+                           roles_with=roles_with('change user roles'))
 
 
 @bp.route('/instances', methods=['GET', 'POST'])
@@ -2000,7 +2107,8 @@ def admin_instances():
     return render_template('admin/instances.html', instances=instances,
                            title=_(title), search=search, filter=filter, sort_by=sort_by,
                            next_url=next_url, prev_url=prev_url,
-                           low_bandwidth=low_bandwidth)
+                           low_bandwidth=low_bandwidth,
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/instance/<int:instance_id>/edit', methods=['GET', 'POST'])
@@ -2049,7 +2157,8 @@ def admin_instance_edit(instance_id):
                                       {'domain': instance.domain}).scalar_one_or_none()
             form.hide.data = hide
 
-    return render_template('admin/edit_instance.html', title=_('Edit instance'), form=form, instance=instance)
+    return render_template('admin/edit_instance.html', title=_('Edit instance'), form=form, instance=instance,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/instance/create_offline', methods=['GET', 'POST'])
@@ -2071,7 +2180,8 @@ def admin_instance_create_offline():
             
         return redirect(url_for("admin.admin_instances"))
     
-    return render_template("admin/create_offline_instance.html", form=form)
+    return render_template("admin/create_offline_instance.html", form=form,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/community/<int:community_id>/move/<int:new_owner>', methods=['GET', 'POST'])
@@ -2129,7 +2239,8 @@ def admin_community_move(community_id, new_owner):
 
     form.new_url.data = community.name
 
-    return render_template('admin/community_move.html', title=_('Move community'), form=form, community=community)
+    return render_template('admin/community_move.html', title=_('Move community'), form=form, community=community,
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/blocked_images', methods=['GET'])
@@ -2140,7 +2251,8 @@ def admin_blocked_images():
     blocked_images = BlockedImage.query.order_by(desc(BlockedImage.id)).all()
     return render_template('admin/blocked_images.html', blocked_images=blocked_images,
                            title=_('Blocked images'),
-                           low_bandwidth=low_bandwidth)
+                           low_bandwidth=low_bandwidth,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/blocked_image/<int:image_id>/edit', methods=['GET', 'POST'])
@@ -2163,7 +2275,7 @@ def admin_blocked_image_edit(image_id):
         form.note.data = image.note
 
     return render_template('admin/edit_blocked_image.html', title=_('Edit blocked image'), form=form,
-                           blocked_image=image)
+                           blocked_image=image, roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/blocked_image/add', methods=['GET', 'POST'])
@@ -2188,7 +2300,8 @@ def admin_blocked_image_add():
 
     flash(_('Provide the url of an image or the hash (and file name) of it, but not both.'))
 
-    return render_template('admin/edit_blocked_image.html', title=_('Add blocked image'), form=form)
+    return render_template('admin/edit_blocked_image.html', title=_('Add blocked image'), form=form,
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/block_image_purge_posts', methods=['GET', 'POST'])
@@ -2209,7 +2322,8 @@ def admin_blocked_image_purge_posts():
     posts = Post.query.filter(Post.id.in_(posts_with_blocked_images()), Post.deleted == False).order_by(desc(Post.posted_at)).all()
     return render_template('post/post_block_image_purge_posts.html', posts=posts,
                            title=_('Posts containing blocked images'),
-                           form=form, referrer=request.args.get('referrer'))
+                           form=form, referrer=request.args.get('referrer'),
+                           roles_with=roles_with('administer all communities'))
 
 
 @bp.route('/blocked_image/<int:image_id>/delete', methods=['POST'])
@@ -2232,7 +2346,8 @@ def admin_blocked_image_delete(image_id):
 @login_required
 def admin_cms_pages():
     pages = CmsPage.query.order_by(CmsPage.created_at.desc()).all()
-    return render_template('admin/cms_pages.html', pages=pages, title=_('CMS Pages'))
+    return render_template('admin/cms_pages.html', pages=pages, title=_('CMS Pages'),
+                           roles_with=roles_with('edit cms pages'))
 
 
 @bp.route('/pages/add', methods=['GET', 'POST'])
@@ -2248,7 +2363,8 @@ def admin_cms_page_add():
         flash(_('Page saved.'))
         return redirect(url_for('admin.admin_cms_pages'))
 
-    return render_template('admin/cms_page_edit.html', form=form, title=_('Add CMS Page'))
+    return render_template('admin/cms_page_edit.html', form=form, title=_('Add CMS Page'),
+                           roles_with=roles_with('edit cms pages'))
 
 
 @bp.route('/pages/<int:page_id>/edit', methods=['GET', 'POST'])
@@ -2269,7 +2385,8 @@ def admin_cms_page_edit(page_id):
         flash(_('Page saved.'))
         return redirect(url_for('admin.admin_cms_pages'))
 
-    return render_template('admin/cms_page_edit.html', form=form, page=page, title=_('Edit page'))
+    return render_template('admin/cms_page_edit.html', form=form, page=page, title=_('Edit page'),
+                           roles_with=roles_with('edit cms pages'))
 
 
 @bp.route('/pages/<int:page_id>/delete', methods=['POST'])
@@ -2289,7 +2406,8 @@ def admin_cms_page_delete(page_id):
 @login_required
 def admin_emoji():
     emojis = Emoji.query.order_by(Emoji.token).all()
-    return render_template('admin/emoji.html', emojis=emojis, title=_('Emoji'))
+    return render_template('admin/emoji.html', emojis=emojis, title=_('Emoji'),
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/emoji/add', methods=['GET', 'POST'])
@@ -2306,7 +2424,8 @@ def admin_emoji_add():
         flash(_('Emoji saved.'))
         return redirect(url_for('admin.admin_emoji'))
 
-    return render_template('admin/emoji_edit.html', form=form, title=_('Add Emoji'))
+    return render_template('admin/emoji_edit.html', form=form, title=_('Add Emoji'),
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/emoji/<int:emoji_id>/edit', methods=['GET', 'POST'])
@@ -2326,7 +2445,8 @@ def admin_emoji_edit(emoji_id):
         flash(_('Emoji saved.'))
         return redirect(url_for('admin.admin_emoji'))
 
-    return render_template('admin/emoji_edit.html', form=form, page=emoji, title=_('Edit Emoji'))
+    return render_template('admin/emoji_edit.html', form=form, page=emoji, title=_('Edit Emoji'),
+                           roles_with=roles_with('change instance settings'))
 
 
 @bp.route('/emoji/<int:emoji_id>/delete', methods=['POST'])
@@ -2373,3 +2493,63 @@ def perf_test():
     result.append(f"Time: {elapsed:.3f} seconds")
     result.append(f"Iterations per second: {N / elapsed:,.0f}")
     return "<br>".join(result)
+
+
+@bp.route('/media', methods=['GET', 'POST'])
+@permission_required('administer all communities')
+@login_required
+def admin_media():
+    page = request.args.get('page', 1, int)
+    user_id = request.args.get('user_id', 0, int)
+    files = File.query.join(user_file).filter(user_file.c.file_id == File.id)
+    if user_id:
+        files = files.filter(user_file.c.user_id == user_id)
+
+    files = files.order_by(desc(File.id)).paginate(page=page, per_page=100, error_out=False)
+    next_url = url_for('admin.admin_media', page=files.next_num, user_id=user_id) if files.has_next else None
+    prev_url = url_for('admin.admin_media', page=files.prev_num, user_id=user_id) if files.has_prev and page != 1 else None
+
+    return render_template('admin/media.html', files=files,
+                           next_url=next_url, prev_url=prev_url, user_id=user_id,
+                           roles_with=roles_with('administer all communities'))
+
+
+@bp.route('/media/<int:file_id>/delete', methods=['POST'])
+@permission_required('administer all users')
+@login_required
+def admin_media_delete(file_id):
+    file = File.query.get_or_404(file_id)
+    process_file_delete(file.source_url, file.user.first().id)
+    flash(_('File deleted.'))
+    return redirect(referrer(url_for('admin.admin_media')))
+
+
+@bp.route('/media/<int:user_id>/delete_all', methods=['POST'])
+@permission_required('administer all users')
+@login_required
+def admin_media_delete_all(user_id):
+    if current_app.debug:
+        delete_user_files_in_background(user_id)
+    else:
+        delete_user_files_in_background.delay(user_id)
+    flash(_('Files deleted in the background - this might take a while.'))
+    return redirect(url_for('admin.admin_media'))
+
+
+@celery.task
+def delete_user_files_in_background(user_id):
+    with current_app.app_context():
+        session = get_task_session()
+        try:
+            with patch_db_session(session):
+
+                files = session.query(File).join(user_file).filter(user_file.c.file_id == File.id)
+                files = files.filter(user_file.c.user_id == user_id)
+                for file in files:
+                    process_file_delete(file.source_url, file.user.first().id)
+
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()

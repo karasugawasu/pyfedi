@@ -10,8 +10,10 @@ from sqlalchemy import text, desc
 
 from app import db, celery
 from app.activitypub.signature import default_context, send_post_request
+from app.community.routes import do_subscribe
+from app.community.util import search_for_community
 from app.constants import POST_TYPE_IMAGE
-from app.models import User, Community, Instance, CommunityMember, Post
+from app.models import User, Community, Instance, CommunityMember, Post, Topic
 from app.utils import gibberish, topic_tree, get_request, store_files_in_s3, ensure_directory_exists, guess_mime_type, get_task_session, patch_db_session
 
 
@@ -53,9 +55,8 @@ def unsubscribe_from_everything_then_delete_task(user_id):
                             if instance.inbox and instance.online() and instance.id != 1:  # instance id 1 is always the current instance
                                 send_post_request(instance.inbox, payload, user.private_key, f"{user.public_url()}#main-key")
 
-                user.banned = True
-                user.deleted = True
                 user.delete_dependencies()
+                db.session.execute(text('UPDATE "user" SET deleted = true, banned = true WHERE id = :user_id'), {'user_id': user.id})
                 session.commit()
         except Exception:
             session.rollback()
@@ -170,7 +171,7 @@ def move_community_images_to_here(community_id):
                                                    {'post_type': POST_TYPE_IMAGE, 'community_id': community_id}).scalars())
 
                 if store_files_in_s3():
-                    extra_args = {'ContentType': content_type}
+                    extra_args = {}
                     if current_app.config.get('S3_STORAGE_CLASS'):
                         extra_args['StorageClass'] = current_app.config['S3_STORAGE_CLASS']
                     if current_app.config.get('S3_PUBLIC_ACL'):
@@ -190,6 +191,7 @@ def move_community_images_to_here(community_id):
                             if post.image.source_url.startswith('app/static/media'):
                                 if os.path.isfile(post.image.source_url):
                                     content_type = guess_mime_type(post.image.source_url)
+                                    extra_args['ContentType'] = content_type
                                     new_path = post.image.source_url.replace('app/static/media/', "")
                                     s3.upload_file(post.image.source_url, current_app.config['S3_BUCKET'], new_path,
                                                    ExtraArgs=extra_args)
@@ -321,3 +323,98 @@ def switch_to_unsilenced(instance_id, trusted: bool):
     db.session.execute(
         text('UPDATE "community" SET show_all = true, show_popular = :show_popular WHERE instance_id = :instance_id'),
         {'show_popular': trusted, 'instance_id': instance_id})
+
+
+def serialize_topic_tree(topic_tree_data):
+    """Convert topic tree data to JSON-serializable format."""
+    result = []
+    for item in topic_tree_data:
+        result.append(serialize_topic_node(item))
+    return result
+
+
+def serialize_topic_node(node):
+    """Convert a topic node to JSON-serializable format."""
+    topic = node['topic']
+    return {
+        'id': topic.id,
+        'machine_name': topic.machine_name,
+        'name': topic.name,
+        'num_communities': topic.num_communities,
+        'parent_id': topic.parent_id,
+        'show_posts_in_children': topic.show_posts_in_children,
+        'countries': list(topic.countries) if topic.countries else [],
+        'communities': [community.lemmy_link() for community in topic.communities.all() if not (community.local_only or community.private)],
+        'children': serialize_topic_tree(node['children'])
+    }
+
+
+def create_topic_and_children(topic_data, parent_new_topic):
+    """Recursively create a topic and its children, including adding communities."""
+
+    new_topic = Topic(
+        machine_name=topic_data['machine_name'],
+        name=topic_data['name'],
+        num_communities=0,  # Will be updated later
+        parent_id=None,     # Will be updated later
+        show_posts_in_children=topic_data.get('show_posts_in_children', False),
+        countries=topic_data.get('countries', []) or []
+    )
+
+    db.session.add(new_topic)
+    db.session.flush()  # Get the topic ID assigned
+
+    new_topic.parent_id = parent_new_topic.id if parent_new_topic else None
+
+    if current_app.debug:
+        process_topic_communities(topic_data, new_topic.id)
+    else:
+        process_topic_communities.delay(topic_data, new_topic.id)
+
+    # Recursively create child topics and communities
+    for child_data in topic_data.get('children', []):
+        create_topic_and_children(child_data, new_topic)
+
+    db.session.commit()
+
+
+@celery.task
+def process_topic_communities(topic_data, topic_id):
+    """Process communities for a topic, subscribing to unknown ones."""
+
+    with current_app.app_context():
+        session = get_task_session()
+        try:
+            with patch_db_session(session):
+                communities_links = topic_data.get('communities', [])
+                if not communities_links:
+                    return
+
+                for community_link in communities_links:
+                    try:
+                        community = search_for_community(community_link)
+                    except Exception:
+                        community = None
+
+                    if community is not None:
+                        existing_membership = session.query(CommunityMember).filter_by(community_id=community.id, user_id=1).first()
+
+                        if existing_membership is None:
+                            if current_app.debug:
+                                do_subscribe(community.ap_id, 1, admin_preload=True)
+                            else:
+                                do_subscribe.delay(community.ap_id, 1, admin_preload=True)
+
+                        # Assign community to topic
+                        community.topic_id = topic_id
+                        session.execute(text('UPDATE "topic" SET num_communities = num_communities + 1 WHERE id = :topic_id'), {
+                            'topic_id': topic_id
+                        })
+                        session.commit()
+                    else:
+                        current_app.logger.warning(f"Community {community_link} not found, skipping")
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()

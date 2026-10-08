@@ -203,7 +203,7 @@ def register(app):
             staff_role.permissions.append(RolePermission(permission='approve registrations'))
             staff_role.permissions.append(RolePermission(permission='ban users'))
             staff_role.permissions.append(RolePermission(permission='administer all communities'))
-            staff_role.permissions.append(RolePermission(permission='administer all users'))
+            staff_role.permissions.append(RolePermission(permission='manage users'))
             db.session.add(staff_role)
 
             admin_role = Role(name='Admin', weight=3)
@@ -1342,7 +1342,7 @@ def register(app):
                     item_body = item.get('description') or item.get('summary') or ''
 
                     input_data = {
-                        'title': item_title,
+                        'title': shorten_string(item_title, 250),
                         'url': strip_tracking(item_url),
                         'body': shorten_string(html_to_text(item_body), 500),
                         'language_id': site_language_id(g.site),  # Default language. Can this be found in the rss feed?

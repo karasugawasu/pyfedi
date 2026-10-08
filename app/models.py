@@ -356,6 +356,14 @@ post_file = db.Table('post_file', db.Column('post_id', db.Integer, db.ForeignKey
                       )
 
 
+user_file = db.Table('user_file',
+                     db.Column('user_id', db.Integer, db.ForeignKey('user.id')),
+                     db.Column('file_id', db.Integer, db.ForeignKey('file.id')),
+                     db.Column('size', db.Integer),
+                     db.PrimaryKeyConstraint('user_id', 'file_id')
+                     )
+
+
 class File(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     file_path = db.Column(db.String(255))
@@ -368,6 +376,8 @@ class File(db.Model):
     thumbnail_width = db.Column(db.Integer)
     thumbnail_height = db.Column(db.Integer)
     hash = db.Column(BIT(256), index=True)
+
+    user = db.relationship('User', lazy='dynamic', secondary=user_file)
 
     def view_url(self, resize=False):
         if self.source_url:
@@ -401,6 +411,13 @@ class File(db.Model):
             return self.thumbnail_path
         thumbnail_path = self.thumbnail_path[4:] if self.thumbnail_path.startswith('app/') else self.thumbnail_path
         return f"{current_app.config['SERVER_URL']}/{thumbnail_path}"   # image paths must include fqdn (not just starting with /) because apps need to make a request from outside
+
+    def is_image(self):
+        common_image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.avif', '.svg+xml',
+                                   '.svg+xml; charset=utf-8']
+        parsed_url = urlparse(self.thumbnail_url())
+        path = parsed_url.path.lower()
+        return any(path.endswith(extension) for extension in common_image_extensions)
 
     def delete_from_disk(self, purge_cdn=True):
         purge_from_cache = []
@@ -922,14 +939,6 @@ user_role = db.Table('user_role',
                      db.PrimaryKeyConstraint('user_id', 'role_id')
                      )
 
-
-user_file = db.Table('user_file',
-                     db.Column('user_id', db.Integer, db.ForeignKey('user.id')),
-                     db.Column('file_id', db.Integer, db.ForeignKey('file.id')),
-                     db.Column('size', db.Integer),
-                     db.PrimaryKeyConstraint('user_id', 'file_id')
-                     )
-
 # table to hold users' read post ids
 read_posts = db.Table('read_posts',
                       db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True, nullable=False),
@@ -1236,6 +1245,9 @@ class User(UserMixin, db.Model):
         else:
             return False
 
+    def is_rss_bot(self):
+        return self.bot and self.is_local() and self.user_name == 'feed_bot'
+
     def trustworthy(self):
         if self.is_admin():
             return True
@@ -1441,18 +1453,45 @@ class User(UserMixin, db.Model):
         return User.query.get(id)
 
     def delete_dependencies(self):
-        if self.cover_id:
-            file = db.session.query(File).get(self.cover_id)
-            file.delete_from_disk()
-            self.cover_id = None
-            db.session.delete(file)
-        if self.avatar_id:
-            file = db.session.query(File).get(self.avatar_id)
-            file.delete_from_disk()
-            self.avatar_id = None
-            db.session.delete(file)
+        # Get cover and avatar file IDs before clearing references
+        cover_file_id = self.cover_id
+        avatar_file_id = self.avatar_id
+        
+        # Clear references first
+        self.cover_id = None
+        self.avatar_id = None
+        db.session.flush()
+        
         if self.waiting_for_approval():
             db.session.query(UserRegistration).filter(UserRegistration.user_id == self.id).delete()
+        
+        # Handle user_file associations
+        user_files = db.session.query(File).join(user_file).filter(user_file.c.user_id == self.id).all()
+        for file in user_files:
+            file.delete_from_disk(purge_cdn=False)
+            db.session.execute(text('DELETE FROM "user_file" WHERE file_id = :file_id'), {'file_id': file.id})
+        
+        # Now handle cover and avatar files - delete them one at a time
+        # after checking they're no longer referenced
+        for file_id in [cover_file_id, avatar_file_id]:
+            if file_id is None:
+                continue
+            file = db.session.query(File).get(file_id)
+            if file is None:
+                continue
+            
+            # Check if any user still references this file
+            if db.session.query(User).filter(
+                or_(User.cover_id == file_id, User.avatar_id == file_id)
+            ).count() > 0:
+                continue
+            # Check user_file table
+            if db.session.query(user_file).filter(user_file.c.file_id == file_id).count() > 0:
+                continue
+            
+            # Safe to delete
+            file.delete_from_disk()
+            db.session.delete(file)
         db.session.execute(text('DELETE FROM "post_vote" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.execute(text('DELETE FROM "post_reply_vote" WHERE user_id = :user_id'), {'user_id': self.id})
         db.session.execute(text('DELETE FROM "user_role" WHERE user_id = :user_id'), {'user_id': self.id})
@@ -1589,8 +1628,8 @@ class User(UserMixin, db.Model):
 
         return True
 
-    # instances that have users which follow this user. (excluding the current instance)
-    def following_instances(self, include_dormant=False, software='') -> List[Instance]:
+    # instances that have users which follow this user. (excluding the current instance). Optionally limit to instances of the specificed software type
+    def following_instances(self, include_dormant=False, software: List[str] | None = None) -> List[Instance]:
         instances = db.session.query(Instance).join(User, User.instance_id == Instance.id).\
             join(UserFollower, UserFollower.remote_user_id == User.id).filter(UserFollower.local_user_id == self.id,
                                                                               UserFollower.is_inward == True)
@@ -1598,7 +1637,10 @@ class User(UserMixin, db.Model):
             instances = instances.filter(Instance.dormant == False)
         instances = instances.filter(Instance.id != 1, Instance.gone_forever == False)
         if software:
-            instances = instances.filter(Instance.software == software)
+            if len(software) == 1:
+                instances = instances.filter(Instance.software == software[0])
+            else:
+                instances = instances.filter(Instance.software.in_(software))
         return instances.distinct().all()
 
     def is_following(self, other_user) -> str:
@@ -2265,7 +2307,7 @@ class Post(db.Model):
                 from app.utils import get_request, notify_admin
                 try:
                     is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={post.ap_id}")
-                except Exception as e:
+                except Exception:
                     is_ai = None
                 if is_ai and is_ai.status_code == 200:
                     is_ai_result = is_ai.json()
@@ -2517,6 +2559,9 @@ class Post(db.Model):
 
     def is_microblog(self):
         return self.microblog and self.community.name == 'microblogs'
+
+    def is_event(self):
+        return self.type == constants.POST_TYPE_EVENT
 
     def profile_id(self):
         if self.ap_id:
@@ -3043,7 +3088,7 @@ class PostReply(db.Model):
             from app.utils import get_request, notify_admin
             try:
                 is_ai = get_request(f"{current_app.config['DETECT_AI_ENDPOINT']}?url={reply.ap_id}")
-            except Exception as e:
+            except Exception:
                 is_ai = None
             if is_ai and is_ai.status_code == 200:
                 is_ai_result = is_ai.json()

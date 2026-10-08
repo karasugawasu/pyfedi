@@ -66,7 +66,7 @@ from app.models import CronJobLog, Settings, Domain, Instance, BannedInstances, 
     Site, Post, utcnow, Filter, CommunityMember, InstanceBlock, CommunityBan, Topic, UserBlock, Language, \
     File, ModLog, CommunityBlock, Feed, FeedMember, CommunityFlair, CommunityJoinRequest, Notification, UserNote, \
     PostReply, PostReplyBookmark, AllowedInstances, InstanceBan, Tag, Emoji, UserExtraField, ArchivedPostReply, \
-    RevokedToken, CommunityFavorite, UserFollower, CommunityFlairBlock
+    RevokedToken, CommunityFavorite, UserFollower, CommunityFlairBlock, Role, RolePermission
 
 logger = logging.getLogger(__name__)
 
@@ -892,7 +892,7 @@ def handle_better_lists(text: str) -> str:
     # Step 3: Define regex for beginning of line of each list type
     re_numbered_list = re.compile(r'^\d+\.\s+')
     re_bulleted_list = re.compile(r'^-\s+')
-    
+
     # Step 4: Loop through the lines, inserting an extra entry where needed to help markdown processing
     new_text_list = []  # list that will store processed text, each item is a line of text
     prev_line = ""
@@ -902,12 +902,12 @@ def handle_better_lists(text: str) -> str:
             prev_line = line
             new_text_list.append(line)
             continue
-        
+
         # Check for bulleted lists preceded by hyphen and space
         if re.search(re_bulleted_list, line) and not re.search(re_bulleted_list, prev_line):
             # First line in a bulleted list, insert a blank line first to make it render correctly
             new_text_list.append("")
-        
+
         # Check for numbered lists preceded by number(s), period, and then space
         if re.search(re_numbered_list, line) and not re.search(re_numbered_list, prev_line):
             # First line in a numbered list, insert a blank line first to make it render correctly
@@ -1993,7 +1993,7 @@ def can_create_post(user, content: Community) -> bool:
     if content.banned:
         return False
 
-    if content.is_moderator(user) or user.is_admin():
+    if user.is_rss_bot() or content.is_moderator(user) or user.is_admin():
         return True
 
     if content.restricted_to_mods:
@@ -4162,38 +4162,6 @@ def orjson_response(obj, status=200, headers=None):
     )
 
 
-def is_valid_xml_utf8(pystring):
-    """Check if a string is like valid UTF-8 XML content."""
-    if isinstance(pystring, str):
-        pystring = pystring.encode('utf-8', errors='ignore')
-
-    s = pystring
-    c_end = len(s)
-    i = 0
-
-    while i < c_end - 2:
-        if s[i] & 0x80:
-            # Check for forbidden characters
-            if i + 2 < c_end:
-                next3 = (s[i] << 16) | (s[i + 1] << 8) | s[i + 2]
-                # 0xefbfbe and 0xefbfbf are utf-8 encodings of forbidden characters \ufffe and \uffff
-                if next3 == 0xefbfbe or next3 == 0xefbfbf:
-                    return False
-                # 0xeda080 and 0xedbfbf are utf-8 encodings of \ud800 and \udfff (surrogate blocks)
-                if 0xeda080 <= next3 <= 0xedbfbf:
-                    return False
-        elif s[i] < 9 or s[i] == 11 or s[i] == 12 or (14 <= s[i] <= 31) or s[i] == 127:
-            return False  # invalid ascii char
-        i += 1
-
-    while i < c_end:
-        if not (s[i] & 0x80) and (s[i] < 9 or s[i] == 11 or s[i] == 12 or (14 <= s[i] <= 31) or s[i] == 127):
-            return False  # invalid ascii char
-        i += 1
-
-    return True
-
-
 def archive_post(post_id: int, s3_connection):
     session = get_task_session()  # noqa: F811
     try:
@@ -4831,3 +4799,19 @@ def inspect_image_c2pa(data: bytes, mimetype: str) -> dict:
         # No C2PA manifest, unsupported format, etc.
         pass
     return result
+
+def get_event_start(post_id: int):
+    post = Post.query.get(post_id)
+
+    if post and post.is_event():
+        if getattr(post.event, "start", False):
+            return post.event.start
+
+    return None
+
+
+def roles_with(permission):
+    roles = Role.query.join(RolePermission, Role.id == RolePermission.role_id).\
+        filter(RolePermission.permission == permission).\
+        order_by(Role.weight)
+    return ', '.join([role.name for role in roles.all()])
