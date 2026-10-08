@@ -1970,18 +1970,18 @@ class Post(db.Model):
             post.url = request_json['object']['attachment']['url']
 
         # MicroBlogかつ画像等なしでURLを含む投稿の場合はリンクタイプにする
-        if not post.url and post.microblog:
-            soup = BeautifulSoup(post.body_html or "", "html.parser")
-            for a in soup.find_all("a", href=True):
-                classes = set(a.get("class") or [])
-                rels = set(a.get("rel") or [])
-                if classes & {"mention", "hashtag"}:
-                    continue
-                href = a["href"]
-                if "/tags/" in href:
-                    continue
-                post.url = a["href"]
-                break
+        # if not post.url and post.microblog:
+        #     soup = BeautifulSoup(post.body_html or "", "html.parser")
+        #     for a in soup.find_all("a", href=True):
+        #         classes = set(a.get("class") or [])
+        #         rels = set(a.get("rel") or [])
+        #         if classes & {"mention", "hashtag"}:
+        #             continue
+        #         href = a["href"]
+        #         if "/tags/" in href:
+        #             continue
+        #         post.url = a["href"]
+        #         break
         # tagにtextが含まれてたらリンクタイプにしない
         if post.microblog:
             tags = request_json.get('object', {}).get('tag', [])

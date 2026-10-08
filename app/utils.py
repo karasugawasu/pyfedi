@@ -1137,9 +1137,35 @@ def microblog_content_to_title(html: str) -> Tuple[str, str]:
 def microblog_content_to_link(html: str, exclude: str):
     soup = BeautifulSoup(html, "html.parser")
 
-    for link in soup.find_all("a"):
-        if furl(link.get("href")).host != exclude:
-            return link.get("href")
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "").strip()
+        if not href or not href.startswith(("http://", "https://")):
+            continue
+
+        # 1. 自身の class 属性をチェック
+        raw_classes = link.get("class") or []
+        classes = set(raw_classes.split()) if isinstance(raw_classes, str) else set(raw_classes)
+
+        # 2. 親要素 (h-card など) の class 属性をチェック
+        parent_classes = set()
+        if link.parent:
+            p_cls = link.parent.get("class") or []
+            parent_classes = set(p_cls.split()) if isinstance(p_cls, str) else set(p_cls)
+
+        # メンションやハッシュタグ関連のクラスを持つものはスキップ
+        if (classes | parent_classes) & {"mention", "hashtag", "h-card", "u-url"}:
+            continue
+
+        # タグリンクを除外
+        if "/tags/" in href:
+            continue
+
+        try:
+            if furl(href).host != exclude:
+                return href
+        except Exception:
+            continue
+
     return None
 
 
