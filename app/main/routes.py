@@ -5,6 +5,7 @@ from datetime import timedelta, timezone
 from random import randint
 
 import flask
+from feedgen.feed import FeedGenerator
 from markupsafe import Markup
 from pyld import jsonld
 from sqlalchemy import or_, and_, func
@@ -16,7 +17,6 @@ from app.activitypub.util import users_total, active_month, local_posts, local_c
 from app.activitypub.signature import default_context, LDSignature, HttpSignature
 from app.admin.util import topics_for_form
 from app.api.alpha.utils.misc import get_resolve_object
-from app.community.util import hashtags_recent
 from app.constants import SUBSCRIPTION_PENDING, SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, \
     POST_STATUS_REVIEWING, VERSION
 from app.email import send_email, send_registration_approved_email
@@ -30,7 +30,6 @@ from sqlalchemy import desc, text
 from app.main.forms import ShareLinkForm
 from app.main.util import sidebar_active_communities, sidebar_new_instances, sidebar_upcoming_events, \
     sidebar_new_communities, _base_list_communities_context, reload_url
-from app.shared.tasks.maintenance import refresh_instance_chooser
 from app.translation import LibreTranslateAPI
 from app.utils import render_template, get_setting, request_etag_matches, return_304, blocked_domains, \
     ap_datetime, shorten_string, user_filters_home, \
