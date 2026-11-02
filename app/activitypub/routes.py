@@ -168,7 +168,7 @@ def process_webfinger_request(resource):
 
 
 @bp.route('/.well-known/nodeinfo')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def nodeinfo():
     nodeinfo_data = {"links": [{"rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
                                 "href": f"{current_app.config['SERVER_URL']}/nodeinfo/2.0"},
@@ -190,7 +190,7 @@ def host_meta():
 
 @bp.route('/nodeinfo/2.0')
 @bp.route('/nodeinfo/2.0.json')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def nodeinfo2():
     nodeinfo_data = {
         "version": "2.0",
@@ -217,7 +217,7 @@ def nodeinfo2():
 
 @bp.route('/nodeinfo/2.1')
 @bp.route('/nodeinfo/2.1.json')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def nodeinfo21():
     nodeinfo_data = {
         "version": "2.1",
@@ -258,7 +258,7 @@ def nodeinfo21():
 
 
 @bp.route('/api/v1/instance')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def api_v1_instance():
     retval = {
         'title': g.site.name,
@@ -399,6 +399,7 @@ def user_profile(actor):
                           "indexable": user.indexable,
                           "acceptPrivateMessages": user.accept_private_messages,
                           "manuallyApprovesFollowers": False if not user.ap_manually_approves_followers else user.ap_manually_approves_followers,
+                          "reposter": user.reposter,
                           "publicKey": {
                               "id": f"{user.public_url()}#main-key",
                               "owner": user.public_url(),
@@ -1490,7 +1491,12 @@ def process_inbox_request(request_json, store_ap_json):
                                                                                         community_id=community_to_remove.id).delete()
                                             session.query(CommunityJoinRequest).filter_by(user_id=fm_user.id,
                                                                                              community_id=community_to_remove.id).delete()
-                                            community_to_remove.subscriptions_count -= 1
+                                            # Only decrement subscriptions_count for local users (ap_id == None)
+                                            if fm_user.ap_id is None:
+                                                community_to_remove.subscriptions_count -= 1
+                                            # Only decrement total_subscriptions_count for local communities
+                                            if community_to_remove.is_local():
+                                                community_to_remove.total_subscriptions_count -= 1
                                             session.commit()
                                             log_incoming_ap(id, APLOG_REMOVE, APLOG_SUCCESS, saved_json,
                                                             f'{fm_user.user_name} auto-unfollowed {community_to_remove.ap_public_url} during a feed/remove')
@@ -1653,7 +1659,12 @@ def process_inbox_request(request_json, store_ap_json):
                                                                                 community_id=community.id).first()
                             if member:
                                 session.delete(member)
-                                community.subscriptions_count -= 1
+                                # Only decrement subscriptions_count for local users (ap_id == None)
+                                if user.ap_id is None:
+                                    community.subscriptions_count -= 1
+                                # Only decrement total_subscriptions_count for local communities
+                                if community.is_local():
+                                    community.total_subscriptions_count -= 1
                                 community.last_active = utcnow()
                                 user.last_seen = utcnow()
                             if join_request:
@@ -1958,6 +1969,8 @@ def community_outbox(actor):
     actor = actor.strip()
     community = Community.query.filter_by(name=actor, banned=False, ap_id=None).first()
     if community is not None:
+        if community.local_only or community.private:
+            abort(403)
         sticky_posts = Post.query.filter(Post.community_id == community.id).filter(Post.sticky == True, Post.deleted == False,
                                          Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).limit(50).all()
         remaining_limit = 50 - len(sticky_posts)
@@ -1989,7 +2002,9 @@ def community_featured(actor):
     actor = actor.strip()
     community = Community.query.filter_by(name=actor, banned=False, ap_id=None).first()
     if community is not None:
-        posts = Post.query.filter_by(community_id=community.id, sticky=True, deleted=False).all()
+        if community.local_only or community.private:
+            abort(403)
+        posts = Post.query.filter_by(community_id=community.id, sticky=True, deleted=False, status=POST_STATUS_PUBLISHED).all()
 
         community_data = {
             "@context": default_context(),
