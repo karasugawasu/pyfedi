@@ -6,7 +6,6 @@ from random import randint
 
 import flask
 from feedgen.feed import FeedGenerator
-from furl import furl
 from markupsafe import Markup
 from pyld import jsonld
 from sqlalchemy import or_, and_, func
@@ -19,7 +18,7 @@ from app.activitypub.signature import default_context, LDSignature, HttpSignatur
 from app.admin.util import topics_for_form
 from app.api.alpha.utils.misc import get_resolve_object
 from app.constants import SUBSCRIPTION_PENDING, SUBSCRIPTION_MEMBER, SUBSCRIPTION_OWNER, SUBSCRIPTION_MODERATOR, \
-    POST_STATUS_REVIEWING
+    POST_STATUS_REVIEWING, VERSION
 from app.email import send_email, send_registration_approved_email
 from app.inoculation import inoculation
 from app.main import bp
@@ -177,7 +176,7 @@ def home_page(sort, view_filter, page, result_id, low_bandwidth, tag):
         recently_upvoted = []
         recently_downvoted = []
         communities_banned_from_list = []
-    
+
     user_id = current_user.get_id()
 
     rss_token = f'?token={current_user.rss_token}' if current_user.is_authenticated else ''
@@ -337,12 +336,12 @@ def list_communities():
 
     if language_id != 0:
         communities = communities.join(community_language).filter(community_language.c.language_id == language_id)
-    
+
     if home_select == "local":
         communities = communities.filter(Community.ap_id == None)
     elif home_select == "remote":
         communities = communities.filter(Community.ap_id != None)
-    
+
     if subscribe_select != "any":
         # get the user's joined communities
         user_joined_communities = joined_communities(current_user.get_id())
@@ -353,7 +352,7 @@ def list_communities():
             joined_ids.append(jc.id)
         for mc in user_moderating_communities:
             joined_ids.append(mc.id)
-        
+
         if subscribe_select == "subscribed":
             # filter down to just the joined communities
             communities = communities.filter(Community.id.in_(joined_ids))
@@ -372,7 +371,7 @@ def list_communities():
 
     is_admin = current_user.is_authenticated and current_user.is_admin()
 
-    # if filtering by public feed 
+    # if filtering by public feed
     # get all the ids of the communities
     # then filter the communites to ones whose ids match the feed
     if feed_id != 0:
@@ -381,11 +380,11 @@ def list_communities():
         for item in feed_items:
             feed_community_ids.append(item.community_id)
         communities = communities.filter(Community.id.in_(feed_community_ids))
-    
+
     # if filtering by home instance
     if instance:
         communities = communities.filter(Community.ap_domain == instance)
-    
+
     hide_nsfw = False
 
     if current_user.is_authenticated:
@@ -443,13 +442,13 @@ def list_communities():
     context = _base_list_communities_context()
     context["next_url"] = url_for('main.list_communities', page=communities.next_num, sort_by=sort_by,
                        **args_dict) if communities.has_next else None
-    context["prev_url"] = url_for('main.list_communities', page=communities.prev_num, sort_by=sort_by, 
+    context["prev_url"] = url_for('main.list_communities', page=communities.prev_num, sort_by=sort_by,
                        **args_dict) if communities.has_prev and page != 1 else None
 
     context.update({
         "communities": communities,
         "search": search_param,
-        "title": _('Communities'), 
+        "title": _('Communities'),
         "intance": instance,
         "home_select": home_select,
         "topics": topics,
@@ -1148,11 +1147,11 @@ def static_manifest():
     manifest['id'] = f'{current_app.config["SERVER_URL"]}'
     manifest['name'] = g.site.name if g.site.name else 'PieFed'
     manifest['description'] = g.site.description if g.site.description else ''
-    
+
     # Update icons to use custom logos with fallbacks
     logo_512 = get_setting('logo_512', '')
     logo_192 = get_setting('logo_192', '')
-    
+
     # Update the icons array
     for icon in manifest.get('icons', []):
         if icon.get('sizes') == '192x192':
@@ -1178,7 +1177,7 @@ def list_feeds():
     if search_param == '':
         # find all the feeds marked as public
         public_feeds = feed_tree_public()
-        
+
     else:
         # find all the feeds marked as public that match the search param
         public_feeds = feed_tree_public(search_param)
@@ -1394,13 +1393,13 @@ def anoobis():
     next = request.args.get('next')
     if next is None:
         return ''
-    f = furl(next)
-    if next and (f.host is None or f.host == current_app.config['SERVER_NAME']) and (f.scheme is None or f.scheme.startswith('http')):
+    # Only allow local paths (check_anoobis always passes request.path). Reject '//host' and '/\host' which browsers
+    # treat as another site, and anything that isn't a plain path, e.g. 'javascript:' or ' javascript:'.
+    if next.startswith('/') and not next.startswith('//') and not next.startswith('/\\'):
         return render_template('anoobis.html', next=next, diff_desktop=current_app.config['ANOOBIS_DIFFICULTY_DESKTOP'],
                                diff_mobile=current_app.config['ANOOBIS_DIFFICULTY_MOBILE'])
     else:
-        raise Exception(f'Anoobis error: {f.host} != {current_app.config["SERVER_NAME"]}')
-        abort(403)
+        raise Exception(f'Anoobis error: invalid next {next!r}')
 
 
 @bp.route('/bot_challenge/<uuid>')
@@ -1433,7 +1432,7 @@ def receive_webhook():
 
     if not payload:
         return jsonify({"error": "no payload received"}), 400
-    
+
     plugins.fire_hook("webhook", payload)
 
     return '', 202

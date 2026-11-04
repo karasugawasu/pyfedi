@@ -37,7 +37,7 @@ from app.utils import gibberish, get_setting, community_membership, ap_datetime,
     feed_membership, get_task_session, patch_db_session, \
     blocked_phrases, orjson_response, moderating_communities, joined_communities, moderating_communities_ids, \
     moderating_communities_ids_all_users, publish_sse_event, blocked_users, block_honey_pot, instance_allowed, \
-    requestor_domain
+    requestor_domain, markdown_to_html, allowlist_html
 
 @bp.route('/testredis')
 def testredis_get():
@@ -167,7 +167,7 @@ def process_webfinger_request(resource):
 
 
 @bp.route('/.well-known/nodeinfo')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def nodeinfo():
     nodeinfo_data = {"links": [{"rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
                                 "href": f"{current_app.config['SERVER_URL']}/nodeinfo/2.0"},
@@ -189,7 +189,7 @@ def host_meta():
 
 @bp.route('/nodeinfo/2.0')
 @bp.route('/nodeinfo/2.0.json')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def nodeinfo2():
     nodeinfo_data = {
         "version": "2.0",
@@ -216,7 +216,7 @@ def nodeinfo2():
 
 @bp.route('/nodeinfo/2.1')
 @bp.route('/nodeinfo/2.1.json')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def nodeinfo21():
     nodeinfo_data = {
         "version": "2.1",
@@ -257,7 +257,7 @@ def nodeinfo21():
 
 
 @bp.route('/api/v1/instance')
-@cache.cached(timeout=600)
+@cache.cached(timeout=3600)
 def api_v1_instance():
     retval = {
         'title': g.site.name,
@@ -398,6 +398,7 @@ def user_profile(actor):
                           "indexable": user.indexable,
                           "acceptPrivateMessages": user.accept_private_messages,
                           "manuallyApprovesFollowers": False if not user.ap_manually_approves_followers else user.ap_manually_approves_followers,
+                          "reposter": user.reposter,
                           "publicKey": {
                               "id": f"{user.public_url()}#main-key",
                               "owner": user.public_url(),
@@ -689,17 +690,6 @@ def shared_inbox():
             except VerificationError as e:
                 log_incoming_ap(id, APLOG_NOTYPE, APLOG_FAILURE, saved_json, 'Could not verify LD signature: ' + str(e))
                 return '', 400
-        elif (
-                actor.ap_profile_id == 'https://fediseer.com/api/v1/user/fediseer' and  # accept unsigned chat message from fediseer for API key
-                request_json['type'] == 'Create' and isinstance(request_json['object'], dict) and
-                'type' in request_json['object'] and request_json['object']['type'] == 'ChatMessage'):
-            ...
-        # no HTTP sig, and no LD sig, so reduce the inner object to just its remote ID, and then fetch it and check it in process_inbox_request()
-        # Removed due to potential security issues. This will probably break PeerTube federation, unfortunately.
-        #elif ((request_json['type'] == 'Create' or request_json['type'] == 'Update') and
-        #      isinstance(request_json['object'], dict) and 'id' in request_json['object'] and isinstance(
-        #            request_json['object']['id'], str)):
-        #    request_json['object'] = request_json['object']['id']
         else:
             log_incoming_ap(id, APLOG_NOTYPE, APLOG_FAILURE, saved_json, 'Could not verify HTTP signature: ' + str(e))
             return '', 400
@@ -1242,7 +1232,7 @@ def process_inbox_request(request_json, store_ap_json):
                         feed = session.query(Feed).filter_by(ap_public_url=core_activity['object']['id']).first()
 
                         # make sure the user sending the delete owns the feed
-                        if not user.id == feed.user_id:
+                        if feed and not user.id == feed.user_id:
                             log_incoming_ap(id, APLOG_DELETE, APLOG_FAILURE, saved_json, 'Delete rejected, request came from non-owner.')
                             return
 
@@ -1281,12 +1271,14 @@ def process_inbox_request(request_json, store_ap_json):
                         if to_delete.deleted:
                             log_incoming_ap(id, APLOG_DELETE, APLOG_IGNORED, saved_json,
                                             'Activity about local content which is already deleted')
+                        elif announced and (community is None or to_delete.community_id != community.id):
+                            # When Announced, the inner actor is unverified so only the content's own community can vouch for it
+                            log_incoming_ap(id, APLOG_DELETE, APLOG_FAILURE, saved_json, 'Delete: Announced by a different community')
                         else:
                             reason = core_activity['summary'] if 'summary' in core_activity else ''
-                            delete_post_or_comment(user, to_delete, store_ap_json, request_json, reason)
-                            if not announced:
+                            if delete_post_or_comment(user, to_delete, store_ap_json, request_json, reason) and not announced:
                                 announce_activity_to_followers(to_delete.community, user, request_json)
-                    else:
+                    elif not announced:
                         # no content found. check if it was a PM
                         updated_message = session.query(ChatMessage).filter_by(ap_id=ap_id, sender_id=user.id).first()
                         if updated_message:
@@ -1339,7 +1331,10 @@ def process_inbox_request(request_json, store_ap_json):
                             post_reply = PostReply.get_by_ap_id(core_activity['object'])
                     reason = core_activity['summary'] if 'summary' in core_activity else ''
                     if post:
-                        if post.community.is_moderator(mod) or post.community.is_instance_admin(mod):
+                        # When Announced, the inner actor is unverified so only the post's own community can vouch for it
+                        if announced and (community is None or post.community_id != community.id):
+                            log_incoming_ap(id, APLOG_LOCK, APLOG_FAILURE, saved_json, 'Lock: Announced by a different community')
+                        elif post.community.is_moderator(mod) or post.community.is_instance_admin(mod):
                             post.comments_enabled = False
                             session.commit()
                             add_to_modlog('lock_post', actor=mod, target_user=post.author, reason=reason,
@@ -1349,14 +1344,16 @@ def process_inbox_request(request_json, store_ap_json):
                         else:
                             log_incoming_ap(id, APLOG_LOCK, APLOG_FAILURE, saved_json, 'Lock: Does not have permission')
                     elif post_reply:
-                        if post_reply.community.is_moderator(mod) or post.community.is_instance_admin(mod):
+                        if announced and (community is None or post_reply.community_id != community.id):
+                            log_incoming_ap(id, APLOG_LOCK, APLOG_FAILURE, saved_json, 'Lock: Announced by a different community')
+                        elif post_reply.community.is_moderator(mod) or post_reply.community.is_instance_admin(mod):
                             post_reply.replies_enabled = False
                             session.execute(text(
                                 'update post_reply set replies_enabled = :replies_enabled where path @> ARRAY[:parent_id]'),
                                                {'parent_id': post_reply.id, 'replies_enabled': False})
                             session.commit()
-                            add_to_modlog('lock_post_reply', actor=mod, target_user=post.author, reason=reason,
-                                          community=post.community, reply=post_reply,
+                            add_to_modlog('lock_post_reply', actor=mod, target_user=post_reply.author, reason=reason,
+                                          community=post_reply.community, reply=post_reply,
                                           link_text=shorten_string(post_reply.body), link=f'post/{post_reply.post_id}#comment_{post_reply.id}')
                             log_incoming_ap(id, APLOG_LOCK, APLOG_SUCCESS, saved_json)
                         else:
@@ -1400,7 +1397,9 @@ def process_inbox_request(request_json, store_ap_json):
                         moderators_url = community.ap_moderators_url
                         if target.lower() == featured_url.lower():
                             post = Post.get_by_ap_id(core_activity['object'])
-                            if post:
+                            if post and post.community_id != community.id:
+                                log_incoming_ap(id, APLOG_ADD, APLOG_FAILURE, saved_json, 'Post is not in this community')
+                            elif post:
                                 post.sticky = True
                                 session.commit()
                                 log_incoming_ap(id, APLOG_ADD, APLOG_SUCCESS, saved_json)
@@ -1491,7 +1490,12 @@ def process_inbox_request(request_json, store_ap_json):
                                                                                         community_id=community_to_remove.id).delete()
                                             session.query(CommunityJoinRequest).filter_by(user_id=fm_user.id,
                                                                                              community_id=community_to_remove.id).delete()
-                                            community_to_remove.subscriptions_count -= 1
+                                            # Only decrement subscriptions_count for local users (ap_id == None)
+                                            if fm_user.ap_id is None:
+                                                community_to_remove.subscriptions_count -= 1
+                                            # Only decrement total_subscriptions_count for local communities
+                                            if community_to_remove.is_local():
+                                                community_to_remove.total_subscriptions_count -= 1
                                             session.commit()
                                             log_incoming_ap(id, APLOG_REMOVE, APLOG_SUCCESS, saved_json,
                                                             f'{fm_user.user_name} auto-unfollowed {community_to_remove.ap_public_url} during a feed/remove')
@@ -1506,7 +1510,9 @@ def process_inbox_request(request_json, store_ap_json):
                         moderators_url = community.ap_moderators_url
                         if target.lower() == featured_url.lower():
                             post = Post.get_by_ap_id(core_activity['object'])
-                            if post:
+                            if post and post.community_id != community.id:
+                                log_incoming_ap(id, APLOG_REMOVE, APLOG_FAILURE, saved_json, 'Post is not in this community')
+                            elif post:
                                 post.sticky = False
                                 session.commit()
                                 log_incoming_ap(id, APLOG_REMOVE, APLOG_SUCCESS, saved_json)
@@ -1652,7 +1658,12 @@ def process_inbox_request(request_json, store_ap_json):
                                                                                 community_id=community.id).first()
                             if member:
                                 session.delete(member)
-                                community.subscriptions_count -= 1
+                                # Only decrement subscriptions_count for local users (ap_id == None)
+                                if user.ap_id is None:
+                                    community.subscriptions_count -= 1
+                                # Only decrement total_subscriptions_count for local communities
+                                if community.is_local():
+                                    community.total_subscriptions_count -= 1
                                 community.last_active = utcnow()
                                 user.last_seen = utcnow()
                             if join_request:
@@ -1701,12 +1712,14 @@ def process_inbox_request(request_json, store_ap_json):
                             if not to_restore.deleted:
                                 log_incoming_ap(id, APLOG_UNDO_DELETE, APLOG_IGNORED, saved_json,
                                                 'Activity about local content which is already restored')
+                            elif announced and (community is None or to_restore.community_id != community.id):
+                                # When Announced, the inner actor is unverified so only the content's own community can vouch for it
+                                log_incoming_ap(id, APLOG_UNDO_DELETE, APLOG_FAILURE, saved_json, 'Restore: Announced by a different community')
                             else:
                                 reason = core_activity['object']['summary'] if 'summary' in core_activity['object'] else ''
-                                restore_post_or_comment(restorer, to_restore, store_ap_json, request_json, reason)
-                                if not announced:
+                                if restore_post_or_comment(restorer, to_restore, store_ap_json, request_json, reason) and not announced:
                                     announce_activity_to_followers(to_restore.community, user, request_json)
-                        else:
+                        elif not announced:
                             # no content found. check if it was a PM
                             updated_message = session.query(ChatMessage).filter_by(ap_id=ap_id, sender_id=restorer.id).first()
                             if updated_message:
@@ -1734,9 +1747,9 @@ def process_inbox_request(request_json, store_ap_json):
                         post = None
                         post_reply = None
                         target_ap_id = core_activity['object']['object']
-                        if '/post/' in core_activity['object']:
+                        if '/post/' in target_ap_id:
                             post = Post.get_by_ap_id(target_ap_id)
-                        elif '/comment/' in core_activity['object']:
+                        elif '/comment/' in target_ap_id:
                             post_reply = PostReply.get_by_ap_id(target_ap_id)
                         else:
                             post = Post.get_by_ap_id(target_ap_id)
@@ -1744,7 +1757,10 @@ def process_inbox_request(request_json, store_ap_json):
                                 post_reply = PostReply.get_by_ap_id(target_ap_id)
                         reason = core_activity['summary'] if 'summary' in core_activity else ''
                         if post:
-                            if post.community.is_moderator(mod) or post.community.is_instance_admin(mod):
+                            # When Announced, the inner actor is unverified so only the post's own community can vouch for it
+                            if announced and (community is None or post.community_id != community.id):
+                                log_incoming_ap(id, APLOG_LOCK, APLOG_FAILURE, saved_json, 'Unlock: Announced by a different community')
+                            elif post.community.is_moderator(mod) or post.community.is_instance_admin(mod):
                                 post.comments_enabled = True
                                 session.commit()
                                 add_to_modlog('unlock_post', actor=mod, target_user=post.author, reason=reason,
@@ -1753,15 +1769,17 @@ def process_inbox_request(request_json, store_ap_json):
                                 log_incoming_ap(id, APLOG_LOCK, APLOG_SUCCESS, saved_json)
                             else:
                                 log_incoming_ap(id, APLOG_LOCK, APLOG_FAILURE, saved_json, 'Unlock: Does not have permission')
-                        if post_reply:
-                            if post_reply.community.is_moderator(mod) or post_reply.community.is_instance_admin(mod):
+                        elif post_reply:
+                            if announced and (community is None or post_reply.community_id != community.id):
+                                log_incoming_ap(id, APLOG_LOCK, APLOG_FAILURE, saved_json, 'Unlock: Announced by a different community')
+                            elif post_reply.community.is_moderator(mod) or post_reply.community.is_instance_admin(mod):
                                 post_reply.replies_enabled = True
-                                db.session.execute(text(
+                                session.execute(text(
                                     'update post_reply set replies_enabled = :replies_enabled where path @> ARRAY[:parent_id]'),
                                                    {'parent_id': post_reply.id, 'replies_enabled': True})
                                 session.commit()
-                                add_to_modlog('unlock_post_reply', actor=mod, target_user=post.author, reason=reason,
-                                              community=post.community, reply=post_reply,
+                                add_to_modlog('unlock_post_reply', actor=mod, target_user=post_reply.author, reason=reason,
+                                              community=post_reply.community, reply=post_reply,
                                               link_text=shorten_string(post_reply.body), link=f'post/{post_reply.post_id}#comment_{post_reply.id}')
                                 log_incoming_ap(id, APLOG_LOCK, APLOG_SUCCESS, saved_json)
                             else:
@@ -1973,6 +1991,8 @@ def community_outbox(actor):
     actor = actor.strip()
     community = Community.query.filter_by(name=actor, banned=False, ap_id=None).first()
     if community is not None:
+        if community.local_only or community.private:
+            abort(403)
         sticky_posts = Post.query.filter(Post.community_id == community.id).filter(Post.sticky == True, Post.deleted == False,
                                          Post.status > POST_STATUS_REVIEWING).order_by(desc(Post.posted_at)).limit(50).all()
         remaining_limit = 50 - len(sticky_posts)
@@ -2004,7 +2024,9 @@ def community_featured(actor):
     actor = actor.strip()
     community = Community.query.filter_by(name=actor, banned=False, ap_id=None).first()
     if community is not None:
-        posts = Post.query.filter_by(community_id=community.id, sticky=True, deleted=False).all()
+        if community.local_only or community.private:
+            abort(403)
+        posts = Post.query.filter_by(community_id=community.id, sticky=True, deleted=False, status=POST_STATUS_PUBLISHED).all()
 
         community_data = {
             "@context": default_context(),
@@ -2610,10 +2632,14 @@ def process_chat(user, store_ap_json, core_activity, session):
             if not updated_message:
                 new_message = ChatMessage(sender_id=sender.id, recipient_id=recipient.id,
                                           conversation_id=existing_conversation.id,
-                                          body_html=core_activity['object']['content'],
-                                          body=html_to_text(core_activity['object']['content']),
                                           encrypted=encrypted,
                                           ap_id=core_activity['object']['id'])
+                if 'source' in core_activity['object'] and core_activity['object']['source']['content']:
+                    new_message.body = core_activity['object']['source']['content']
+                    new_message.body_html = markdown_to_html(core_activity['object']['source']['content'], allow_img=False)
+                else:
+                    new_message.body_html = allowlist_html(core_activity['object']['content'])
+                    new_message.body = html_to_text(core_activity['object']['content'])
                 session.add(new_message)
                 existing_conversation.updated_at = utcnow()
                 session.commit()
